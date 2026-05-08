@@ -1,0 +1,15 @@
+# Finetuning sweep — loads from a pretrained checkpoint
+# Update pretrained_checkpoint to point to your saved .ckpt
+name: finetune
+noise_path: data/HF_filtered_background
+drone_path: data/HF_filtered_drone
+description: Tests finetuning from a pretrained checkpoint vs training from scratch
+base_flags: --arch resnet18 --lr 1e-4 --mixup-alpha 0.2 --epochs 15 --patience 0
+pretrained_checkpoint: checkpoints/my_pretrained.ckpt  # ← UPDATE THIS
+configs:
+  - name: "01_from_scratch"
+    flags: ""
+  - name: "02_finetune"
+    flags: --finetune-from checkpoints/my_pretrained.ckpt
+  - name: "03_finetune_lr_1e-5"
+    flags: --finetune-from checkpoints/my_pretrained.ckpt --lr 1e-5

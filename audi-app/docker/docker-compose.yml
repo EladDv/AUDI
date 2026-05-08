@@ -1,0 +1,44 @@
+# =============================================================================
+# AUDI — Docker Compose (Raspberry Pi)
+# =============================================================================
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# For Pi audio passthrough, run with:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.pi.yml up -d
+#
+# To see logs:
+#   docker compose -f docker/docker-compose.yml logs -f
+# =============================================================================
+
+services:
+  audi:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: audi:latest
+    container_name: audi
+    restart: unless-stopped
+    network_mode: host  # Simplifies Pi GPIO + ALSA access
+    volumes:
+      # Persistent audio storage (up to 32GB)
+      - audio_data:/data/recordings
+      # ALSA config (optional)
+      - /etc/asound.conf:/etc/asound.conf:ro
+    devices:
+      - /dev/snd:/dev/snd     # ALSA audio devices
+    environment:
+      - AUDIO_DEVICE=${AUDIO_DEVICE:-default}
+      - TZ=${TZ:-UTC}
+    ports:
+      - "8080:8080"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  audio_data:
+    driver: local

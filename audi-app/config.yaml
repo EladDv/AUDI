@@ -1,0 +1,89 @@
+# =============================================================================
+# AUDI — Type A Configuration
+# =============================================================================
+
+# --- Audio Recording ---
+audio:
+  device: "auto"                    # ALSA device name — 'auto' discovers first USB device, or use 'hw:2,0'
+  sample_rate: 16000             # Hz — 16KHz recommended for detection quality
+  bit_depth: 16                  # 16-bit PCM
+  channels: 1                    # Mono — sufficient for detection
+  segment_duration: 300          # Seconds (5 minutes) per recording segment
+  ring_buffer_seconds: 120       # In-memory buffer: 60s pre-alarm + 60s post-alarm
+  format: "wav"                  # Raw capture format (wav before compression)
+  device_retry_min: 2            # Min seconds between audio device retries
+  device_retry_max: 60           # Max (doubles on each failure)
+
+# --- Storage Ring Buffer ---
+storage:
+  max_size_gb: 32                # Max storage to use for audio (main recordings)
+  compress: true                 # Compress old segments to FLAC
+  data_dir: "./data/recordings"   # Where audio lives (bind mount for persistence)
+  min_free_gb: 1                 # Trigger cleanup when disk free drops below this
+  cleanup_watermark_gb: 5        # Free up until this much is available
+  alerts_dir: "./data/alerts"     # Alarm-triggered snapshots (not auto-evicted)
+  max_alerts_gb: 2               # Separate cap for alert snapshots
+
+# --- Detection Engine (TFLite int8) ---
+detection:
+  model_type: "tflite"
+  model_path: "./models/model.tflite"
+
+  # Model config (must match the exported TFLite model)
+  model_sample_rate: 16000       # Hz — model expects 16kHz audio
+  n_mels: 128                    # Mel filterbank bins
+  n_fft: 1024                    # FFT window size
+  hop_length: 160                # Hop length in samples
+  window_samples: 81920          # 16000 Hz × 5.12s → 512 frames (librosa center=True)
+  stride: 0.0625                 # Sliding window stride (0.0625 = 6.25% step size)
+
+  # Debug mode — logs per-window timing at DEBUG level
+  debug: true
+
+  # Mel normalization (set if model was trained with specific mean/std)
+  mel_mean: 10.43
+  mel_std: 5.29
+
+  # TFLite runtime
+  num_threads: 2                 # CPU threads for inference (Pi: 2-4)
+
+  # Inference timing
+  inference_interval: 0.320      # Seconds between inference runs
+
+  # Three output states:
+  #   YES  (confidence >= high)  → GPIO alarm + snapshot + history
+  #   BLUE (low <= conf < high)  → log + history only, no alarm
+  #   NO   (confidence < low)    → nothing
+  confidence_threshold_high: 0.80    # Triggers alarm
+  confidence_threshold_low: 0.80     # Triggers "blue" log entry
+  hysteresis_window: 5               # Hysteresis window size
+  hysteresis_ratio: 0.6              # Hysteresis ratio
+  hysteresis_margin: 0.05            # Hysteresis margin
+  alarm_cooldown_s: 60               # Exclusion period after alarm (0 = no cooldown)
+
+  labels: ["drone"]                  # Detection class label
+  alert_history_file: "./data/alerts/alert_history.json"
+
+# --- GPIO Alarm System ---
+gpio:
+  enabled: true
+  alert_pin: 22                  # Alert output — e.g. buzzer/relay
+  strobe_pin: 24                 # Strobe/visual indicator
+  reset_pin: 23                  # Physical reset button input (pull-up)
+  record_led_pin: 27             # Recording indicator LED (on when recording)
+  record_button_pin: 17          # Toggle recording on/off (pull-up input)
+  pause_button_pin: 18           # Pause recording for 5 minutes (pull-up input)
+  alert_duration_ms: 15000       # How long to hold alert active
+  pulse_interval_ms: 500         # Blink/pulse interval during alert
+
+# --- Web UI ---
+web:
+  host: "0.0.0.0"
+  port: 8080
+
+# --- Logging ---
+logging:
+  level: "DEBUG"                  # DEBUG, INFO, WARNING, ERROR
+  file: "./audio-guard.log"
+  max_size_mb: 10
+  backup_count: 3

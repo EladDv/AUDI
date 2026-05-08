@@ -1,0 +1,511 @@
+"""DroneDetector — PyTorch Lightning module for binary drone detection."""
+
+from __future__ import annotations
+
+import random
+from typing import Any
+
+import lightning as L
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchaudio.transforms as T
+
+from audi.config import MelConfig, ModelConfig, OptimizerConfig
+from audi.model import build_model
+from audi.training.validation import (
+    compute_calibration,
+    compute_pr_curve,
+    compute_precision,
+    compute_roc_values,
+    find_threshold_at_precision,
+    split_by_bin,
+    tpr_at_fpr,
+)
+from audi.training.validation_plots import (
+    render_det_pr_calibration,
+    render_spectrogram_samples,
+    render_validation_grid,
+)
+
+
+class DroneDetector(L.LightningModule):
+    """Binary drone-audio detector with mel-spectrogram frontend.
+
+    Featurization: mel spectrogram → dB → scalar normalization → 3-channel expand → backbone.
+    Supports MixUp/CutMix on spectrograms, SpecAugment, focal loss, dropout,
+    cosine LR schedule, and per-bin evaluation.
+
+    Args:
+        model: Backbone model configuration.
+        mel: Mel spectrogram parameters.
+        optimizer: Optimizer and schedule configuration.
+        bin_names: Ordered list of SNR bin names for per-bin evaluation.
+        loss_type: Loss function ("bce" or "focal").
+        label_smoothing: Label smoothing factor (0.0 = off).
+        per_bin_weights: Weight loss by SNR bin difficulty.
+        spec_augment_prob: Apply SpecAugment (freq + time masking) during training.
+        mixup_alpha: Beta distribution alpha for MixUp (0.0 = off).
+        cutmix_alpha: Beta distribution alpha for CutMix (0.0 = off).
+        dropout: Dropout probability before classifier head.
+        bn_momentum: BatchNorm momentum (higher = less drift).
+        clip_seconds: Training clip length in seconds (for eval to match).
+    """
+
+    def __init__(
+        self,
+        *,
+        model: ModelConfig | None = None,
+        mel: MelConfig | None = None,
+        optimizer: OptimizerConfig | None = None,
+        bin_names: list[str] | None = None,
+        loss_type: str = "bce",
+        label_smoothing: float = 0.0,
+        per_bin_weights: bool = False,
+        spec_augment_prob: float = 0.0,
+        mixup_alpha: float = 0.0,
+        cutmix_alpha: float = 0.0,
+        dropout: float = 0.0,
+        bn_momentum: float = 0.1,
+        clip_seconds: float = 2.56,
+    ) -> None:
+        super().__init__()
+
+        model_cfg = model or ModelConfig()
+        mel_cfg = mel or MelConfig()
+        opt_cfg = optimizer or OptimizerConfig()
+
+        self.save_hyperparameters()
+
+        # ── Mel frontend ─────────────────────────────────────────
+        self._mel_transform = T.MelSpectrogram(
+            sample_rate=mel_cfg.sample_rate,
+            n_fft=mel_cfg.n_fft,
+            hop_length=mel_cfg.hop_length,
+            n_mels=mel_cfg.n_mels,
+        )
+        self._to_db = T.AmplitudeToDB()
+
+        # Scalar mel normalization
+        if mel_cfg.mean_db is not None:
+            self.register_buffer(
+                "_mel_mean", torch.tensor(float(mel_cfg.mean_db))
+            )
+        else:
+            self._mel_mean = None
+        if mel_cfg.std_db is not None:
+            self.register_buffer(
+                "_mel_std", torch.tensor(float(mel_cfg.std_db))
+            )
+        else:
+            self._mel_std = None
+
+        # ── Backbone ─────────────────────────────────────────────
+        self.backbone = build_model(
+            arch=model_cfg.arch,
+            num_classes=model_cfg.num_classes,
+            pretrained=model_cfg.pretrained,
+        )
+        if model_cfg.compile:
+            self.backbone = torch.compile(self.backbone)  # type: ignore[assignment]  # torch.compile erases type
+
+        # BatchNorm momentum
+        if bn_momentum != 0.1:
+            for m in self.backbone.modules():
+                if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
+                    m.momentum = bn_momentum
+
+        # ── Regularization ───────────────────────────────────────
+        self._dropout_p = dropout
+        if dropout > 0:
+            self._add_classifier_dropout(dropout)
+
+        # ── Training config ──────────────────────────────────────
+        self._lr = opt_cfg.lr
+        self._weight_decay = opt_cfg.weight_decay
+        self._schedule = opt_cfg.schedule
+        self._warmup_epochs = opt_cfg.warmup_epochs
+        self._max_epochs = opt_cfg.max_epochs
+
+        self._bin_names = list(bin_names) if bin_names else []
+        self._loss_type = loss_type
+        self._label_smoothing = float(label_smoothing)
+        self._clip_seconds = float(clip_seconds)
+        self._per_bin_weights = bool(per_bin_weights)
+        self._mixup_alpha = float(mixup_alpha)
+        self._cutmix_alpha = float(cutmix_alpha)
+
+        # SpecAugment
+        self.spec_augment_prob = float(spec_augment_prob)
+        if self.spec_augment_prob > 0:
+            self._freq_mask = T.FrequencyMasking(15)
+            self._time_mask = T.TimeMasking(25)
+        else:
+            self._freq_mask = None
+            self._time_mask = None
+
+        # Per-bin loss weights
+        self._bin_weight_map: dict[str, float] = {}
+        if self._per_bin_weights and self._bin_names:
+            n = len(self._bin_names)
+            self._bin_weight_map = {
+                name: 0.5 + 2.5 * i / max(n - 1, 1)
+                for i, name in enumerate(self._bin_names)
+            }
+
+        # ── Validation buffers ──────────────────────────────────
+        self._val_logits: list[torch.Tensor] = []
+        self._val_labels: list[torch.Tensor] = []
+        self._val_bin_idx: list[torch.Tensor] = []
+        self._val_drone: list[torch.Tensor] = []
+        self._val_noise: list[torch.Tensor] = []
+        self._val_snr: list[torch.Tensor] = []
+        self._val_mix: list[torch.Tensor] = []
+
+    # ── Featurization ────────────────────────────────────────────
+
+    def _to_mel(self, wav: torch.Tensor) -> torch.Tensor:
+        """Convert waveform to normalized 3-channel mel spectrogram.
+
+        Args:
+            wav: Waveform tensor of shape ``[B, T]``.
+
+        Returns:
+            Spectrogram tensor of shape ``[B, 3, n_mels, T_frames]``.
+        """
+        mel = self._to_db(self._mel_transform(wav))
+        if self._mel_mean is not None and self._mel_std is not None:
+            mel = (mel - self._mel_mean) / self._mel_std
+        spec = mel.unsqueeze(1).expand(-1, 3, -1, -1)
+        if (
+            self._freq_mask is not None
+            and self._time_mask is not None
+            and self.training
+        ):
+            if random.random() < self.spec_augment_prob:
+                for _ in range(2):
+                    spec = self._freq_mask(spec)
+                for _ in range(2):
+                    spec = self._time_mask(spec)
+        return spec
+
+    # ── MixUp / CutMix ───────────────────────────────────────────
+
+    def _apply_mixup_cutmix(
+        self,
+        spec: torch.Tensor,
+        labels: torch.Tensor,
+        bin_idx: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Apply MixUp or CutMix on spectrograms during training."""
+        if self._mixup_alpha <= 0 and self._cutmix_alpha <= 0:
+            return spec, labels, bin_idx
+
+        use_cutmix = self._cutmix_alpha > 0 and (
+            self._mixup_alpha <= 0 or random.random() < 0.5
+        )
+        B = spec.size(0)
+        idx = torch.randperm(B, device=spec.device)
+
+        if use_cutmix:
+            lam = float(np.random.beta(self._cutmix_alpha, self._cutmix_alpha))
+            lam = max(lam, 1.0 - lam)
+            _, _, H, W = spec.shape
+            cut_h = max(1, min(int(H * np.sqrt(1.0 - lam)), H - 1))
+            cut_w = max(1, min(int(W * np.sqrt(1.0 - lam)), W - 1))
+            cy = random.randint(0, H - cut_h)
+            cx = random.randint(0, W - cut_w)
+            lam = 1.0 - (cut_h * cut_w) / (H * W)
+            spec_mix = spec.clone()
+            spec_mix[:, :, cy : cy + cut_h, cx : cx + cut_w] = spec[
+                idx, :, cy : cy + cut_h, cx : cx + cut_w
+            ]
+            labels_mix = lam * labels + (1.0 - lam) * labels[idx]
+        else:
+            lam = float(np.random.beta(self._mixup_alpha, self._mixup_alpha))
+            lam = max(lam, 1.0 - lam)
+            spec_mix = lam * spec + (1.0 - lam) * spec[idx]
+            labels_mix = lam * labels + (1.0 - lam) * labels[idx]
+
+        return spec_mix, labels_mix, bin_idx
+
+    # ── Forward ──────────────────────────────────────────────────
+
+    def forward(self, wav: torch.Tensor) -> torch.Tensor:
+        """Run detection on a waveform.
+
+        Args:
+            wav: Waveform tensor of shape ``[B, T]``.
+
+        Returns:
+            Logit tensor of shape ``[B]``.
+        """
+        return self.backbone(self._to_mel(wav)).squeeze(1)
+
+    # ── Loss ─────────────────────────────────────────────────────
+
+    def _compute_loss(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        bin_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute the training loss."""
+        if self._label_smoothing > 0:
+            targets = (
+                targets * (1 - self._label_smoothing)
+                + 0.5 * self._label_smoothing
+            )
+
+        if self._loss_type == "focal":
+            bce = F.binary_cross_entropy_with_logits(
+                logits, targets, reduction="none"
+            )
+            pt = torch.exp(-bce)
+            alpha = 0.25 * targets + 0.75 * (1 - targets)
+            loss = (alpha * (1 - pt) ** 2.0 * bce).mean()
+        else:
+            loss = F.binary_cross_entropy_with_logits(logits, targets)
+
+        if (
+            self._per_bin_weights
+            and bin_idx is not None
+            and self._bin_weight_map
+        ):
+            weights = torch.ones_like(targets)
+            for i, name in enumerate(self._bin_names):
+                mask = bin_idx == i
+                if mask.any() and name in self._bin_weight_map:
+                    weights[mask] = self._bin_weight_map[name]
+            bce_raw = F.binary_cross_entropy_with_logits(
+                logits, targets, reduction="none"
+            )
+            loss = (bce_raw * weights).mean()
+
+        return loss
+
+    # ── Training step ────────────────────────────────────────────
+
+    def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
+        """Training step with optional MixUp/CutMix."""
+        if len(batch) == 3:
+            wav, label, bin_idx = batch
+        else:
+            wav, label = batch
+            bin_idx = None
+
+        spec = self._to_mel(wav)
+        spec, label, bin_idx = self._apply_mixup_cutmix(spec, label, bin_idx)
+        logits = self.backbone(spec).squeeze(1)
+        loss = self._compute_loss(logits, label, bin_idx)
+        self.log("train_loss", loss, prog_bar=True)
+        return loss
+
+    # ── Validation step ──────────────────────────────────────────
+
+    def validation_step(self, batch: tuple, batch_idx: int) -> None:
+        """Collect validation predictions for epoch-end metrics."""
+        if len(batch) == 6:
+            wav, label, bin_idx, drone, noise, snr_val = batch
+            self._val_bin_idx.append(bin_idx.cpu())
+            self._val_drone.append(drone.cpu())
+            self._val_noise.append(noise.cpu())
+            self._val_snr.append(snr_val.cpu())
+            self._val_mix.append(wav.cpu())
+        elif len(batch) == 3:
+            wav, label, bin_idx = batch
+            self._val_bin_idx.append(bin_idx.cpu())
+        else:
+            wav, label = batch
+
+        logit = self(wav)
+        loss = F.binary_cross_entropy_with_logits(logit, label)
+        acc = ((logit > 0.0).float() == label).float().mean()
+        self.log_dict({"val_loss": loss, "val_acc": acc}, prog_bar=True)
+        self._val_logits.append(logit.detach().cpu())
+        self._val_labels.append(label.detach().cpu())
+
+    # ── Epoch lifecycle ──────────────────────────────────────────
+
+    def on_validation_epoch_start(self) -> None:
+        """Clear validation buffers."""
+        self._val_logits.clear()
+        self._val_labels.clear()
+        self._val_bin_idx.clear()
+        self._val_drone.clear()
+        self._val_noise.clear()
+        self._val_snr.clear()
+        self._val_mix.clear()
+
+    def on_validation_epoch_end(self) -> None:
+        """Compute and log validation metrics and figures."""
+        if not self._val_logits:
+            return
+
+        logits = torch.cat(self._val_logits).numpy()
+        labels = torch.cat(self._val_labels).numpy()
+        model_hp = self.hparams.get("model", {})
+        model_name = (
+            model_hp.get("arch", "model")
+            if isinstance(model_hp, dict)
+            else getattr(model_hp, "arch", "model")
+        )
+
+        # Per-bin data
+        per_bin: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        if self._val_bin_idx:
+            bin_idx = torch.cat(self._val_bin_idx).numpy()
+            bin_names_str = [
+                self._bin_names[int(i)] if i >= 0 else "" for i in bin_idx
+            ]
+            per_bin = split_by_bin(logits, labels, bin_names_str)
+
+        # ── AUC ──────────────────────────────────────────────
+        fpr, tpr, thresholds, auc = compute_roc_values(logits, labels)
+        self.log("val/auc", auc, prog_bar=False)
+
+        # ── TPR at FPR targets ───────────────────────────────
+        for target in [0.10, 0.05, 0.02]:
+            val = tpr_at_fpr(fpr, tpr, target)
+            self.log(
+                f"val/tpr_at_fpr_{int(target * 100):02d}", val, prog_bar=False
+            )
+
+        # ── TPR at Precision targets ─────────────────────────
+        precision = compute_precision(logits, labels, thresholds)
+        for pt in [0.99, 0.95, 0.90, 0.80]:
+            if pt < precision.min() or pt > precision.max():
+                continue
+            th_pt, tp_at_pt, _ = find_threshold_at_precision(
+                precision, tpr, thresholds, pt
+            )
+            self.log(
+                f"val/threshold_at_precision_{int(pt * 100):02d}",
+                th_pt,
+                prog_bar=False,
+            )
+            self.log(
+                f"val/tpr_at_precision_{int(pt * 100):02d}",
+                tp_at_pt,
+                prog_bar=False,
+            )
+
+        # ── Per-bin TPR ──────────────────────────────────────
+        for bn, (bl, bll) in per_bin.items():
+            bfpr, btpr, _bth, _bauc = compute_roc_values(bl, bll)
+            val = tpr_at_fpr(bfpr, btpr, 0.10)
+            self.log(f"val/bin_{bn}/tpr_at_fpr_10", val, prog_bar=False)
+
+        # ── Average Precision ────────────────────────────────
+        _, _, _, ap = compute_pr_curve(logits, labels)
+        self.log("val/average_precision", ap, prog_bar=False)
+
+        # ── Calibration ──────────────────────────────────────
+        _, _, _, ece = compute_calibration(logits, labels)
+        self.log("val/ece", ece, prog_bar=True)
+
+        # ── Figures ──────────────────────────────────────────
+        render_validation_grid(
+            logits,
+            labels,
+            per_bin,
+            epoch=self.current_epoch,
+            logger=self.logger,
+            model_name=model_name,
+            bin_order=self._bin_names,
+        )
+        render_det_pr_calibration(
+            logits,
+            labels,
+            per_bin,
+            epoch=self.current_epoch,
+            logger=self.logger,
+            model_name=model_name,
+            bin_order=self._bin_names,
+        )
+        if self._val_mix:
+            mix_all = torch.cat(self._val_mix)
+            drone_all = torch.cat(self._val_drone)
+            noise_all = torch.cat(self._val_noise)
+            snr_all = torch.cat(self._val_snr).numpy()
+            render_spectrogram_samples(
+                mix_all,
+                drone_all,
+                noise_all,
+                snr_all,
+                logits,
+                epoch=self.current_epoch,
+                logger=self.logger,
+                model_name=model_name,
+                sample_rate=16000,
+                output_dir=str(self.logger.log_dir)
+                if self.logger and self.logger.log_dir
+                else "",
+            )
+
+    # ── Optimizer ────────────────────────────────────────────────
+
+    def configure_optimizers(self) -> Any:
+        """Configure AdamW with optional cosine schedule + warmup."""
+        opt = torch.optim.AdamW(
+            self.parameters(), lr=self._lr, weight_decay=self._weight_decay
+        )
+        if self._schedule == "constant":
+            return opt
+
+        from torch.optim.lr_scheduler import (
+            CosineAnnealingLR,
+            LinearLR,
+            LRScheduler,
+            SequentialLR,
+        )
+
+        scheduler: LRScheduler
+        if self._warmup_epochs > 0:
+            warmup = LinearLR(
+                opt,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=self._warmup_epochs,
+            )
+            if self._schedule == "linear":
+                # Linear warmup → constant LR (no decay)
+                from torch.optim.lr_scheduler import ConstantLR
+
+                main = ConstantLR(opt, factor=1.0, total_iters=self._max_epochs)
+            else:
+                main = CosineAnnealingLR(opt, T_max=self._max_epochs)
+            scheduler = SequentialLR(
+                opt, schedulers=[warmup, main], milestones=[self._warmup_epochs]
+            )
+        else:
+            scheduler = CosineAnnealingLR(opt, T_max=self._max_epochs)
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+        }
+
+    # ── Dropout helper ───────────────────────────────────────────
+
+    def _add_classifier_dropout(self, p: float) -> None:
+        """Find the last Linear layer and prepend a Dropout."""
+        last_linear: torch.nn.Linear | None = None
+        parent: torch.nn.Module | None = None
+        attr_name: str | None = None
+        for name, mod in self.backbone.named_modules():
+            if isinstance(mod, torch.nn.Linear):
+                last_linear = mod
+                parts = name.rsplit(".", 1)
+                if len(parts) == 2:
+                    parent_name, child = parts
+                    parent = self.backbone
+                    for pn in parent_name.split("."):
+                        parent = getattr(parent, pn)
+                    attr_name = child
+        if (
+            last_linear is not None
+            and parent is not None
+            and attr_name is not None
+        ):
+            wrapped = torch.nn.Sequential(torch.nn.Dropout(p), last_linear)
+            setattr(parent, attr_name, wrapped)

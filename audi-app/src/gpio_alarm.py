@@ -1,0 +1,260 @@
+"""
+Pi Audio Guard — GPIO Alarm System
+
+Controls Raspberry Pi GPIO pins for:
+  - ALERT:   Buzzer/relay on detection
+  - STROBE:  Blinking LED during alarm
+  - RESET:   Physical button to clear alarm
+  - REC_LED: Recording indicator (on while capturing)
+  - REC_BTN: Toggle recording on/off
+  - PAUSE_BTN: Pause recording for 5 minutes
+
+Auto-detects Pi hardware vs dev machine (mock fallback).
+"""
+
+import logging
+import threading
+import time
+from collections.abc import Callable
+
+logger = logging.getLogger("audio_guard.gpio")
+
+# ---------------------------------------------------------------------------
+
+
+class GPIOController:
+    """Manages GPIO pins for alarm + recording + input buttons."""
+
+    def __init__(self, config: dict):
+        gpio_cfg = config.get("gpio", {})
+        self.enabled = gpio_cfg.get("enabled", True)
+
+        # Alarm pins
+        self.alert_pin = gpio_cfg.get("alert_pin", 22)
+        self.strobe_pin = gpio_cfg.get("strobe_pin", 24)
+        self.reset_pin = gpio_cfg.get("reset_pin", 23)
+
+        # Recording pins
+        self.record_led_pin = gpio_cfg.get("record_led_pin", 27)
+        self.record_button_pin = gpio_cfg.get("record_button_pin", 17)
+        self.pause_button_pin = gpio_cfg.get("pause_button_pin", 18)
+
+        self.alert_duration_ms = gpio_cfg.get("alert_duration_ms", 5000)
+        self.pulse_interval_ms = gpio_cfg.get("pulse_interval_ms", 500)
+
+        # Callbacks (set by main.py)
+        self.on_record_toggle: Callable[[], None] | None = None
+        self.on_pause_5m: Callable[[], None] | None = None
+
+        self._has_gpio = False
+        self._gpio = None
+        self._alarm_active = False
+        self._strobe_active = False
+        self._record_led_active = False
+        self._stop_event = threading.Event()
+        self._alarm_end_time: float = 0
+        self._strobe_thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+        self._init_gpio()
+
+    def _init_gpio(self):
+        if not self.enabled:
+            logger.info("GPIO disabled in config")
+            return
+        try:
+            import RPi.GPIO as GPIO
+
+            self._gpio = GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+
+            # Outputs
+            for pin in [self.alert_pin, self.strobe_pin, self.record_led_pin]:
+                logger.info("GPIO setup OUTPUT pin %d (initial LOW)", pin)
+                GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
+
+            # Inputs with pull-up
+            for pin in [
+                self.reset_pin,
+                self.record_button_pin,
+                self.pause_button_pin,
+            ]:
+                logger.info("GPIO setup INPUT pin %d (pull-up)", pin)
+                GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+            # Interrupts
+            GPIO.add_event_detect(
+                self.reset_pin,
+                GPIO.FALLING,
+                callback=self._on_reset_pressed,
+                bouncetime=300,
+            )
+            GPIO.add_event_detect(
+                self.record_button_pin,
+                GPIO.FALLING,
+                callback=self._on_record_button,
+                bouncetime=500,
+            )
+            GPIO.add_event_detect(
+                self.pause_button_pin,
+                GPIO.FALLING,
+                callback=self._on_pause_button,
+                bouncetime=500,
+            )
+
+            self._has_gpio = True
+            logger.info(
+                "GPIO initialized: ALERT=%d STROBE=%d RESET=%d "
+                "REC_LED=%d REC_BTN=%d PAUSE_BTN=%d",
+                self.alert_pin,
+                self.strobe_pin,
+                self.reset_pin,
+                self.record_led_pin,
+                self.record_button_pin,
+                self.pause_button_pin,
+            )
+        except Exception as e:
+            logger.error("GPIO init FAILED: %s", e)
+            raise RuntimeError(
+                f"GPIO is enabled in config but RPi.GPIO failed to initialize: {e}"
+            ) from e
+
+    # ------------------------------------------------------------------
+    # Alarm API
+    # ------------------------------------------------------------------
+
+    def trigger_alarm(self) -> bool:
+        with self._lock:
+            if self._alarm_active:
+                self._alarm_end_time = time.time() + (
+                    self.alert_duration_ms / 1000.0
+                )
+                return True
+            self._alarm_active = True
+            self._alarm_end_time = time.time() + (
+                self.alert_duration_ms / 1000.0
+            )
+
+        self._write_pin(self.alert_pin, True)
+        logger.warning("GPIO ALARM TRIGGERED (pin %d HIGH)", self.alert_pin)
+        # self._start_strobe()
+        threading.Thread(target=self._auto_clear_loop, daemon=True).start()
+        return True
+
+    def clear_alarm(self):
+        with self._lock:
+            if not self._alarm_active:
+                return
+            self._alarm_active = False
+            self._alarm_end_time = 0
+        self._write_pin(self.alert_pin, False)
+        self._stop_strobe()
+        logger.info("GPIO alarm cleared")
+
+    @property
+    def is_alarming(self) -> bool:
+        return self._alarm_active
+
+    # ------------------------------------------------------------------
+    # Recording LED
+    # ------------------------------------------------------------------
+
+    def set_record_led(self, on: bool):
+        self._record_led_active = on
+        self._write_pin(self.record_led_pin, on)
+
+    # ------------------------------------------------------------------
+    # Button callbacks
+    # ------------------------------------------------------------------
+
+    def _on_reset_pressed(self, channel):
+        logger.info("Reset button pressed (GPIO %d)", channel)
+        self.clear_alarm()
+
+    def _on_record_button(self, channel):
+        logger.info("Record button pressed (GPIO %d)", channel)
+        if self.on_record_toggle:
+            self.on_record_toggle()
+
+    def _on_pause_button(self, channel):
+        logger.info("Pause button pressed (GPIO %d)", channel)
+        if self.on_pause_5m:
+            self.on_pause_5m()
+
+    # ------------------------------------------------------------------
+    # Strobe
+    # ------------------------------------------------------------------
+
+    def _start_strobe(self):
+        with self._lock:
+            if self._strobe_active:
+                return
+            self._strobe_active = True
+        self._strobe_thread = threading.Thread(
+            target=self._strobe_loop, daemon=True
+        )
+        self._strobe_thread.start()
+
+    def _stop_strobe(self):
+        with self._lock:
+            self._strobe_active = False
+        self._write_pin(self.strobe_pin, False)
+
+    def _strobe_loop(self):
+        interval = self.pulse_interval_ms / 1000.0
+        while self._strobe_active and not self._stop_event.is_set():
+            self._write_pin(self.strobe_pin, True)
+            time.sleep(interval)
+            if not self._strobe_active:
+                break
+            self._write_pin(self.strobe_pin, False)
+            time.sleep(interval)
+
+    def _auto_clear_loop(self):
+        while self._alarm_active and not self._stop_event.is_set():
+            remaining = self._alarm_end_time - time.time()
+            if remaining <= 0:
+                self.clear_alarm()
+                break
+            time.sleep(min(remaining, 1.0))
+
+    # ------------------------------------------------------------------
+    # Utils
+    # ------------------------------------------------------------------
+
+    def _write_pin(self, pin: int, state: bool):
+        if self._has_gpio and self._gpio:
+            try:
+                value = self._gpio.HIGH if state else self._gpio.LOW
+                self._gpio.output(pin, value)
+                logger.debug("GPIO pin %d → %s", pin, "HIGH" if state else "LOW")
+            except Exception as e:
+                logger.error("GPIO write FAILED pin %d → %s: %s", pin, "HIGH" if state else "LOW", e)
+        else:
+            logger.error("GPIO NOT INITIALIZED — cannot write pin %d → %s", pin, "HIGH" if state else "LOW")
+
+    def status(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "has_gpio": self._has_gpio,
+            "alarming": self._alarm_active,
+            "record_led": self._record_led_active,
+            "alert_pin": self.alert_pin,
+            "strobe_pin": self.strobe_pin,
+            "reset_pin": self.reset_pin,
+            "record_led_pin": self.record_led_pin,
+            "record_button_pin": self.record_button_pin,
+            "pause_button_pin": self.pause_button_pin,
+        }
+
+    def cleanup(self):
+        self.clear_alarm()
+        self.set_record_led(False)
+        self._stop_event.set()
+        if self._has_gpio and self._gpio:
+            try:
+                self._gpio.cleanup()
+                logger.info("GPIO cleaned up")
+            except Exception:
+                pass

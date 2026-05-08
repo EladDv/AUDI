@@ -1,0 +1,18 @@
+# =============================================================================
+# Pi Audio Guard — Python Dependencies
+# =============================================================================
+# Core
+pyyaml>=6.0,<7.0
+numpy>=1.24,<2.0
+scipy>=1.10,<2.0
+librosa>=0.11.0
+
+# Web UI
+flask>=3.0,<4.0
+
+# TFLite Inference (int8 quantized models via LiteRT)
+ai-edge-litert>=2.0,<3.0
+
+# GPIO (optional — mock fallback on non-Pi)
+# rpi-lgpio provides the RPi.GPIO import/API on Raspberry Pi 5 via /dev/gpiochip.
+rpi-lgpio>=0.4,<1.0

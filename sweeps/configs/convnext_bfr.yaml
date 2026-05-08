@@ -1,0 +1,48 @@
+name: convnext_bfr
+noise_path: data/HF_dataset_v2_background
+drone_path: data/HF_dataset_v2_drone
+description: "Preserving attack coverage. Base config: 5.12s, augment, 30 epochs."
+base_flags: >-
+  --arch convnext_small --augment --lr 1e-4 --clip-seconds 5.12 --epochs 30
+  --patience 0 --noise2 data/hf_dataset_sharded_expanded_merged --batch-size 24
+configs:
+  # ── Focal loss: direct bg suppression ──
+  - name: "01_focal"
+    flags: --loss focal
+    note: >
+      Focal loss (γ=2.0, α_neg=0.75). Down-weights easy negatives —
+      those 214 bg windows the model is confused about get higher loss.
+
+  - name: "02_focal_smooth"
+    flags: --loss focal --label-smoothing 0.1
+    note: >
+      Focal + label smoothing. Smoothing prevents overconfidence on
+      noisy examples; focal handles the easy/hard imbalance.
+
+  # ── Label smoothing alone ──
+  - name: "03_smooth"
+    flags: --label-smoothing 0.15
+    note: >
+      Aggressive label smoothing (0.15) — targets become [0.075, 0.925].
+      Forces model to be less certain about every decision.
+
+  # ── Longer context ──
+  - name: "04_7.68s_focal"
+    flags: --loss focal --clip-seconds 7.68
+    note: >
+      7.68s context + focal loss. 50% more audio per window —
+      harder for short noise bursts to trigger false alarms.
+
+  - name: "05_10.24s_focal"
+    flags: --loss focal --clip-seconds 10.24
+    note: >
+      10.24s context + focal loss. Max context — a passing car
+      sounds very different from a drone over 10 seconds.
+
+  # ── SpecAugment ──
+  - name: "06_specaug"
+    flags: --spec-augment-prob 0.5
+    note: >
+      SpecAugment (freq/time masking at 50% prob). Makes model
+      robust to partial spectrogram corruption — common in
+      real-world background sounds.

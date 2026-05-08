@@ -1,0 +1,27 @@
+[Unit]
+Description=AUDI — Type A Audio Detection
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+WorkingDirectory=/opt/AUDI
+
+# Start the Docker container
+ExecStart=/usr/bin/docker compose -f docker/docker-compose.yml -f docker/docker-compose.pi.yml up -d
+
+# Stop the Docker container
+ExecStop=/usr/bin/docker compose -f docker/docker-compose.yml -f docker/docker-compose.pi.yml down
+
+# Auto-restart on failure (the container itself has restart: unless-stopped)
+Restart=on-failure
+RestartSec=10
+
+# Give it time to initialize
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

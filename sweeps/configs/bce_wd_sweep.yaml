@@ -1,0 +1,27 @@
+name: bce_wd_sweep
+noise_path: data/HF_dataset_v2_background
+drone_path: data/HF_dataset_v2_drone
+description: >
+  wd=0.03 gives great P75 but cliffs before P90. Sweep lower weight decays
+  at 8ep linear warmup to extend sigma range while keeping P75 strength.
+base_flags: >-
+  --arch convnext_small --clip-seconds 5.12 --patience 0 --epochs 25
+  --noise2 data/hf_dataset_sharded_expanded_merged --batch-size 24
+  --loss bce --label-smoothing 0.1 --augment --lr 1e-4
+  --lr-schedule linear --warmup-epochs 8
+configs:
+  - name: "01_wd_003"
+    flags: --weight-decay 0.03
+    note: Reference — 03_wd_warmup8 from previous sweep (53% P75 / 50 bg).
+
+  - name: "02_wd_002"
+    flags: --weight-decay 0.02
+    note: Lower wd — should extend sigma range while keeping P75 quality.
+
+  - name: "03_wd_0015"
+    flags: --weight-decay 0.015
+    note: Even lower — closer to default 0.01 but with some regularization.
+
+  - name: "04_wd_001"
+    flags: --weight-decay 0.01
+    note: Default weight decay. Baseline for comparison.

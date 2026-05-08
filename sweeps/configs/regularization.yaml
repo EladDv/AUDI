@@ -1,0 +1,23 @@
+# Regularization sweep — weight decay, dropout, cosine schedule
+name: regularization
+noise_path: data/HF_filtered_background
+drone_path: data/HF_filtered_drone
+description: Tests weight decay, dropout, cosine schedule, and their combinations
+base_flags: --arch resnet18 --lr 1e-4 --mixup-alpha 0.2 --epochs 15 --patience 0
+configs:
+  - name: "01_baseline"
+    flags: ""
+  - name: "02_wd_1.0"
+    flags: --weight-decay 1.0
+  - name: "03_dropout_0.2"
+    flags: --dropout 0.2
+  - name: "04_wd_dropout"
+    flags: --weight-decay 1.0 --dropout 0.2
+  - name: "05_cosine"
+    flags: --lr-schedule cosine --warmup-epochs 3
+  - name: "06_cosine_dropout"
+    flags: --lr-schedule cosine --warmup-epochs 3 --dropout 0.2
+  - name: "07_cosine_wd"
+    flags: --lr-schedule cosine --warmup-epochs 3 --weight-decay 1.0
+  - name: "08_cosine_all"
+    flags: --lr-schedule cosine --warmup-epochs 3 --weight-decay 1.0 --dropout 0.2

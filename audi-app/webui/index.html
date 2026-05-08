@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no,maximum-scale=1.0">
+  <title>AUDI — Type A</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      background: #0d0d0d;
+      color: #e0e0e0;
+      padding: 10px;
+      max-width: 800px;
+      margin: 0 auto;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+    }
+
+    /* --- Header --- */
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    h1 .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .dot.green {
+      background: #0a7;
+      box-shadow: 0 0 8px #0a7;
+    }
+
+    .dot.red {
+      background: #e44;
+      box-shadow: 0 0 8px #e44;
+    }
+
+    .dot.yellow {
+      background: #da0;
+      box-shadow: 0 0 8px #da0;
+    }
+
+    .dot.blue {
+      background: #08f;
+      box-shadow: 0 0 8px #08f;
+    }
+
+    .dot.gray {
+      background: #555;
+    }
+
+    /* --- Status Grid --- */
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .status-card {
+      background: #1a1a2e;
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .status-card .label {
+      font-size: 0.6rem;
+      color: #777;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .status-card .value {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    .value.green {
+      color: #0a7;
+    }
+
+    .value.red {
+      color: #e44;
+    }
+
+    .value.amber {
+      color: #da0;
+    }
+
+    .value.white {
+      color: #eee;
+    }
+
+    .value.blue {
+      color: #08f;
+    }
+
+    /* --- VU Meter --- */
+    .vu-section {
+      margin-bottom: 10px;
+    }
+
+    .vu-label {
+      font-size: 0.65rem;
+      color: #666;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .vu-track {
+      width: 100%;
+      height: 18px;
+      background: #111;
+      border-radius: 9px;
+      overflow: hidden;
+      border: 1px solid #222;
+      position: relative;
+    }
+
+    .vu-fill {
+      height: 100%;
+      border-radius: 9px;
+      transition: width 0.1s ease;
+      background: linear-gradient(90deg, #0a7, #da0 60%, #e44 85%);
+    }
+
+    .vu-db {
+      position: absolute;
+      right: 8px;
+      top: 1px;
+      font-size: 0.7rem;
+      color: #888;
+      font-weight: 600;
+    }
+
+    .vu-label-inline {
+      position: absolute;
+      left: 8px;
+      top: 1px;
+      font-size: 0.65rem;
+      color: #888;
+    }
+
+    /* --- State Card (YES / BLUE / NO) --- */
+    .state-card {
+      margin-bottom: 10px;
+      padding: 16px;
+      border-radius: 14px;
+      text-align: center;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .state-card.state-no {
+      background: #111122;
+      border: 2px solid #1a1a3e;
+    }
+
+    /* .state-card.state-blue {
+      background: #081828;
+      border: 2px solid #08f;
+    } */
+
+    .state-card.state-yes {
+      background: #2a0808;
+      border: 2px solid #e33;
+      animation: pulse-bg 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse-bg {
+
+      0%,
+      100% {
+        background: #2a0808;
+      }
+
+      50% {
+        background: #3a0a0a;
+      }
+    }
+
+    .state-label {
+      font-size: 1.6rem;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+
+    .state-label.no {
+      color: #555;
+    }
+
+    /* .state-label.blue { color: #08f; } */
+    .state-label.yes {
+      color: #f44;
+    }
+
+    .state-sub {
+      font-size: 0.8rem;
+      color: #888;
+    }
+
+    .state-confidences {
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      margin-top: 6px;
+    }
+
+    .state-conf-item {
+      text-align: center;
+    }
+
+    .state-conf-item .val {
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+
+    .state-conf-item .lbl {
+      font-size: 0.6rem;
+      color: #666;
+      text-transform: uppercase;
+    }
+
+    .threshold-info {
+      font-size: 0.6rem;
+      color: #444;
+      margin-top: 4px;
+    }
+
+    /* --- Action Buttons --- */
+    .btn-group {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 22px 10px;
+      border: none;
+      border-radius: 14px;
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: #fff;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: transform 0.1s, opacity 0.15s;
+      letter-spacing: 0.5px;
+    }
+
+    .btn:active {
+      transform: scale(0.93);
+      opacity: 0.8;
+    }
+
+    .btn-start {
+      background: linear-gradient(135deg, #0a7, #086);
+      box-shadow: 0 4px 12px rgba(0, 170, 119, 0.3);
+    }
+
+    .btn-stop {
+      background: linear-gradient(135deg, #d33, #a22);
+      box-shadow: 0 4px 12px rgba(204, 51, 51, 0.3);
+    }
+
+    .btn-silence {
+      background: linear-gradient(135deg, #f80, #d60);
+      box-shadow: 0 4px 16px rgba(255, 136, 0, 0.5);
+      color: #fff;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+    }
+
+    .btn-pause {
+      background: linear-gradient(135deg, #08f, #06b);
+      box-shadow: 0 4px 16px rgba(0, 136, 255, 0.4);
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+
+    .btn.hidden {
+      display: none;
+    }
+
+    /* Primary row (Start/Stop) = biggest */
+    .btn-group-primary .btn {
+      padding: 28px 10px;
+      font-size: 1.5rem;
+      border-radius: 16px;
+    }
+
+    /* Secondary row (Silence/Pause) = smaller */
+    .btn-group-secondary .btn {
+      padding: 16px 10px;
+      font-size: 1rem;
+      border-radius: 12px;
+    }
+
+    /* Debug row (Test Alert) = subtle */
+    .btn-group-debug {
+      justify-content: center;
+      margin-bottom: 6px;
+    }
+
+    .btn-group-debug .btn {
+      padding: 8px 24px;
+      font-size: 0.75rem;
+      border-radius: 20px;
+      width: auto;
+      flex: 0 0 auto;
+    }
+
+    .btn-debug {
+      background: #222;
+      color: #666;
+      border: 1px solid #333;
+      box-shadow: none;
+    }
+
+    .btn-debug:active {
+      background: #333;
+    }
+
+    /* --- Alert History --- */
+    .history {
+      margin-bottom: 10px;
+    }
+
+    .history h2 {
+      font-size: 0.8rem;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 6px;
+    }
+
+    .history-scroll {
+      max-height: 200px;
+      overflow-y: auto;
+      border-radius: 8px;
+      background: #0e0e16;
+      padding: 4px;
+    }
+
+    .history-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 10px;
+      background: #12121e;
+      border-radius: 6px;
+      margin: 3px 0;
+      font-size: 0.8rem;
+    }
+
+    .history-item .time {
+      color: #666;
+      font-size: 0.7rem;
+    }
+
+    .history-item .event {
+      font-weight: 600;
+    }
+
+    .history-item .event.state-yes {
+      color: #f66;
+    }
+
+    .history-item .event.state-blue {
+      color: #08f;
+    }
+
+    .history-item .conf {
+      color: #888;
+      font-size: 0.7rem;
+    }
+
+    .history-empty {
+      color: #444;
+      font-size: 0.8rem;
+      text-align: center;
+      padding: 12px;
+    }
+
+    /* --- System Info --- */
+    .sys-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+
+    .sys-card {
+      background: #0e0e16;
+      border-radius: 8px;
+      padding: 6px 8px;
+      text-align: center;
+    }
+
+    .sys-card .val {
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+
+    .sys-card .lbl {
+      font-size: 0.55rem;
+      color: #555;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    .sys-card .val.hot {
+      color: #e44;
+    }
+
+    .sys-card .val.warm {
+      color: #da0;
+    }
+
+    .sys-card .val.cool {
+      color: #0a7;
+    }
+
+    /* --- Score History (debug) --- */
+    .score-history-section {
+      margin-bottom: 10px;
+    }
+
+    .score-history-label {
+      font-size: 0.65rem;
+      color: #666;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .score-history-stats {
+      font-size: 0.6rem;
+      color: #555;
+      margin-top: 4px;
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+    }
+
+    .score-history-stats span {
+      font-weight: 600;
+    }
+
+    /* --- Health Bar --- */
+    .health-bar {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .health-pill {
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 0.65rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .pill-ok {
+      background: #0a72;
+      color: #0a7;
+    }
+
+    .pill-warn {
+      background: #da02;
+      color: #da0;
+    }
+
+    .pill-bad {
+      background: #e442;
+      color: #e44;
+    }
+
+    .pill-blue {
+      background: #08f2;
+      color: #08f;
+    }
+
+    /* --- Footer --- */
+    .footer {
+      margin-top: 10px;
+      font-size: 0.6rem;
+      color: #444;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1><span class="dot green" id="recDot"></span>AUDI — Type A</h1>
+
+  <!-- Health pills -->
+  <div class="health-bar" id="healthBar"></div>
+
+  <!-- Status grid -->
+  <div class="status-grid" id="statusGrid"></div>
+
+  <!-- VU Meter -->
+  <div class="vu-section">
+    <div class="vu-label">Audio Input</div>
+    <div class="vu-track">
+      <div class="vu-fill" id="vuFill" style="width:0%"></div>
+      <span class="vu-label-inline">VU</span>
+      <span class="vu-db" id="vuDb">-inf dB</span>
+    </div>
+  </div>
+
+  <!-- Score History (debug only) -->
+  <div class="score-history-section" id="scoreHistorySection" style="display:none">
+    <div class="score-history-label">Prediction Score History</div>
+    <canvas id="scoreCanvas" width="780" height="120" style="width:100%;height:120px;border-radius:8px;background:#0e0e16"></canvas>
+    <div class="score-history-stats" id="scoreStats"></div>
+  </div>
+
+  <!-- State: YES / BLUE / NO -->
+  <div class="state-card state-no" id="stateCard">
+    <div class="state-label no" id="stateLabel">NO</div>
+    <div class="state-sub" id="stateSub">Nothing detected</div>
+    <div class="state-confidences" id="stateConfs">
+      <div class="state-conf-item">
+        <div class="val" style="color:#e44" id="yesVal">0.00</div>
+        <div class="lbl">YES</div>
+      </div>
+      <!-- <div class="state-conf-item">
+        <div class="val" style="color:#08f" id="blueVal">0.00</div>
+        <div class="lbl">BLUE</div>
+      </div> -->
+    </div>
+    <div class="threshold-info" id="thresholdInfo">YES ≥ 0.70 &nbsp; BLUE ≥ 0.40</div>
+  </div>
+
+  <!-- Action buttons -->
+  <div class="btn-group btn-group-primary">
+    <button class="btn btn-start" id="btnRecord" onclick="toggleRecording()" disabled>...</button>
+  </div>
+  <div class="btn-group btn-group-secondary">
+    <button class="btn btn-silence" id="btnSilence" onclick="clearAlarm()">Silence</button>
+    <button class="btn btn-pause" id="btnPause" onclick="pauseRecording()">Pause 5m</button>
+  </div>
+  <div class="btn-group btn-group-debug">
+    <button class="btn btn-debug" id="btnTestAlert" onclick="testAlert()">Test Alert</button>
+  </div>
+
+  <!-- System Info -->
+  <div class="sys-grid" id="sysGrid"></div>
+
+  <!-- Alert history -->
+  <div class="history">
+    <h2>Alert History</h2>
+    <div class="history-scroll" id="alertHistoryList"></div>
+  </div>
+
+  <div class="footer" id="footer"></div>
+
+  <script>
+    let lastAlarmState = false;
+
+    function update() {
+      // --- Status poll ---
+      fetch('/api/status').then(r => r.json()).then(d => {
+        const rec = d.recorder || {};
+        const st = d.storage || {};
+        const det = d.detector || {};
+        const gp = d.gpio || {};
+
+        const alarming = gp.alarming || false;
+        const recording = rec.running && !rec.stopped;
+        const paused = rec.paused || false;
+        const healthy = rec.audio_healthy;
+
+        // Dot color based on detection state
+        const dot = document.getElementById('recDot');
+        const state = det.current_state || 'NO';
+        if (state === 'YES') dot.className = 'dot red';
+        else if (state === 'BLUE') dot.className = 'dot blue';
+        else if (paused) dot.className = 'dot yellow';
+        else if (recording && healthy) dot.className = 'dot green';
+        else if (recording && !healthy) dot.className = 'dot yellow';
+        else dot.className = 'dot gray';
+
+        // Status grid
+        const avgMs = det.timing_avg_ms || 0;
+        document.getElementById('statusGrid').innerHTML = `
+      <div class="status-card">
+        <div class="label">Recording</div>
+        <div class="value ${recording && healthy ? 'green' : paused ? 'amber' : 'red'}">
+          ${paused ? 'Paused' : recording ? (healthy ? 'Active' : 'No Audio') : 'Stopped'}
+        </div>
+      </div>
+      <div class="status-card">
+        <div class="label">Detections</div>
+        <div class="value white">
+          YES ${det.yes_count || 0}
+        </div>
+      </div>
+      <div class="status-card">
+        <div class="label">Inference</div>
+        <div class="value ${avgMs < 150 ? 'green' : avgMs < 250 ? 'amber' : 'red'}">
+          ${avgMs.toFixed(0)}ms avg
+        </div>
+      </div>
+    `;
+
+        // State card (YES/BLUE/NO)
+        const card = document.getElementById('stateCard');
+        const label = document.getElementById('stateLabel');
+        const sub = document.getElementById('stateSub');
+        card.className = 'state-card state-' + state.toLowerCase();
+        if (state === 'YES') {
+          label.className = 'state-label yes'; label.textContent = 'YES';
+          sub.textContent = 'ALARM — snapshot saved';
+        } else if (state === 'BLUE') {
+          label.className = 'state-label blue'; label.textContent = 'BLUE';
+          sub.textContent = 'Suspicious — logged only';
+        } else {
+          label.className = 'state-label no'; label.textContent = 'NO';
+          sub.textContent = 'Nothing detected';
+        }
+        document.getElementById('yesVal').textContent = (det.yes_confidence || 0).toFixed(2);
+        // document.getElementById('blueVal').textContent = (det.blue_confidence || 0).toFixed(2);
+        document.getElementById('thresholdInfo').textContent =
+          'YES ≥ ' + (det.threshold_yes || 0.7).toFixed(2) + '  BLUE ≥ ' + (det.threshold_blue || 0.4).toFixed(2);
+
+        // Record button — same state as the recording label
+        const btn = document.getElementById('btnRecord');
+        btn.disabled = false;
+        if (recording && !paused) {
+          btn.textContent = 'Stop';
+          btn.className = 'btn btn-stop';
+        } else {
+          btn.textContent = 'Start';
+          btn.className = 'btn btn-start';
+        }
+
+        // Score history sparkline (debug mode only)
+        if (det.debug && det.score_history) {
+          drawScoreHistory(det.score_history, det.threshold_yes || 0.51);
+        } else {
+          document.getElementById('scoreHistorySection').style.display = 'none';
+        }
+      });
+
+      // --- System info ---
+      fetch('/api/system').then(r => r.json()).then(d => {
+        const temp = d.cpu_temperature_c || 0;
+        const mem = d.memory || {};
+        const load = d.load || {};
+        const up = d.uptime_str || '0h 0m';
+        const disk = d.disk || {};
+
+        const tempColor = temp > 75 ? 'hot' : temp > 60 ? 'warm' : 'cool';
+        const memPct = mem.used_pct || 0;
+        const memColor = memPct > 85 ? 'hot' : memPct > 65 ? 'warm' : 'cool';
+
+        document.getElementById('sysGrid').innerHTML = `
+      <div class="sys-card"><div class="val ${tempColor}">${temp.toFixed(1)}°</div><div class="lbl">CPU Temp</div></div>
+      <div class="sys-card"><div class="val ${memColor}">${memPct}%</div><div class="lbl">RAM</div></div>
+      <div class="sys-card"><div class="val">${up}</div><div class="lbl">Uptime</div></div>
+    `;
+      }).catch(e => console.warn('system info:', e));
+
+      // --- Health pills ---
+      fetch('/api/status').then(r => r.json()).then(d => {
+        const rec = d.recorder || {};
+        const st = d.storage || {};
+        const gp = d.gpio || {};
+        const det = d.detector || {};
+        const state = det.current_state || 'NO';
+        const pills = [];
+
+        if (state === 'YES') pills.push({ label: 'ALARM', cls: 'pill-bad' });
+        else if (state === 'BLUE') pills.push({ label: 'BLUE', cls: 'pill-blue' });
+        else if (rec.running && rec.audio_healthy) pills.push({ label: 'Audio OK', cls: 'pill-ok' });
+        else if (rec.running && !rec.audio_healthy) pills.push({ label: 'No Audio', cls: 'pill-warn' });
+        else pills.push({ label: 'Stopped', cls: 'pill-bad' });
+
+        if (st.over_budget) pills.push({ label: 'Full', cls: 'pill-warn' });
+        else pills.push({ label: `${(st.used_gb || 0).toFixed(1)}G`, cls: 'pill-ok' });
+        pills.push({ label: `GPIO ${gp.has_gpio ? 'OK' : 'MOCK'}`, cls: gp.has_gpio ? 'pill-ok' : 'pill-warn' });
+
+        document.getElementById('healthBar').innerHTML = pills.map(p =>
+          `<span class="health-pill ${p.cls}">${p.label}</span>`
+        ).join('');
+      }).catch(() => { });
+
+      // --- Alert history ---
+      fetch('/api/alert_history_persistent').then(r => r.json()).then(d => {
+        const list = document.getElementById('alertHistoryList');
+        const h = d.history || [];
+        if (h.length === 0) {
+          list.innerHTML = '<div class="history-empty">No alerts logged</div>';
+          return;
+        }
+        list.innerHTML = h.reverse().slice(0, 30).map(e => {
+          const t = new Date(e.timestamp * 1000);
+          const state = e.state || 'NO';
+          const yesC = (e.yes_confidence * 100).toFixed(0) || '0';
+          // const blueC = (e.blue_confidence * 100).toFixed(0) || '0';
+          return `<div class="history-item">
+        <span class="time">${t.toLocaleDateString()} ${t.toLocaleTimeString()}</span>
+        <span class="event state-${state.toLowerCase()}">${state}</span>
+        <span class="conf">Y:${yesC}%</span>
+      </div>`;
+        }).join('');
+      }).catch(() => { });
+
+      document.getElementById('footer').textContent =
+        'AUDI Type A v0.3.0 | ' + new Date().toLocaleTimeString();
+    }
+
+    // --- Actions ---
+    function apiPost(url) {
+      fetch(url, { method: 'POST' }).then(() => update()).catch(() => {});
+    }
+    function toggleRecording() {
+      // Read state from the server, not from the button text.
+      // The server knows the real recording state.
+      fetch('/api/toggle_recording', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          const btn = document.getElementById('btnRecord');
+          if (d.recording) {
+            btn.textContent = 'Stop';
+            btn.className = 'btn btn-stop';
+          } else {
+            btn.textContent = 'Start';
+            btn.className = 'btn btn-start';
+          }
+        })
+        .catch(() => {})
+        .finally(() => update());
+    }
+    function clearAlarm()     { apiPost('/api/clear_alarm');     }
+    function pauseRecording() { apiPost('/api/pause_recording'); }
+    function testAlert()      { apiPost('/api/test_alert');      }
+
+    function updateVU() {
+      fetch('/api/audio_level').then(r => r.json()).then(d => {
+        const rms = d.rms || 0;
+        const db = (d.db * 10) || 0.0;
+        document.getElementById('vuFill').style.width = Math.min(100, db) + '%';
+        document.getElementById('vuDb').textContent = db.toFixed(0) + ' dB';
+      }).catch(() => { });
+    }
+
+    // --- Score history sparkline (canvas) ---
+    function drawScoreHistory(history, threshold) {
+      const section = document.getElementById('scoreHistorySection');
+      section.style.display = 'block';
+      const canvas = document.getElementById('scoreCanvas');
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      const pad = { top: 8, right: 16, bottom: 16, left: 16 };
+
+      ctx.clearRect(0, 0, W, H);
+
+      // Background
+      ctx.fillStyle = '#0e0e16';
+      ctx.fillRect(0, 0, W, H);
+
+      if (!history || history.length < 2) return;
+
+      const scores = history.map(h => h.raw);
+      const n = scores.length;
+      const plotW = W - pad.left - pad.right;
+      const plotH = H - pad.top - pad.bottom;
+
+      // Y range: data-driven with 10% padding, but always include threshold
+      const dataMin = Math.min(...scores);
+      const dataMax = Math.max(...scores);
+      const dataRange = dataMax - dataMin || 0.01;
+      const yMin = Math.max(0, dataMin - dataRange * 0.1);
+      const yMax = Math.min(1.0, Math.max(threshold * 1.1, dataMax + dataRange * 0.2));
+
+      const xOf = i => pad.left + (i / (n - 1)) * plotW;
+      const yOf = v => pad.top + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+
+      // Grid lines (auto-step based on range)
+      const gridStep = dataRange < 0.1 ? 0.02 : dataRange < 0.5 ? 0.05 : 0.1;
+      ctx.strokeStyle = '#1a1a2e';
+      ctx.lineWidth = 0.5;
+      for (let g = Math.ceil(yMin / gridStep) * gridStep; g <= yMax; g += gridStep) {
+        const gy = yOf(g);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, gy);
+        ctx.lineTo(W - pad.right, gy);
+        ctx.stroke();
+
+        // Grid label
+        ctx.fillStyle = '#444';
+        ctx.font = '8px system-ui';
+        ctx.fillText(g.toFixed(2), pad.left + 2, gy - 2);
+      }
+
+      // Threshold line
+      const thY = yOf(threshold);
+      ctx.strokeStyle = 'rgba(255,68,68,0.4)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(pad.left, thY);
+      ctx.lineTo(W - pad.right, thY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Threshold label
+      ctx.fillStyle = '#e44';
+      ctx.font = '9px system-ui';
+      ctx.fillText('YES≥' + threshold.toFixed(2), W - pad.right - 50, thY - 4);
+
+      // Score line
+      ctx.strokeStyle = '#0a7';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const sx = xOf(i), sy = yOf(scores[i]);
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.stroke();
+
+      // Fill under curve
+      ctx.lineTo(xOf(n - 1), yOf(yMin));
+      ctx.lineTo(xOf(0), yOf(yMin));
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(0,170,119,0.08)';
+      ctx.fill();
+
+      // Stats
+      const avg = scores.reduce((a, b) => a + b, 0) / n;
+      const max = Math.max(...scores);
+      const min = Math.min(...scores);
+      document.getElementById('scoreStats').innerHTML =
+        '<span>min=' + min.toFixed(3) + '</span>' +
+        '<span>avg=' + avg.toFixed(3) + '</span>' +
+        '<span>max=' + max.toFixed(3) + '</span>' +
+        '<span>n=' + n + '</span>';
+    }
+
+    setInterval(update, 1500);
+    setInterval(updateVU, 33);
+    update();
+    updateVU();
+  </script>
+</body>
+
+</html>

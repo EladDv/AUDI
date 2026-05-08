@@ -1,0 +1,24 @@
+# =============================================================================
+# AUDI — Raspberry Pi Specific Override
+# =============================================================================
+#
+# Enables direct ALSA hardware access and privileged GPIO on a real Pi.
+# Apply alongside the base compose file:
+#
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.pi.yml up -d
+# =============================================================================
+
+services:
+  audi:
+    privileged: true           # Required for GPIO + ALSA on some Pi models
+    user: root                 # Avoid host/container gpio GID mismatches on /dev/gpiochip*
+    environment:
+      - REQUIRE_GPIO=true
+    volumes:
+      # Raspberry Pi 5 GPIO is exposed through /dev/gpiochip* rather than
+      # legacy /dev/gpiomem direct register access. Bind /dev so this works
+      # across kernels where the user-facing chip is gpiochip0 or gpiochip4.
+      - /dev:/dev
+      - /sys:/sys:ro                    # gpiochip metadata for rpi-lgpio
+      - /proc/device-tree:/proc/device-tree:ro  # Pi model/revision detection
+      - /run/udev:/run/udev:ro  # udev device info
