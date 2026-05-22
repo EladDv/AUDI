@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import warnings
+from dataclasses import replace
 from pathlib import Path
 
 import lightning as L
@@ -62,10 +63,30 @@ def run(argv: list[str] | None = None) -> int:
         "--mel-preset",
         type=str,
         default="default",
-        choices=["default", "vit_224"],
-        help="Mel spectrogram preset. vit_224: n_mels=224, hop_length=179 "
-        "(224×224, divisible by 7, required by FasterViT)",
+        choices=["default", "vit_224", "custom"],
+        help="Mel spectrogram preset. vit_224: n_mels=224, hop_length=179. "
+        "custom: use --n-mels/--n-fft/--hop-length below.",
     )
+    ap.add_argument("--n-mels", type=int, default=None,
+                    help="Override n_mels (requires --mel-preset custom)")
+    ap.add_argument("--n-fft", type=int, default=None,
+                    help="Override n_fft (requires --mel-preset custom)")
+    ap.add_argument("--hop-length", type=int, default=None,
+                    help="Override hop_length (requires --mel-preset custom)")
+    ap.add_argument("--use-pcen", action="store_true",
+                    help="Use PCEN instead of dB conversion + scalar normalization")
+    ap.add_argument("--pcen-s", type=float, default=0.025)
+    ap.add_argument("--pcen-alpha", type=float, default=0.98)
+    ap.add_argument("--pcen-delta", type=float, default=2.0)
+    ap.add_argument("--pcen-r", type=float, default=0.5)
+    ap.add_argument("--use-dsp-features", action="store_true",
+                    help="Use DSP feature channels in mel input (DSPDroneDetector)")
+    ap.add_argument("--dsp-feature-sets", type=str, default="v3,v4,v5",
+                    help="Comma-separated DSP feature sets: v3,v4,v5")
+    ap.add_argument("--dsp-hop-length", type=int, default=256,
+                    help="Hop length for DSP mel transform")
+    ap.add_argument("--dsp-projector-hidden", type=int, default=64,
+                    help="Hidden dim for DSP→mel projector MLP")
     # ── Optimizer ──
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=0.01)
@@ -168,12 +189,40 @@ def run(argv: list[str] | None = None) -> int:
     bin_names = [b.name for b in snr_bins]
     if args.mel_preset == "vit_224" or args.arch.startswith("fastervit"):
         mel_cfg = MelConfig.vit_224()
+    elif args.mel_preset == "custom":
+        kwargs = {}
+        if args.n_mels is not None:
+            kwargs["n_mels"] = args.n_mels
+        if args.n_fft is not None:
+            kwargs["n_fft"] = args.n_fft
+        if args.hop_length is not None:
+            kwargs["hop_length"] = args.hop_length
+        mel_cfg = MelConfig(**kwargs)
     else:
         mel_cfg = MelConfig()
-    detector = DroneDetector(
+    # PCEN override (works with any preset)
+    if args.use_pcen:
+        mel_cfg = replace(mel_cfg,
+                          use_pcen=True,
+                          pcen_s=args.pcen_s,
+                          pcen_alpha=args.pcen_alpha,
+                          pcen_delta=args.pcen_delta,
+                          pcen_r=args.pcen_r)
+    detector_cls = DroneDetector
+    detector_kwargs: dict = {}
+    if args.use_dsp_features:
+        from audi.training.dsp_detector import DSPDroneDetector
+        detector_cls = DSPDroneDetector
+        detector_kwargs.update(
+            dsp_feature_sets=[s.strip() for s in args.dsp_feature_sets.split(",") if s.strip()],
+            dsp_hop_length=args.dsp_hop_length,
+            dsp_projector_hidden=args.dsp_projector_hidden,
+        )
+    detector = detector_cls(
         model=model_cfg,
         mel=mel_cfg,
         optimizer=opt_cfg,
+        **detector_kwargs,
         bin_names=bin_names,
         loss_type=args.loss,
         label_smoothing=args.label_smoothing,

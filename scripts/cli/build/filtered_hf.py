@@ -168,7 +168,7 @@ def run() -> None:
             print(f"    {split_name}: {len(split_ds)} samples")
         print(f"  Saved: {output_path}")
 
-    if args.separate_background:
+    if args.split_background:
         bg_files = [f for f in audio_files if f.parent.name == "BG"]
         drone_files = [f for f in audio_files if f.parent.name != "BG"]
         _build_dataset(

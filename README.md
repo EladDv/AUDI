@@ -436,7 +436,7 @@ uv run python scripts/build_data.py filtered-hf \
 | `--output-path` | (required) | Output HF dataset path |
 | `--target-sr` | 16000 | Target sample rate |
 | `--label` | (auto) | Label for classification (`drone` / `noise`) |
-| `--separate-background` | `True` | Split BG subfolder into `_background` dataset |
+| `--split-background` | `True` | Split BG subfolder into `_background` dataset |
 | `--chunk-sec` | 30 | Chunk audio into fixed-length segments |
 | `--val-ratio` | 0.1 | Validation split ratio |
 | `--test-ratio` | 0.1 | Test split ratio |

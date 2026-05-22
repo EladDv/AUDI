@@ -13,6 +13,60 @@ import torchaudio.transforms as T
 
 from audi.config import MelConfig, ModelConfig, OptimizerConfig
 from audi.model import build_model
+
+
+class PCEN(torch.nn.Module):
+    """Per-Channel Energy Normalization (PyTorch).
+
+    Smooths each mel bin independently via exponential moving average,
+    then applies AGC + noise floor. Matches librosa.pcen with
+    ``gain=1.0, bias=0.0, power=0.0`` (root compression only).
+
+    Args:
+        s: Smoothing coefficient (EMA alpha). Lower = slower adaptation.
+        alpha: AGC exponent. <1 compresses dynamic range.
+        delta: Noise floor bias.
+        r: Root compression exponent.
+        eps: Numerical stability.
+    """
+
+    def __init__(
+        self,
+        s: float = 0.025,
+        alpha: float = 0.98,
+        delta: float = 2.0,
+        r: float = 0.5,
+        eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.s = s
+        self.alpha = alpha
+        self.delta = delta
+        self.r = r
+        self.eps = eps
+
+    def forward(self, mel_power: torch.Tensor) -> torch.Tensor:
+        """Apply PCEN to mel power spectrogram.
+
+        Args:
+            mel_power: ``[B, n_mels, T]`` mel power (NOT dB).
+
+        Returns:
+            ``[B, n_mels, T]`` normalized.
+        """
+        # EMA smooth along time axis
+        s = self.s
+        smooth = mel_power[:, :, :1]  # seed with first frame
+        frames = [smooth]
+        for t in range(1, mel_power.shape[-1]):
+            smooth = (1 - s) * smooth + s * mel_power[:, :, t:t + 1]
+            frames.append(smooth)
+        M_smooth = torch.cat(frames, dim=-1)
+
+        # PCEN: (M / (eps + M_smooth)^alpha + delta)^r - delta^r
+        denom = (self.eps + M_smooth) ** self.alpha
+        gain = mel_power / torch.clamp(denom, min=self.eps)
+        return (gain + self.delta) ** self.r - self.delta ** self.r
 from audi.training.validation import (
     compute_calibration,
     compute_pr_curve,
@@ -84,7 +138,19 @@ class DroneDetector(L.LightningModule):
             hop_length=mel_cfg.hop_length,
             n_mels=mel_cfg.n_mels,
         )
-        self._to_db = T.AmplitudeToDB()
+        self._use_pcen = mel_cfg.use_pcen
+        if mel_cfg.use_pcen:
+            self._pcen = PCEN(
+                s=mel_cfg.pcen_s,
+                alpha=mel_cfg.pcen_alpha,
+                delta=mel_cfg.pcen_delta,
+                r=mel_cfg.pcen_r,
+                eps=mel_cfg.pcen_eps,
+            )
+            self._to_db = None
+        else:
+            self._pcen = None
+            self._to_db = T.AmplitudeToDB()
 
         # Scalar mel normalization
         if mel_cfg.mean_db is not None:
@@ -173,9 +239,13 @@ class DroneDetector(L.LightningModule):
         Returns:
             Spectrogram tensor of shape ``[B, 3, n_mels, T_frames]``.
         """
-        mel = self._to_db(self._mel_transform(wav))
-        if self._mel_mean is not None and self._mel_std is not None:
-            mel = (mel - self._mel_mean) / self._mel_std
+        mel = self._mel_transform(wav)
+        if self._use_pcen:
+            mel = self._pcen(mel)
+        else:
+            mel = self._to_db(mel)
+            if self._mel_mean is not None and self._mel_std is not None:
+                mel = (mel - self._mel_mean) / self._mel_std
         spec = mel.unsqueeze(1).expand(-1, 3, -1, -1)
         if (
             self._freq_mask is not None

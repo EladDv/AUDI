@@ -49,6 +49,13 @@ class MelConfig:
     hop_length: int = 160
     mean_db: float | None = 10.430418
     std_db: float | None = 5.288271
+    # PCEN (disabled by default — when True, replaces dB conversion + scalar norm)
+    use_pcen: bool = False
+    pcen_s: float = 0.025
+    pcen_alpha: float = 0.98
+    pcen_delta: float = 2.0
+    pcen_r: float = 0.5
+    pcen_eps: float = 1e-6
 
     @classmethod
     def vit_224(cls) -> MelConfig:

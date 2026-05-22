@@ -1,0 +1,105 @@
+name: mel_sweep
+noise_path: data/HF_dataset_v2_background
+drone_path: data/HF_dataset_v2_drone
+description: >
+  Full mel spectrogram sweep: n_mels × n_fft × hop_length.
+  Best model config locked: convnext_small, BCE, wd=0.03, warmup=8.
+  Tests frequency resolution, time resolution, and compute tradeoffs.
+base_flags: >-
+  --arch convnext_small --clip-seconds 5.12 --patience 0 --epochs 20
+  --noise2 data/hf_dataset_sharded_expanded_merged --batch-size 24
+  --loss bce --label-smoothing 0.1 --augment --lr 1e-4
+  --lr-schedule linear --warmup-epochs 8 --weight-decay 0.03
+  --mel-preset custom
+configs:
+  # ── Baseline ──
+  - name: "00_baseline"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 160
+    note: Default mel config (same as original). Reference point.
+
+  # ── n_mels sweep (fixed n_fft=1024, hop=160) ──
+  - name: "01_mels64"
+    flags: --n-mels 64 --n-fft 1024 --hop-length 160
+    note: Coarse frequency — fewer mel bins, smaller model input.
+
+  - name: "02_mels96"
+    flags: --n-mels 96 --n-fft 1024 --hop-length 160
+    note: Intermediate mel bins.
+
+  - name: "03_mels192"
+    flags: --n-mels 192 --n-fft 1024 --hop-length 160
+    note: Fine frequency — more mel bins.
+
+  - name: "04_mels256"
+    flags: --n-mels 256 --n-fft 1024 --hop-length 160
+    note: Very fine frequency — largest mel input.
+
+  # ── n_fft sweep (fixed n_mels=128, hop=160) ──
+  - name: "05_fft512"
+    flags: --n-mels 128 --n-fft 512 --hop-length 160
+    note: Small FFT — coarse frequency resolution, more time frames.
+
+  - name: "06_fft2048"
+    flags: --n-mels 128 --n-fft 2048 --hop-length 160
+    note: Large FFT — fine frequency resolution, fewer time frames.
+
+  - name: "07_fft4096"
+    flags: --n-mels 128 --n-fft 4096 --hop-length 160
+    note: Large FFT — fine frequency resolution, fewer time frames.
+
+  # ── hop_length sweep (fixed n_mels=128, n_fft=1024) ──
+  - name: "08_hop80"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 80
+    note: Fine time resolution — 2× frames, higher compute.
+
+  - name: "09_hop320"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 320
+    note: Coarse time — half frames, faster training.
+
+  # ── Extreme corners ──
+  - name: "10_minimal"
+    flags: --n-mels 64 --n-fft 512 --hop-length 320
+    note: Minimum compute — coarse everything. Fastest training, worst res.
+
+  - name: "11_maximal"
+    flags: --n-mels 256 --n-fft 4096 --hop-length 80
+    note: Maximum resolution — expensive. Tests if more detail helps.
+
+  # ── Asymmetric ──
+  - name: "12_mels96_fft2048"
+    flags: --n-mels 96 --n-fft 2048 --hop-length 160
+    note: Fine FFT, fewer bins — compressed frequency representation.
+
+  - name: "13_mels192_hop80"
+    flags: --n-mels 192 --n-fft 1024 --hop-length 80
+    note: Many bins, fine time — dense 2D representation.
+
+  - name: "14_coarse_time"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 320
+    note: Coarse time resolution, keep baseline freq. Fast.
+
+  # ── Power-of-2 alignment ──
+  - name: "15_fft1024_hop256"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 256
+    note: Aligned hop to 256 — common in speech, nice stride.
+
+  - name: "16_mels80_fft800"
+    flags: --n-mels 80 --n-fft 800 --hop-length 160
+    note: 80 mel bins (classic speech param), matched FFT.
+
+  # ── PCEN (per-channel energy normalization) ──
+  - name: "17_pcen_default"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 160 --use-pcen
+    note: PCEN with default params (s=0.025 a=0.98 d=2.0 r=0.5). Replaces dB+norm.
+
+  - name: "18_pcen_fast_adapt"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 160 --use-pcen --pcen-s 0.05 --pcen-alpha 0.8
+    note: Faster adaptation (s=0.05), stronger AGC (alpha=0.8). Better for transient drones.
+
+  - name: "19_pcen_slow_adapt"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 160 --use-pcen --pcen-s 0.01 --pcen-alpha 0.95
+    note: Slow adaptation (s=0.01), mild AGC (alpha=0.95). Better for steady-state drones.
+
+  - name: "20_pcen_high_floor"
+    flags: --n-mels 128 --n-fft 1024 --hop-length 160 --use-pcen --pcen-delta 5.0 --pcen-r 0.33
+    note: High noise floor (delta=5), cube-root compression (r=0.33). Very aggressive NR.
