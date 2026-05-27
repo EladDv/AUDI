@@ -1,5 +1,5 @@
 name: dsp_sweep
-noise_path: data/HF_dataset_v3_background
+noise_path: data/HF_dataset_v2_background
 drone_path: data/HF_dataset_v2_drone
 description: >
   DSP feature pipeline sweep — feature sets, hop lengths, projector sizes,
@@ -10,72 +10,72 @@ base_flags: >-
   --loss bce --label-smoothing 0.1 --augment --lr 1e-4
   --lr-schedule linear --warmup-epochs 8 --weight-decay 0.03
 configs:
-  # ── Baseline (no DSP) ──
-  - name: "00_no_dsp"
-    flags: ""
-    note: Standard mel pipeline — no DSP features.
+  # # ── Baseline (no DSP) ──
+  # - name: "00_no_dsp"
+  #   flags: ""
+  #   note: Standard mel pipeline — no DSP features.
 
-  # ── Feature set ablations ──
-  - name: "01_v3_only"
-    flags: --dsp-feature-sets v3
-    note: V3-only — harmonic score, stacked, velocity, acceleration (4 feats).
+  # # ── Feature set ablations ──
+  # - name: "01_v3_only"
+  #   flags: --dsp-feature-sets v3
+  #   note: V3-only — harmonic score, stacked, velocity, acceleration (4 feats).
 
-  - name: "02_v5_only"
-    flags: --dsp-feature-sets v5
-    note: V5-only — SNR estimate (1 feat).
+  # - name: "02_v5_only"
+  #   flags: --dsp-feature-sets v5
+  #   note: V5-only — SNR estimate (1 feat).
 
-  - name: "03_v4_only"
-    flags: --dsp-feature-sets v4
-    note: V4-only — lattice — energy, centroid, density, spread, structure, log_energy (6 feats).
+  # - name: "03_v4_only"
+  #   flags: --dsp-feature-sets v4
+  #   note: V4-only — lattice — energy, centroid, density, spread, structure, log_energy (6 feats).
 
-  - name: "04_v3_v5"
-    flags: --dsp-feature-sets v3,v5
-    note: V3+V5 — harmonic dynamics + SNR (5 feats).
+  # - name: "04_v3_v5"
+  #   flags: --dsp-feature-sets v3,v5
+  #   note: V3+V5 — harmonic dynamics + SNR (5 feats).
 
-  - name: "05_v3_v4"
-    flags: --dsp-feature-sets v3,v4
-    note: V3+V4 — harmonic dynamics + lattice structure (10 feats).
+  # - name: "05_v3_v4"
+  #   flags: --dsp-feature-sets v3,v4
+  #   note: V3+V4 — harmonic dynamics + lattice structure (10 feats).
 
-  - name: "06_v4_v5"
-    flags: --dsp-feature-sets v4,v5
-    note: V4+V5 — lattice structure + SNR (7 feats).
+  # - name: "06_v4_v5"
+  #   flags: --dsp-feature-sets v4,v5
+  #   note: V4+V5 — lattice structure + SNR (7 feats).
 
   - name: "07_all"
     flags: --dsp-feature-sets v3,v4,v5
     note: All features — V3+V4+V5 (11 feats).
 
-  # ── DSP hop length ──
-  - name: "08_hop128"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 128
-    note: Fine time — 8ms DSP hop, more frames.
+  # # ── DSP hop length ──
+  # - name: "08_hop128"
+  #   flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 128
+  #   note: Fine time — 8ms DSP hop, more frames.
 
-  - name: "09_hop160"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 160
-    note: Matches mel hop — no interpolation.
+  # - name: "09_hop160"
+  #   flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 160
+  #   note: Matches mel hop — no interpolation.
 
-  - name: "10_hop320"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 320
-    note: Coarse time — 20ms hop, faster.
+  # - name: "10_hop320"
+  #   flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 320
+  #   note: Coarse time — 20ms hop, faster.
 
-  # ── Projector size ──
-  - name: "11_proj32"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 32
-    note: Small projector MLP — few params.
+  # # ── Projector size ──
+  # - name: "11_proj32"
+  #   flags: --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 32
+  #   note: Small projector MLP — few params.
 
   - name: "12_proj128"
     flags: --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
     note: Large projector MLP — more capacity.
 
-  # ── PCEN + DSP ──
-  - name: "13_pcen_dsp"
-    flags: --dsp-feature-sets v3,v4,v5 --use-pcen
-    note: PCEN mel normalization + DSP features.
+  # # ── PCEN + DSP ──
+  # - name: "13_pcen_dsp"
+  #   flags: --dsp-feature-sets v3,v4,v5 --use-pcen
+  #   note: PCEN mel normalization + DSP features.
 
-  # ── Best combo guesses ──
-  - name: "14_v3_v4_hop128"
-    flags: --dsp-feature-sets v3,v4 --dsp-hop-length 128
-    note: V3+V4 at fine hop — best dynamics resolution.
+  # # ── Best combo guesses ──
+  # - name: "14_v3_v4_hop128"
+  #   flags: --dsp-feature-sets v3,v4 --dsp-hop-length 128
+  #   note: V3+V4 at fine hop — best dynamics resolution.
 
-  - name: "15_v3_v5_hop160"
-    flags: --dsp-feature-sets v3,v5 --dsp-hop-length 160
-    note: V3+V5 matching mel hop — minimal overhead.
+  # - name: "15_v3_v5_hop160"
+  #   flags: --dsp-feature-sets v3,v5 --dsp-hop-length 160
+  #   note: V3+V5 matching mel hop — minimal overhead.

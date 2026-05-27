@@ -76,7 +76,14 @@ def run(
     PRECISION_LEVELS = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99]
     _INFER_BATCH_SIZE = 16  # lower batch to avoid OOM on large models
 
-    FIELD_NAMES = ["model", "sweep", "precision", "sigma", "cov_pct", "first_pct", "bg"]
+    FIELD_NAMES = ["model", "sweep", "precision", "sigma", "cov_pct", "first_pct", "bg", "bg_alerts"]
+
+    def _count_alerts(dets: np.ndarray) -> int:
+        """Count contiguous alert runs (0→1 transitions)."""
+        if len(dets) == 0:
+            return 0
+        padded = np.pad(dets.astype(np.int8), (1, 0), constant_values=0)
+        return int(np.sum((padded[1:] == 1) & (padded[:-1] == 0)))
 
     # ── incremental CSV helpers ─────────────────────────────────────────
     def _load_csv() -> list[dict]:
@@ -395,12 +402,15 @@ def run(
                     segment_coverages.append(coverage)
                     segment_first_pct.append(first_pct)
                 bg_count = int(apply_hysteresis(bg_scores, sigma).sum())
+                bg_dets = apply_hysteresis(bg_scores, sigma)
+                bg_alerts = _count_alerts(bg_dets)
                 checkpoint_rows.append({
                     "model": label, "sweep": sweep,
                     "precision": f"P{int(pt * 100)}", "sigma": round(sigma, 4),
                     "cov_pct": round(np.mean(segment_coverages), 1),
                     "first_pct": round(np.median(segment_first_pct), 1),
-                    "bg": bg_count,
+                    "bg": int(bg_dets.sum()),
+                    "bg_alerts": bg_alerts,
                 })
 
             # Flush incrementally
@@ -410,7 +420,8 @@ def run(
                     f"✓ best={best_row['precision']} σ={best_row['sigma']:.3f} "
                     f"cov={best_row['cov_pct']:.0f}% "
                     f"1st={best_row['first_pct']:.0f}% "
-                    f"bg={best_row['bg']}/{len(bg_scores)}"
+                    f"bg={best_row['bg']}/{len(bg_scores)} "
+                    f"alerts={best_row.get('bg_alerts', '?')}"
                 )
                 # Append to all_rows and flush
                 all_rows.extend(checkpoint_rows)
@@ -441,11 +452,11 @@ def run(
     print(f"\n{'=' * 90}")
     print("TOP MODELS at PRECISION=0.90")
     print(f"{'=' * 90}")
-    print(f"{'#':>3} {'model':<45} {'σ':>7} {'cov%':>6} {'1st%':>6} {'bg':>5} {'sweep'}")
+    print(f"{'#':>3} {'model':<45} {'σ':>7} {'cov%':>6} {'1st%':>6} {'bg':>5} {'alerts':>7} {'sweep'}")
     print(f"{'-' * 90}")
     for i, r in enumerate(p90[:15]):
         print(
             f"{i + 1:>3} {r['model']:<45} {float(r['sigma']):>7.4f} "
             f"{float(r['cov_pct']):>6.1f} {float(r['first_pct']):>6.1f} "
-            f"{int(r['bg']):>5} {r.get('sweep', '')}"
+            f"{int(r.get('bg', 0)):>5} {str(r.get('bg_alerts', '-') or '-'):>7} {r.get('sweep', '')}"
         )

@@ -67,31 +67,80 @@ def run(argv: list[str] | None = None) -> int:
         help="Mel spectrogram preset. vit_224: n_mels=224, hop_length=179. "
         "custom: use --n-mels/--n-fft/--hop-length below.",
     )
-    ap.add_argument("--n-mels", type=int, default=None,
-                    help="Override n_mels (requires --mel-preset custom)")
-    ap.add_argument("--n-fft", type=int, default=None,
-                    help="Override n_fft (requires --mel-preset custom)")
-    ap.add_argument("--hop-length", type=int, default=None,
-                    help="Override hop_length (requires --mel-preset custom)")
-    ap.add_argument("--use-pcen", action="store_true",
-                    help="Use PCEN instead of dB conversion + scalar normalization")
+    ap.add_argument(
+        "--n-mels",
+        type=int,
+        default=None,
+        help="Override n_mels (requires --mel-preset custom)",
+    )
+    ap.add_argument(
+        "--n-fft",
+        type=int,
+        default=None,
+        help="Override n_fft (requires --mel-preset custom)",
+    )
+    ap.add_argument(
+        "--hop-length",
+        type=int,
+        default=None,
+        help="Override hop_length (requires --mel-preset custom)",
+    )
+    ap.add_argument(
+        "--use-pcen",
+        action="store_true",
+        help="Use PCEN instead of dB conversion + scalar normalization",
+    )
     ap.add_argument("--pcen-s", type=float, default=0.025)
     ap.add_argument("--pcen-alpha", type=float, default=0.98)
     ap.add_argument("--pcen-delta", type=float, default=2.0)
     ap.add_argument("--pcen-r", type=float, default=0.5)
-    ap.add_argument("--use-dsp-features", action="store_true",
-                    help="Use DSP feature channels in mel input (DSPDroneDetector)")
-    ap.add_argument("--dsp-feature-sets", type=str, default="v3,v4,v5",
-                    help="Comma-separated DSP feature sets: v3,v4,v5")
-    ap.add_argument("--dsp-hop-length", type=int, default=256,
-                    help="Hop length for DSP mel transform")
-    ap.add_argument("--dsp-projector-hidden", type=int, default=64,
-                    help="Hidden dim for DSP→mel projector MLP")
+    ap.add_argument(
+        "--use-dsp-features",
+        action="store_true",
+        help="Use DSP feature channels in mel input (DSPDroneDetector)",
+    )
+    ap.add_argument(
+        "--use-dsp-branch",
+        action="store_true",
+        help="Use DSP features as separate branch fused with backbone embedding (MNBranchDSPDetector)",
+    )
+    ap.add_argument(
+        "--dsp-feature-sets",
+        type=str,
+        default="v3,v4,v5",
+        help="Comma-separated DSP feature sets: v3,v4,v5",
+    )
+    ap.add_argument(
+        "--dsp-hop-length",
+        type=int,
+        default=256,
+        help="Hop length for DSP mel transform",
+    )
+    ap.add_argument(
+        "--dsp-projector-hidden",
+        type=int,
+        default=64,
+        help="Hidden dim for DSP→mel projector MLP (DSPDroneDetector)",
+    )
+    ap.add_argument(
+        "--dsp-emb-dim",
+        type=int,
+        default=256,
+        help="DSP branch encoder output dim (MNBranchDSPDetector)",
+    )
+    ap.add_argument(
+        "--fusion-hidden",
+        type=int,
+        default=512,
+        help="Fusion MLP hidden dim (MNBranchDSPDetector)",
+    )
     # ── Optimizer ──
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument(
-        "--lr-schedule", choices=["constant", "cosine", "linear"], default="constant"
+        "--lr-schedule",
+        choices=["constant", "cosine", "linear"],
+        default="constant",
     )
     ap.add_argument("--warmup-epochs", type=int, default=0)
     # ── Training ──
@@ -116,8 +165,12 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--augment", action="store_true", help="Enable audio augmentations"
     )
-    ap.add_argument("--doppler-prob", type=float, default=0.2,
-                    help="Probability of Doppler shift on drone (0-1)")
+    ap.add_argument(
+        "--doppler-prob",
+        type=float,
+        default=0.2,
+        help="Probability of Doppler shift on drone (0-1)",
+    )
     # ── Finetuning ──
     ap.add_argument("--finetune-from", type=Path, default=None)
     ap.add_argument("--pretrained-checkpoint", type=Path, default=None)
@@ -143,9 +196,11 @@ def run(argv: list[str] | None = None) -> int:
         warmup_epochs=args.warmup_epochs,
         max_epochs=args.epochs,
     )
-    aug_cfg = AugmentationConfig(
-        enable=True, doppler_prob=args.doppler_prob
-    ) if args.augment else None
+    aug_cfg = (
+        AugmentationConfig(enable=True, doppler_prob=args.doppler_prob)
+        if args.augment
+        else None
+    )
 
     mix_cfg = MixConfig(
         noise_path=args.noise_path,
@@ -202,21 +257,43 @@ def run(argv: list[str] | None = None) -> int:
         mel_cfg = MelConfig()
     # PCEN override (works with any preset)
     if args.use_pcen:
-        mel_cfg = replace(mel_cfg,
-                          use_pcen=True,
-                          pcen_s=args.pcen_s,
-                          pcen_alpha=args.pcen_alpha,
-                          pcen_delta=args.pcen_delta,
-                          pcen_r=args.pcen_r)
+        mel_cfg = replace(
+            mel_cfg,
+            use_pcen=True,
+            pcen_s=args.pcen_s,
+            pcen_alpha=args.pcen_alpha,
+            pcen_delta=args.pcen_delta,
+            pcen_r=args.pcen_r,
+        )
     detector_cls = DroneDetector
     detector_kwargs: dict = {}
+    if args.use_dsp_features and args.use_dsp_branch:
+        raise SystemExit(
+            "--use-dsp-features and --use-dsp-branch are mutually exclusive. "
+            "Choose one DSP integration strategy."
+        )
     if args.use_dsp_features:
         from audi.training.dsp_detector import DSPDroneDetector
+
         detector_cls = DSPDroneDetector
         detector_kwargs.update(
-            dsp_feature_sets=[s.strip() for s in args.dsp_feature_sets.split(",") if s.strip()],
+            dsp_feature_sets=[
+                s.strip() for s in args.dsp_feature_sets.split(",") if s.strip()
+            ],
             dsp_hop_length=args.dsp_hop_length,
             dsp_projector_hidden=args.dsp_projector_hidden,
+        )
+    elif args.use_dsp_branch:
+        from audi.training.mn_dsp_branch_detector import MNBranchDSPDetector
+
+        detector_cls = MNBranchDSPDetector
+        detector_kwargs.update(
+            dsp_feature_sets=[
+                s.strip() for s in args.dsp_feature_sets.split(",") if s.strip()
+            ],
+            dsp_hop_length=args.dsp_hop_length,
+            dsp_emb_dim=args.dsp_emb_dim,
+            fusion_hidden=args.fusion_hidden,
         )
     detector = detector_cls(
         model=model_cfg,

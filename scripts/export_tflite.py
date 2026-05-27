@@ -120,8 +120,8 @@ def main() -> int:
         ]
     )
     mix_cfg_cal = MixConfig(
-        noise_path=args.noise_path,
-        drone_path=args.drone_path,
+        noise_path=Path(args.noise_path),
+        drone_path=Path(args.drone_path),
         snr_bins=snr_bins,
         target_length_samples=int(16000 * 5.12),
         dataset_length=args.calib_samples,
@@ -196,8 +196,8 @@ def main() -> int:
     L.seed_everything(123)
     val_ds = make_dataset(
         cfg=MixConfig(
-            noise_path=args.noise_path,
-            drone_path=args.drone_path,
+            noise_path=Path(args.noise_path),
+            drone_path=Path(args.drone_path),
             snr_bins=snr_bins,
             target_length_samples=int(16000 * 5.12),
             dataset_length=3200,

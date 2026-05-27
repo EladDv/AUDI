@@ -1,0 +1,52 @@
+name: efficientat
+noise_path: data/HF_dataset_v6_background
+drone_path: data/HF_dataset_v2_drone
+description: EfficientAT pre-trained models (AudioSet → drone detection fine-tuning)
+base_flags: >-
+  --clip-seconds 5.12 --patience 0 --epochs 25
+  --noise2 data/hf_dataset_sharded_expanded_merged --batch-size 24
+  --loss bce --label-smoothing 0.1 --augment --lr 1e-4
+  --lr-schedule linear
+configs:
+  - name: "01_all"
+    flags: --dsp-feature-sets v3,v4,v5 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
+    note: All features — V3+V4+V5 (11 feats).
+
+  - name: "02_proj128"
+    flags: --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
+    note: Large projector MLP — more capacity.
+
+  - name: "03_hop320"
+    flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 320 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
+    note: Coarse time — 20ms hop, faster.
+
+  # ── Dynamic MobileNets (DyMN) ──────────────────────────────────────
+  - name: "11_dymn04_as"
+    flags: --arch dymn04_as
+    note: DyMN width=0.4, 1.97M params, AudioSet mAP 45.0
+  - name: "12_dymn10_as"
+    flags: --arch dymn10_as
+    note: DyMN width=1.0, 10.57M params, AudioSet mAP 47.7
+  - name: "13_dymn20_as"
+    flags: --arch dymn20_as
+    note: DyMN width=2.0, 40.02M params, AudioSet mAP 49.1
+
+  # ── MobileNets (MN) — core variants ───────────────────────────────
+  - name: "14_mn04_as"
+    flags: --arch mn04_as
+    note: MN width=0.4, 0.98M params, AudioSet mAP 43.2
+  - name: "15_mn05_as"
+    flags: --arch mn05_as
+    note: MN width=0.5, 1.43M params, AudioSet mAP 44.3
+  - name: "16_mn10_as"
+    flags: --arch mn10_as
+    note: MN width=1.0, 4.88M params, AudioSet mAP 47.1
+  - name: "17_mn20_as"
+    flags: --arch mn20_as
+    note: MN width=2.0, 17.91M params, AudioSet mAP 47.8
+  - name: "18_mn30_as"
+    flags: --arch mn30_as
+    note: MN width=3.0, 39.09M params, AudioSet mAP 48.2
+  # - name: "19_mn40_as"
+  #   flags: --arch mn40_as
+  #   note: MN width=4.0, 68.43M params, AudioSet mAP 48.4

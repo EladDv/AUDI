@@ -8,6 +8,11 @@ from __future__ import annotations
 import numpy as np
 
 
+def _sigmoid(logits: np.ndarray) -> np.ndarray:
+    """Safe sigmoid: clip logits to prevent exp overflow in float64."""
+    return 1.0 / (1.0 + np.exp(-np.clip(logits, -10.0, 10.0)))
+
+
 def compute_roc_values(
     logits: np.ndarray,
     labels: np.ndarray,
@@ -24,7 +29,7 @@ def compute_roc_values(
         Tuple of (fpr, tpr, thresholds, auc). Thresholds are sigmoid
         probabilities in [0, 1]. AUC via trapezoidal integration.
     """
-    probs = 1.0 / (1.0 + np.exp(-logits))
+    probs = _sigmoid(logits)
 
     if len(probs) == 0 or int(labels.sum()) == 0 or int((1 - labels).sum()) == 0:
         th = np.linspace(0.0, 1.0, num_thresholds)
@@ -66,7 +71,7 @@ def compute_precision(
     Returns:
         Precision array matching ``thresholds`` shape.
     """
-    probs = 1.0 / (1.0 + np.exp(-logits))
+    probs = _sigmoid(logits)
     pos = probs[labels > 0.5]
     neg = probs[labels < 0.5]
     prec = np.empty(len(thresholds), dtype=np.float64)
@@ -131,7 +136,7 @@ def compute_pr_curve(
     Returns:
         (precision, recall, thresholds, average_precision).
     """
-    probs = 1.0 / (1.0 + np.exp(-logits))
+    probs = _sigmoid(logits)
     if len(probs) == 0 or int(labels.sum()) == 0 or int((1 - labels).sum()) == 0:
         th = np.linspace(0.0, 1.0, num_thresholds)
         return np.zeros(num_thresholds), np.zeros(num_thresholds), th, 0.0
@@ -194,7 +199,7 @@ def compute_calibration(
     Returns:
         (expected, observed, counts, ece). ECE = Expected Calibration Error.
     """
-    probs = 1.0 / (1.0 + np.exp(-logits))
+    probs = _sigmoid(logits)
     if len(probs) == 0:
         return np.array([]), np.array([]), np.array([]), 0.0
 

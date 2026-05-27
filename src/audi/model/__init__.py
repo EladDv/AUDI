@@ -20,6 +20,7 @@ from audi.model.vision import (
     _build_resnet,
     _build_timm,
 )
+from audi.model.efficientat import EFFICIENTAT_MODELS, build_efficientat
 
 
 class AudioBackbone(nn.Module, ABC):
@@ -62,7 +63,8 @@ SUPPORTED_MODEL_ARCHS: tuple[str, ...] = (
   + MOBILENETV4_HYBRID_ARCHS \
   + MOBILEVIT_ARCHS \
   + MOBILEVITV2_ARCHS \
-  + _FASTERVIT_ARCHS
+  + _FASTERVIT_ARCHS \
+  + EFFICIENTAT_MODELS
 
 
 def build_model(
@@ -112,6 +114,11 @@ def build_model(
     if arch_lower in _FASTERVIT_ARCHS:
         return _build_fastervit(
             arch_lower, num_classes=num_classes, pretrained=pretrained
+        )
+
+    if arch_lower in EFFICIENTAT_MODELS:
+        return build_efficientat(
+            arch_lower, num_classes=num_classes
         )
 
     supported = ", ".join(SUPPORTED_MODEL_ARCHS)

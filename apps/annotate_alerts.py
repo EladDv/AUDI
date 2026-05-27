@@ -251,11 +251,8 @@ def main():
         st.session_state.segments = load_segments()
     segments = st.session_state.segments
 
-    # Order
-    unlabeled = [a for a in alerts if a["alert_dir"] not in labels]
-    labeled_items = [a for a in alerts if a["alert_dir"] in labels
-                     and labels[a["alert_dir"]] in ("drone", "nodrone")]
-    ordered = unlabeled + labeled_items
+    # Order — sort by directory name
+    ordered = sorted(alerts, key=lambda a: a["alert_dir"])
 
     if "alert_idx" not in st.session_state:
         st.session_state.alert_idx = 0
@@ -404,7 +401,7 @@ def main():
     # ── Gain + audio player ──
     gc1, gc2 = st.columns([1, 5])
     with gc1:
-        gain_db = st.slider("Gain (dB)", -24, 24, 0, 1, key="gain")
+        gain_db = st.slider("Gain (dB)", 10, 40, 30, 1, key="gain")
     with gc2:
         if wav_path.exists():
             audio_bytes = make_audio_bytes(audio, gain_db)
