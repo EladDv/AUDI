@@ -47,6 +47,7 @@ def load_sweep_config(yaml_path: str | Path) -> dict[str, Any]:
         "noise_path": data.get("noise_path", ""),
         "drone_path": data.get("drone_path", ""),
         "description": data.get("description", ""),
+        "mode": data.get("mode", "detect"),
     }
 
 
@@ -103,6 +104,7 @@ def run_config(
     name: str, flags: str, sweep_dir: Path,
     noise_path: str = "", drone_path: str = "",
     sweep_name: str = "",
+    mode: str = "detect",
 ) -> Path | None:
     """Run one training config. Returns run_dir on success, None on failure."""
     run_dir = sweep_dir / name
@@ -130,12 +132,13 @@ def run_config(
         shutil.rmtree(run_dir)
 
     # Build command with noise/drone paths
+    script_cmd = f"uv run audi-train {mode}"
     path_args = ""
-    if noise_path:
+    if noise_path and mode == "detect":
         path_args += f" --noise-path {noise_path}"
     if drone_path:
         path_args += f" --drone-path {drone_path}"
-    cmd = f"{TRAIN_SCRIPT_CMD} {BASE_FLAGS} {flags}{path_args} --output-dir {run_dir}"
+    cmd = f"{script_cmd} {flags}{path_args} --output-dir {run_dir}"
     print(f"\n{'=' * 60}")
     print(f"[{datetime.now():%H:%M:%S}] Running: {name}")
     print(f"  {cmd}")
@@ -259,6 +262,7 @@ def sweep_main(
     do_postprocess: bool = True,
     noise_path: str = "",
     drone_path: str = "",
+    mode: str = "detect",
 ) -> int:
     if sweep_dir is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -274,6 +278,7 @@ def sweep_main(
                 cfg["name"], cfg["flags"], sweep_dir,
                 noise_path=noise_path, drone_path=drone_path,
                 sweep_name=sweep_name,
+                mode=mode,
             )
             if run_dir is None:
                 results.append({"name": cfg["name"], "status": "failed"})
@@ -333,6 +338,7 @@ if __name__ == "__main__":
     # CLI overrides YAML
     noise_path = noise_path or cfg.get("noise_path", "")
     drone_path = drone_path or cfg.get("drone_path", "")
+    mode = cfg.get("mode", "detect")
 
     raise SystemExit(
         sweep_main(
@@ -340,5 +346,6 @@ if __name__ == "__main__":
             cfg["name"],
             noise_path=noise_path,
             drone_path=drone_path,
+            mode=mode,
         )
     )

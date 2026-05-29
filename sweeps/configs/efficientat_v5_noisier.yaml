@@ -4,20 +4,20 @@ drone_path: data/HF_dataset_v2_drone
 description: EfficientAT pre-trained models (AudioSet → drone detection fine-tuning)
 base_flags: >-
   --clip-seconds 5.12 --patience 0 --epochs 25
-  --noise2 data/hf_dataset_sharded_expanded_merged --batch-size 24
+  --noise2 data/hf_dataset_sharded_expanded_merged --noise2-prob 0.5 --noise2-multi-prob 0.5 --noise2-count 5 --noise2-max-attenuation -30 --batch-size 24
   --loss bce --label-smoothing 0.1 --augment --lr 1e-4
-  --lr-schedule linear --warmup-epochs 8 --weight-decay 0.03
+  --lr-schedule linear
 configs:
   - name: "01_all"
-    flags: --dsp-feature-sets v3,v4,v5 --arch convnext_small
+    flags: --dsp-feature-sets v3,v4,v5 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
     note: All features — V3+V4+V5 (11 feats).
 
   - name: "02_proj128"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128  --arch convnext_small
+    flags: --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
     note: Large projector MLP — more capacity.
 
   - name: "03_hop320"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 320 --arch convnext_small
+    flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 320 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
     note: Coarse time — 20ms hop, faster.
 
   # ── Dynamic MobileNets (DyMN) ──────────────────────────────────────

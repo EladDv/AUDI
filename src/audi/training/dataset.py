@@ -436,6 +436,8 @@ def make_dataset(
         return_components=return_components,
         aug=cfg.aug,
         noise2_ds=noise2_ds,
+        noise2_prob=cfg.noise2_prob,
+        noise2_multi_noise_prob=cfg.noise2_multi_noise_prob,
         noise2_count=cfg.noise2_count,
         noise2_max_attenuation_db=cfg.noise2_max_attenuation_db,
     )

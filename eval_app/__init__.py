@@ -27,6 +27,7 @@ from eval_app.audio_utils import (
 )
 from eval_app.ensemble import ensemble_viewer_page
 from eval_app.leaderboard import leaderboard_page
+from eval_app.field_viewer import field_viewer_page
 from eval_app.model_utils import (
     _CHECKPOINTS_DIR,
     discover_checkpoints,
@@ -65,17 +66,19 @@ def classify_bins_simple(scores, easy_th, medium_th, hard_th, vhard_th):
             result.append("extreme")
     return np.array(result)
 
-
 # ── Page selector ────────────────────────────────────────────────
 
 page = st.sidebar.radio(
     "Page",
-    ["Model Viewer", "Attack Run Leaderboard", "Ensemble Viewer"],
+    ["Model Viewer", "Attack Run Leaderboard", "Field Viewer", "Ensemble Viewer"],
     index=0,
 )
 
 if page == "Attack Run Leaderboard":
     leaderboard_page()
+    st.stop()
+elif page == "Field Viewer":
+    field_viewer_page()
     st.stop()
 elif page == "Ensemble Viewer":
     ensemble_viewer_page()
@@ -98,10 +101,11 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 PRECISION_THRESHOLDS = load_precision_thresholds()
 
 st.sidebar.header("Inference")
-stride = st.sidebar.slider(
-    "Window stride", 0.05, 1.0, 0.5, 0.05,
-    help="Fraction of window length. 0.5 = 50% overlap.",
+stride_ms = st.sidebar.slider(
+    "Window stride (ms)", 160, 1280, 320, 160,
+    help="Hop between windows in milliseconds. 160ms = 10% overlap on 5.12s window.",
 )
+stride = stride_ms / 1000 / _CLIP_S  # convert ms → fraction of window
 threshold = st.sidebar.slider(
     "Detection threshold", 0.0, 1.0, 0.5, 0.01,
     help="Sigmoid score threshold. Windows with score > threshold are flagged.",
@@ -182,7 +186,8 @@ n_windows = len(logits)
 # ── Precision thresholds for this model ─────────────────────────────────
 
 model_arch = get_model_arch_from_ckpt(selected_ckpt["path"])
-P_THRESH = PRECISION_THRESHOLDS.get(model_arch or "", {})
+model_ref = f"{selected_ckpt.get('run','')}/{selected_ckpt.get('exp_dir','')}"
+P_THRESH = PRECISION_THRESHOLDS.get(model_ref, {})
 
 # ── Metrics row ─────────────────────────────────────────────────────────
 
@@ -199,7 +204,7 @@ if P_THRESH:
     st.subheader("Detections at Precision Levels")
     cols = st.columns(len(P_THRESH))
     for i, (level, info) in enumerate(sorted(P_THRESH.items(), reverse=True)):
-        th = info["sigmoid_threshold"]
+        th = info["sigma"]  # sigma is already sigmoid probability
         n_det = int((scores > th).sum())
         pct = 100 * n_det / max(1, n_windows)
         with cols[i]:
@@ -337,7 +342,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 pred_file = find_predictions_file(selected_ckpt["path"])
 if pred_file:
-    st.subheader("Precision & Recall vs Threshold (validation set)")
+    st.subheader(f"Precision & Recall vs Threshold — {selected_ckpt['exp_dir']}")
     curve = compute_precision_recall_curve(pred_file)
 
     fig_cal = go.Figure()
@@ -349,16 +354,26 @@ if pred_file:
         x=curve["sig_thresholds"], y=curve["recalls"], mode="lines",
         name="recall", line=dict(color="#3498db", width=2),
     ))
-    for idx, label, color in [
-        (curve["p90_idx"], "P90", "#f1c40f"),
-        (curve["p95_idx"], "P95", "#e67e22"),
-        (curve["p99_idx"], "P99", "#e74c3c"),
-    ]:
-        fig_cal.add_trace(go.Scatter(
-            x=[curve["sig_thresholds"][idx]], y=[curve["precisions"][idx]],
-            mode="markers+text", marker=dict(size=10, color=color),
-            text=[label], textposition="top center", name=label, showlegend=False,
-        ))
+    # Overlay all P-level thresholds as markers on the precision curve
+    if P_THRESH:
+        level_colors = {
+            "P50": "#888", "P60": "#888", "P70": "#888", "P75": "#888",
+            "P80": "#888", "P85": "#888",
+            "P90": "#f1c40f", "P95": "#e67e22", "P99": "#e74c3c",
+        }
+        for level in sorted(P_THRESH.keys()):
+            sigma = P_THRESH[level]["sigma"]
+            color = level_colors.get(level, "#888")
+            size = 10 if level in ("P90", "P95", "P99") else 5
+            # Find nearest precision value on the curve
+            idx = int(np.argmin(np.abs(curve["sig_thresholds"] - sigma)))
+            fig_cal.add_trace(go.Scatter(
+                x=[sigma], y=[curve["precisions"][idx]],
+                mode="markers+text", marker=dict(size=size, color=color),
+                text=[level], textposition="top center",
+                name=level, showlegend=False,
+            ))
+
     user_prec = curve["precisions"][np.argmin(np.abs(curve["sig_thresholds"] - threshold))]
     user_rec = curve["recalls"][np.argmin(np.abs(curve["sig_thresholds"] - threshold))]
     fig_cal.add_vline(
@@ -370,7 +385,7 @@ if pred_file:
         height=300, margin=dict(l=20, r=20, t=10, b=20),
         hovermode="x unified", yaxis=dict(range=[0, 1.05]),
     )
-    st.plotly_chart(fig_cal, use_container_width=True)
+    st.plotly_chart(fig_cal, use_container_width=True, key=f"pr_curve_{selected_ckpt['exp_dir']}")
     st.caption("Precision and recall on validation set. Adjust threshold to trade off.")
 else:
     st.info("No eval_data predictions found — run postprocess first to see calibration curves.")

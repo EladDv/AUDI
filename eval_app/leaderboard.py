@@ -52,27 +52,63 @@ def leaderboard_page() -> None:
         )
     )
 
+    # ── Load field eval data ──────────────────────────────────────────
+    field_path = _CHECKPOINTS_DIR / "field_eval_all.csv"
+    field_data: dict[str, dict] = {}
+    if field_path.exists():
+        with open(field_path) as f:
+            for fr in csv.DictReader(f):
+                ref = f"{fr['ref']}" if 'ref' in fr else f"{fr['sweep']}/{fr['model']}"
+                p = fr.get("P", "")
+                if p not in field_data:
+                    field_data[p] = {}
+                field_data[p][ref] = fr
+
     st.subheader(f"{len(rows_filtered)} models at {precision_filter}")
     st.caption(
         "cov% = mean % of attack segment windows above threshold · "
         "1st% = median % of segment before first detection (lower=earlier) · "
-        "bg = background windows above threshold"
+        "bg = background windows above threshold · "
+        "field TP/FP = alert recordings with at least 1 detection"
     )
 
     if rows_filtered:
+        # Header
+        cols = st.columns([3, 1, 1, 1, 1, 1, 1, 1, 3])
+        cols[0].write("**model**")
+        cols[1].write("**σ**")
+        cols[2].write("**cov%**")
+        cols[3].write("**1st%**")
+        cols[4].write("**bg**")
+        cols[5].write("**TP**")
+        cols[6].write("**FP**")
+        cols[7].write("**FN**")
+        cols[8].write("**sweep**")
+
         for r in rows_filtered:
+            ref = f"{r.get('sweep','')}/{r['model']}"
             bg = int(r["bg"])
             bg_color = "green" if bg == 0 else "orange" if bg <= 3 else "red"
-            cols = st.columns([2, 1, 1, 1, 1, 2])
-            cols[0].write(r["model"])
-            cols[1].write(f"{float(r['sigma']):.3f}")
-            cols[2].write(f"{r['cov_pct']}%")
-            cols[3].write(f"{r['first_pct']}%")
-            cols[4].markdown(
+
+            # Field eval for this precision
+            field_info = field_data.get(precision_filter, {}).get(ref, {})
+            tp = field_info.get("alert_tp", "?")
+            fp = field_info.get("alert_fp", "?")
+            fn = field_info.get("alert_fn", "?")
+
+            cols2 = st.columns([3, 1, 1, 1, 1, 1, 1, 1, 3])
+            cols2[0].write(r["model"])
+            cols2[1].write(f"{float(r['sigma']):.3f}")
+            cols2[2].write(f"{r['cov_pct']}%")
+            cols2[3].write(f"{r['first_pct']}%")
+            cols2[4].markdown(
                 f"<span style='color:{bg_color}'>{bg}/60</span>",
                 unsafe_allow_html=True,
             )
-            cols[5].write(r.get("sweep", ""))
+            cols2[5].write(str(tp))
+            cols2[6].write(str(fp))
+            cols2[7].write(str(fn))
+            cols2[8].write(r.get("sweep", ""))
 
         best = rows_filtered[0]
         st.info(

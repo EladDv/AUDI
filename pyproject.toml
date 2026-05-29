@@ -27,6 +27,7 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "scipy>=1.15",
     "soundfile>=0.13.0",
+    "ssqueezepy>=0.6.6",
     "streamlit>=1.57.0",
     "tensorboard>=2.20.0",
     "tensorflow>=2.21.0",

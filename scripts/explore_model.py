@@ -285,83 +285,62 @@ def main():
     if args.field:
         FIELD_DIR = PROJECT / "data" / "field_recordings_20260514"
         print(f"\n{'='*80}")
-        print("FIELD RECORDINGS ANALYSIS")
+        print("FIELD ALERTS ANALYSIS")
         print(f"{'='*80}")
 
-        # Backgrounds (ground truth: no drone)
-        bg_dir = FIELD_DIR / "backgrounds"
-        bg_files = sorted(bg_dir.glob("*.wav"))
-        print(f"\n── Field backgrounds (no drone expected) ──")
-        for fp in bg_files:
-            audio, sr = torchaudio.load(str(fp))
+        # Alert recordings — use manual labels from labels.csv
+        alert_dir = FIELD_DIR / "alerts"
+        labels_csv = FIELD_DIR / "labels.csv"
+        alert_labels = {}
+        if labels_csv.exists():
+            with open(labels_csv) as f:
+                for r in csv.DictReader(f):
+                    alert_labels[r["alert_dir"]] = r["label"]
+
+        print(f"\n── Field alerts (manual labels: {sum(1 for v in alert_labels.values() if v=='drone')} drone, {sum(1 for v in alert_labels.values() if v=='nodrone')} nodrone) ──")
+        tp = 0
+        fn = 0
+        fp = 0
+        tn = 0
+        for d in sorted(alert_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            fp_wav = d / "full_120s.wav"
+            if not fp_wav.exists() or fp_wav.stat().st_size == 0:
+                continue
+            label = alert_labels.get(d.name, "drone")
+            try:
+                audio, sr = torchaudio.load(str(fp_wav))
+            except Exception as e:
+                print(f"  ⚠ skip {d.name}: {e}")
+                continue
             audio = audio.mean(dim=0).numpy().astype(np.float32)
             windows = split_into_windows(audio, clip_s)
             if not windows:
-                print(f"  {fp.name}: too short ({len(audio)/sr:.1f}s)")
                 continue
             scores = predict(np.stack(windows))
             dets = apply_hysteresis(scores, sigma)
             alerts = count_alerts(dets)
             max_score = scores.max()
-            status = "✗ FP" if alerts > 0 else "✓ clean"
-            print(f"  {status} {fp.name:<30} {len(windows):>4d} windows, "
-                  f"{dets.sum():>4d} det, {alerts:>2d} alerts, max_score={max_score:.3f}")
-
-        # Alert recordings (ground truth: drone present)
-        alert_dir = FIELD_DIR / "alerts"
-        print(f"\n── Field alerts (drone expected) ──")
-        tp = 0
-        fn = 0
-        for d in sorted(alert_dir.iterdir()):
-            if not d.is_dir():
-                continue
-            wavs = sorted([f for f in d.glob("*.wav") if f.stat().st_size > 0])
-            for fp in wavs:
-                try:
-                    audio, sr = torchaudio.load(str(fp))
-                except Exception as e:
-                    print(f"  ⚠ skip {d.name}/{fp.name}: {e}")
-                    continue
-                audio = audio.mean(dim=0).numpy().astype(np.float32)
-                windows = split_into_windows(audio, clip_s)
-                if not windows:
-                    continue
-                scores = predict(np.stack(windows))
-                dets = apply_hysteresis(scores, sigma)
-                alerts = count_alerts(dets)
-                max_score = scores.max()
-                if alerts > 0:
+            has_alert = alerts > 0
+            if label == "drone":
+                if has_alert:
                     tp += 1
                     status = "✓ TP"
                 else:
                     fn += 1
                     status = "✗ FN"
-                print(f"  {status} {d.name}/{fp.name:<30} {len(windows):>4d} windows, "
-                      f"{dets.sum():>4d} det, {alerts:>2d} alerts, max_score={max_score:.3f}")
-        print(f"\n  Field alert summary: {tp} TP, {fn} FN, recall={100*tp/max(1,tp+fn):.1f}%")
-
-        # Recordings (continuous segments, unknown ground truth)
-        rec_dir = FIELD_DIR / "recordings"
-        rec_files = sorted(rec_dir.glob("*.flac"))
-        print(f"\n── Field recordings ({len(rec_files)} segments) ──")
-        rec_alerts = 0
-        rec_total_windows = 0
-        rec_detections = 0
-        for fp in rec_files:
-            audio, sr = torchaudio.load(str(fp))
-            audio = audio.mean(dim=0).numpy().astype(np.float32)
-            windows = split_into_windows(audio, clip_s)
-            if not windows:
-                continue
-            scores = predict(np.stack(windows))
-            dets = apply_hysteresis(scores, sigma)
-            alerts = count_alerts(dets)
-            rec_alerts += alerts
-            rec_total_windows += len(windows)
-            rec_detections += dets.sum()
-        print(f"  Total windows: {rec_total_windows}")
-        print(f"  Detections: {rec_detections} ({100*rec_detections/max(1,rec_total_windows):.2f}%)")
-        print(f"  Alerts: {rec_alerts}")
+            else:
+                if has_alert:
+                    fp += 1
+                    status = "✗ FP"
+                else:
+                    tn += 1
+                    status = "✓ TN"
+            print(f"  {status} {d.name:<30} {len(windows):>4d} windows, "
+                  f"{dets.sum():>4d} det, {alerts:>2d} alerts, max_score={max_score:.3f}")
+        print(f"\n  Summary: TP={tp} FP={fp} FN={fn} TN={tn}  "
+              f"recall={100*tp/max(1,tp+fn):.1f}%  precision={100*tp/max(1,tp+fp):.1f}%")
 
     print(f"\n{'='*80}")
     print("Done!")

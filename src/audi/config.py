@@ -56,6 +56,11 @@ class MelConfig:
     pcen_delta: float = 2.0
     pcen_r: float = 0.5
     pcen_eps: float = 1e-6
+    # Multi-frontend: "mel" (default), or "cqt", "cwt", "mel,cqt", "mel,cwt", "mel,cqt,cwt"
+    frontend_type: str = "mel"
+    cqt_bins: int = 84
+    cqt_bpo: int = 12
+    cwt_scales: int = 64
 
     @classmethod
     def vit_224(cls) -> MelConfig:
@@ -178,6 +183,8 @@ class MixConfig:
     highpass_hz: float = 125.0
     sample_rate: int = 16000
     noise2_path: Path | None = None
+    noise2_prob: float = 0.25
+    noise2_multi_noise_prob: float = 0.5
     noise2_count: int = 2
     noise2_max_attenuation_db: float = -50.0
     dataset_length: int | None = None

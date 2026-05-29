@@ -19,6 +19,7 @@ from audi.checkpoint import load_model_from_checkpoint
 
 ROOT = Path(__file__).resolve().parent.parent
 ALERTS_DIR = ROOT / "data/field_recordings_20260514/alerts"
+LABELS_CSV = ROOT / "data/field_recordings_20260514/labels.csv"
 CKPT = "checkpoints/bce_wd_sweep_20260518_122516/01_wd_003/checkpoints/epoch=12-step=3250.ckpt"
 THRESHOLDS = [0.5, 0.75, 0.9]
 HOP_S = 0.32
@@ -138,6 +139,14 @@ def main() -> int:
                 print(f"    ... and {len(failed)-10} more")
 
     # ── Per-file detail table ──
+    # Load manual labels for TP/FP reporting
+    alert_labels = {}
+    if LABELS_CSV.exists():
+        import csv
+        with open(LABELS_CSV) as f:
+            for r in csv.DictReader(f):
+                alert_labels[r["alert_dir"]] = r["label"]
+
     print(f"\n{'='*72}")
     print(f"  Per-file detail (sorted by max score)")
     print(f"{'='*72}")
@@ -146,8 +155,29 @@ def main() -> int:
           f"{' '.join(f'@{t:.2f}' for t in THRESHOLDS)}")
     print("-" * 72)
     for alert_dir, max_s, mean_s, p90_s in results:
+        label = alert_labels.get(alert_dir, "?")
         marks = " ".join(" ✓" if max_s >= t else " ✗" for t in THRESHOLDS)
-        print(f"{alert_dir:<30s} {max_s:8.4f} {mean_s:8.4f} {p90_s:8.4f}  {marks}")
+        print(f"{alert_dir:<30s} {max_s:8.4f} {mean_s:8.4f} {p90_s:8.4f}  {label:<8s} {marks}")
+
+    # TP/FP summary per threshold
+    if alert_labels:
+        print(f"\n{'='*72}")
+        print("  TP/FP breakdown (using manual labels)")
+        print(f"{'='*72}")
+        for thresh in THRESHOLDS:
+            tp = fp = fn = tn = 0
+            for alert_dir, max_s, mean_s, p90_s in results:
+                label = alert_labels.get(alert_dir, "?")
+                detected = max_s >= thresh
+                if label == "drone":
+                    if detected: tp += 1
+                    else: fn += 1
+                elif label == "nodrone":
+                    if detected: fp += 1
+                    else: tn += 1
+            total = tp + fp + fn + tn
+            print(f"  @{thresh:.2f}: TP={tp} FP={fp} FN={fn} TN={tn}  "
+                  f"recall={100*tp/max(1,tp+fn):.1f}%  precision={100*tp/max(1,tp+fp):.1f}%")
 
     # ── Save scores JSON for annotation app ──
     scores_json = ROOT / "data/field_recordings_20260514/wd003_scores.json"

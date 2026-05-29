@@ -37,6 +37,14 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--noise2", type=Path, default=None, help="Secondary noise dataset"
     )
+    ap.add_argument("--noise2-prob", type=float, default=0.25,
+                    help="Probability of mixing noise2 into a sample (0-1)")
+    ap.add_argument("--noise2-multi-prob", type=float, default=0.5,
+                    help="When noise2 is used, probability of mixing multiple noise2 clips")
+    ap.add_argument("--noise2-count", type=int, default=3,
+                    help="Max number of extra noise2 layers")
+    ap.add_argument("--noise2-max-attenuation", type=float, default=-40.0,
+                    help="Minimum dB of noise2 relative to base noise (more negative = quieter)")
     ap.add_argument(
         "--snr-bin",
         action="append",
@@ -94,6 +102,11 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--pcen-alpha", type=float, default=0.98)
     ap.add_argument("--pcen-delta", type=float, default=2.0)
     ap.add_argument("--pcen-r", type=float, default=0.5)
+    ap.add_argument("--frontend-type", default="mel",
+                    help="Frontend type: mel, cqt, cwt, or comma-separated like mel,cqt")
+    ap.add_argument("--cqt-bins", type=int, default=84)
+    ap.add_argument("--cqt-bpo", type=int, default=12)
+    ap.add_argument("--cwt-scales", type=int, default=64)
     ap.add_argument(
         "--use-dsp-features",
         action="store_true",
@@ -206,6 +219,10 @@ def run(argv: list[str] | None = None) -> int:
         noise_path=args.noise_path,
         drone_path=args.drone_path,
         noise2_path=args.noise2,
+        noise2_prob=args.noise2_prob,
+        noise2_multi_noise_prob=args.noise2_multi_prob,
+        noise2_count=args.noise2_count,
+        noise2_max_attenuation_db=args.noise2_max_attenuation,
         snr_bins=snr_bins,
         target_length_samples=clip_samples,
         positive_probability=args.positive_probability,
@@ -264,6 +281,15 @@ def run(argv: list[str] | None = None) -> int:
             pcen_alpha=args.pcen_alpha,
             pcen_delta=args.pcen_delta,
             pcen_r=args.pcen_r,
+        )
+    # Frontend override
+    if args.frontend_type != "mel":
+        mel_cfg = replace(
+            mel_cfg,
+            frontend_type=args.frontend_type,
+            cqt_bins=args.cqt_bins,
+            cqt_bpo=args.cqt_bpo,
+            cwt_scales=args.cwt_scales,
         )
     detector_cls = DroneDetector
     detector_kwargs: dict = {}

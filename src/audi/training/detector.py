@@ -131,26 +131,51 @@ class DroneDetector(L.LightningModule):
 
         self.save_hyperparameters()
 
-        # ── Mel frontend ─────────────────────────────────────────
-        self._mel_transform = T.MelSpectrogram(
-            sample_rate=mel_cfg.sample_rate,
-            n_fft=mel_cfg.n_fft,
-            hop_length=mel_cfg.hop_length,
-            n_mels=mel_cfg.n_mels,
-        )
+        # ── Frontend ───────────────────────────────────────────────
+        self._frontend_type = mel_cfg.frontend_type
         self._use_pcen = mel_cfg.use_pcen
-        if mel_cfg.use_pcen:
-            self._pcen = PCEN(
-                s=mel_cfg.pcen_s,
-                alpha=mel_cfg.pcen_alpha,
-                delta=mel_cfg.pcen_delta,
-                r=mel_cfg.pcen_r,
-                eps=mel_cfg.pcen_eps,
+        self._frontend_channels = mel_cfg.n_mels  # default for mel-only
+
+        if mel_cfg.frontend_type != "mel":
+            from audi.frontend import build_frontend
+            fe, fe_channels, pcen_mod = build_frontend(
+                mel_cfg.frontend_type,
+                sample_rate=mel_cfg.sample_rate,
+                hop_length=mel_cfg.hop_length,
+                n_mels=mel_cfg.n_mels,
+                n_fft=mel_cfg.n_fft,
+                use_pcen=mel_cfg.use_pcen,
+                cqt_bins=mel_cfg.cqt_bins,
+                cqt_bpo=mel_cfg.cqt_bpo,
+                cwt_scales=mel_cfg.cwt_scales,
             )
+            self._multi_frontend = fe
+            self._frontend_channels = fe_channels
+            self._input_bn = torch.nn.BatchNorm2d(3)
+            self._pcen = None
             self._to_db = None
         else:
-            self._pcen = None
-            self._to_db = T.AmplitudeToDB()
+            self._multi_frontend = None
+            self._input_bn = None
+            self._mel_transform = T.MelSpectrogram(
+                sample_rate=mel_cfg.sample_rate,
+                n_fft=mel_cfg.n_fft,
+                hop_length=mel_cfg.hop_length,
+                n_mels=mel_cfg.n_mels,
+            )
+            self._use_pcen = mel_cfg.use_pcen
+            if mel_cfg.use_pcen:
+                self._pcen = PCEN(
+                    s=mel_cfg.pcen_s,
+                    alpha=mel_cfg.pcen_alpha,
+                    delta=mel_cfg.pcen_delta,
+                    r=mel_cfg.pcen_r,
+                    eps=mel_cfg.pcen_eps,
+                )
+                self._to_db = None
+            else:
+                self._pcen = None
+                self._to_db = T.AmplitudeToDB()
 
         # Scalar mel normalization
         if mel_cfg.mean_db is not None:
@@ -231,14 +256,13 @@ class DroneDetector(L.LightningModule):
     # ── Featurization ────────────────────────────────────────────
 
     def _to_mel(self, wav: torch.Tensor) -> torch.Tensor:
-        """Convert waveform to normalized 3-channel mel spectrogram.
+        """Convert waveform to normalized 3-channel spectrogram."""
+        if self._multi_frontend is not None:
+            feats = self._multi_frontend(wav)   # (B, C, T)
+            spec = feats.unsqueeze(1).expand(-1, 3, -1, -1)  # (B, 3, C, T)
+            spec = self._input_bn(spec)
+            return spec
 
-        Args:
-            wav: Waveform tensor of shape ``[B, T]``.
-
-        Returns:
-            Spectrogram tensor of shape ``[B, 3, n_mels, T_frames]``.
-        """
         mel = self._mel_transform(wav)
         if self._use_pcen:
             mel = self._pcen(mel)

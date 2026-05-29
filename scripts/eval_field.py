@@ -101,18 +101,29 @@ def main():
 
     bg_files = load_wavs(list((FIELD_DIR / "backgrounds").glob("*.wav")))
 
-    alert_files: list[tuple[str, np.ndarray]] = []
+    # Load manual labels
+    labels_csv = FIELD_DIR / "labels.csv"
+    alert_labels: dict[str, str] = {}
+    if labels_csv.exists():
+        with open(labels_csv) as f:
+            for r in csv.DictReader(f):
+                alert_labels[r["alert_dir"]] = r["label"]
+
+    alert_files: list[tuple[str, np.ndarray, str]] = []  # (dir_name, audio, label)
     alert_dir = FIELD_DIR / "alerts"
     if alert_dir.exists():
         for d in sorted(alert_dir.iterdir()):
             if not d.is_dir():
                 continue
-            for fp in sorted([f for f in d.glob("*.wav") if f.stat().st_size > 0]):
-                try:
-                    audio, sr = torchaudio.load(str(fp))
-                except Exception:
-                    continue
-                alert_files.append((f"{d.name}/{fp.name}", audio.mean(dim=0).numpy().astype(np.float32)))
+            fp = d / "full_120s.wav"
+            if not fp.exists() or fp.stat().st_size == 0:
+                continue
+            try:
+                audio, sr = torchaudio.load(str(fp))
+            except Exception:
+                continue
+            label = alert_labels.get(d.name, "drone")
+            alert_files.append((d.name, audio.mean(dim=0).numpy().astype(np.float32), label))
 
     rec_files: list[tuple[str, np.ndarray]] = []
     rec_dir = FIELD_DIR / "recordings"
