@@ -133,8 +133,8 @@ def load_config(config_path: str = None) -> dict:
             "color_hysteresis_window": 5,
             "color_hysteresis_ratio": 0.6,
             "alert_on_red": True,
-            "alert_on_blue": True,
-            "alert_on_unknown": True,
+            "alert_on_blue": False,
+            "alert_on_unknown": False,
             "save_color_trace": True,
             "inference_interval": 5,
             "labels": ["drone"],
@@ -481,9 +481,9 @@ def main():
             import RPi.GPIO
 
             logger.info("  RPi.GPIO: available")
-        except ImportError:
+        except (ImportError, RuntimeError) as exc:
             logger.warning(
-                "  RPi.GPIO: not available (expected on dev machine)"
+                "  RPi.GPIO: not usable on this host (%s)", exc
             )
         try:
             from ai_edge_litert.interpreter import Interpreter  # noqa: F401

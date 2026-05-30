@@ -18,6 +18,12 @@ Or for a fully automated install:
 sudo bash scripts/install-pi.sh
 ```
 
+To deploy from your workstation to a Pi over SSH:
+
+```bash
+scripts/deploy-pi.sh <pi-ip> <username> '<password>'
+```
+
 ## Architecture
 
 ```
@@ -51,7 +57,7 @@ sudo bash scripts/install-pi.sh
 |--------|------|-------------|
 | **Recorder** | `src/recorder.py` | Captures audio via `arecord` (ALSA) in 5-minute WAV segments. Maintains an **in-memory ring buffer** of the last 120 seconds of float32 PCM samples (60s pre-alarm + 60s post-alarm). Supports pause/resume and stop/start toggling. |
 | **Storage** | `src/storage.py` | Compresses old WAVs to FLAC (~6:1 ratio). Enforces a **32GB storage cap** — oldest files are evicted first when over budget or disk space runs low. |
-| **Detector** | `src/detector.py` | TFLite int8 classifier with Schmitt-trigger hysteresis (3 of 5 windows). Binary YES/NO state, alarm snapshot saving, temporal confidence tracking. |
+| **Detector** | `src/detector.py` | TFLite classifier with Schmitt-trigger hysteresis (5 of 8 windows). Supports detector-only `[det]` and combined `[det, blue, red]` outputs, alarm snapshot saving, and temporal confidence tracking. |
 | **GPIO** | `src/gpio_alarm.py` | Drives Pi GPIO pins: ALERT (buzzer/relay), STROBE (blinking LED), RESET (physical button to silence), REC_LED (recording indicator), REC_BTN (record toggle), PAUSE_BTN (pause 5 min). Graceful mock fallback when not on Pi hardware. |
 | **Web UI** | `src/webui_server.py` | Flask server serving a **touch-optimized HTML UI**. Big Start/Stop buttons (green/red, mutual exclusive), Silence and Pause controls, live VU meter, YES/BLUE/NO state card, alert history, system info panel. |
 | **Main** | `src/main.py` | Orchestrator — starts everything, wires callbacks, handles graceful shutdown on SIGTERM/SIGINT. |
@@ -77,11 +83,13 @@ storage:
   max_alerts_gb: 2
 
 detection:
-  model_path: /app/models/model.tflite
+  model_path: /app/models/model_combined_dymn10_blue_red.tflite
   inference_interval: 0.320
   active_threshold_profile: balanced
   threshold_profiles_file: ./threshold_profiles.yaml
-  confidence_threshold_high: 0.70    # YES → GPIO alarm
+  mel_mean: 10.430418
+  mel_std: 5.288271
+  confidence_threshold_high: 0.6703  # YES → GPIO alarm
 
 gpio:
   enabled: true
@@ -177,15 +185,15 @@ The web UI will be at http://localhost:8080.
 
 ## Adding a Real TFLite Model
 
-1. Export your model using `audi-export-tflite`:
+1. Export the combined detector + blue/red model:
    ```bash
-   uv run python scripts/export_tflite.py --ckpt ... --noise-path ... --drone-path ...
+   uv run python scripts/export_blue_red_tflite.py --ckpt ... --output audi-app/models/model_combined_dymn10_blue_red.tflite
    ```
 2. Copy the `.tflite` file to the Pi and mount it:
    ```yaml
    # docker/docker-compose.yml override
    volumes:
-     - /path/to/model.tflite:/app/models/model.tflite
+     - /path/to/model_combined_dymn10_blue_red.tflite:/app/models/model_combined_dymn10_blue_red.tflite
    ```
 3. Update `config.yaml` thresholds to match
 

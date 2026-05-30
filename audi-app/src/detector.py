@@ -22,6 +22,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -81,35 +82,75 @@ def compute_mel_spectrogram(
     f_max: float | None = None,
     power: float = 2.0,
 ) -> np.ndarray:
-    """Compute mel spectrogram matching torchaudio (librosa backend).
+    """Compute mel-dB spectrogram matching the training torchaudio frontend.
 
-    Uses librosa with center=True (pad on both sides), periodic Hann
-    window, and ``10 * log10(S)`` conversion — identical to
-    ``torchaudio.transforms.MelSpectrogram + AmplitudeToDB`` defaults.
+    The detector checkpoint was trained with:
+    ``torchaudio.transforms.MelSpectrogram(..., norm=None, mel_scale="htk",
+    center=True, pad_mode="reflect")`` followed by ``AmplitudeToDB()``.
+    Librosa's high-level ``melspectrogram`` defaults do not match those
+    settings, so this function implements the STFT path explicitly.
     """
-    import librosa
 
     if f_max is None:
         f_max = sample_rate / 2.0
+    if power != 2.0:
+        raise ValueError("Only power=2.0 matches the trained detector frontend")
 
-    mel = librosa.feature.melspectrogram(
-        y=audio,
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+
+    # torchaudio Spectrogram(center=True, pad_mode="reflect") pads by n_fft // 2
+    # before framing. torch.hann_window defaults to periodic=True.
+    pad = n_fft // 2
+    padded = np.pad(audio, (pad, pad), mode="reflect")
+    if len(padded) < n_fft:
+        padded = np.pad(padded, (0, n_fft - len(padded)), mode="constant")
+
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    frames = sliding_window_view(padded, n_fft)[::hop_length]
+    window = _periodic_hann_window(n_fft)
+    spec = np.fft.rfft(frames * window[np.newaxis, :], n=n_fft, axis=1)
+    power_spec = (spec.real * spec.real + spec.imag * spec.imag).T
+
+    mel_fb = _torchaudio_mel_filterbank(
+        n_mels=n_mels,
+        n_fft=n_fft,
+        sample_rate=sample_rate,
+        f_min=float(f_min),
+        f_max=float(f_max),
+    )
+    mel = mel_fb @ power_spec
+    mel = 10.0 * np.log10(np.maximum(mel, 1e-10))
+
+    return mel.astype(np.float32)
+
+
+@lru_cache(maxsize=16)
+def _periodic_hann_window(n_fft: int) -> np.ndarray:
+    return np.hanning(n_fft + 1)[:-1].astype(np.float32)
+
+
+@lru_cache(maxsize=16)
+def _torchaudio_mel_filterbank(
+    *,
+    n_mels: int,
+    n_fft: int,
+    sample_rate: int,
+    f_min: float,
+    f_max: float,
+) -> np.ndarray:
+    """Return torchaudio-compatible HTK, unnormalized mel filters."""
+    import librosa
+
+    return librosa.filters.mel(
         sr=sample_rate,
         n_fft=n_fft,
-        hop_length=hop_length,
         n_mels=n_mels,
         fmin=f_min,
         fmax=f_max,
-        power=power,
-        window="hann",
-        center=True,
-    )
-
-    # Power → dB (torchaudio AmplitudeToDB default: 10*log10, ref=1.0)
-    mel = np.maximum(mel, 1e-10)
-    mel = 10.0 * np.log10(mel)
-
-    return mel.astype(np.float32)
+        htk=True,
+        norm=None,
+    ).astype(np.float32)
 
 
 # ===========================================================================
@@ -167,6 +208,7 @@ class TFLiteClassifier:
         self._output_details = None
         self._loaded = False
         self.output_size = 1
+        self.expected_frames: int | None = None
 
         try:
             self._load_model(num_threads)
@@ -187,6 +229,14 @@ class TFLiteClassifier:
 
         inp_shape = self._input_details[0]["shape"]
         out_shape = self._output_details[0]["shape"]
+        if len(inp_shape) == 4:
+            if int(inp_shape[1]) != 3:
+                raise ValueError(f"Expected 3 input channels, got {inp_shape}")
+            if int(inp_shape[2]) != self.n_mels:
+                raise ValueError(
+                    f"Configured n_mels={self.n_mels} but model input is {inp_shape}"
+                )
+            self.expected_frames = int(inp_shape[3])
         if len(out_shape) == 0:
             self.output_size = 1
         elif len(out_shape) == 1:
@@ -240,7 +290,14 @@ class TFLiteClassifier:
             n_mels=self.n_mels,
             n_fft=self.n_fft,
             hop_length=self.hop_length,
-        )[..., :-1]
+        )
+        target_frames = self.expected_frames or (self.window_samples // self.hop_length)
+        if mel.shape[-1] < target_frames:
+            raise ValueError(
+                f"Mel spectrogram has {mel.shape[-1]} frames, "
+                f"but model expects {target_frames}; check window_samples"
+            )
+        mel = mel[..., :target_frames]
 
         # Normalize
         if self.mel_mean is not None and self.mel_std is not None:
@@ -626,8 +683,8 @@ class DetectionEngine:
         self.blue_to_red_threshold = det_cfg.get("blue_to_red_threshold", 0.45)
         self.red_to_blue_threshold = det_cfg.get("red_to_blue_threshold", 0.35)
         self.alert_on_red = det_cfg.get("alert_on_red", True)
-        self.alert_on_blue = det_cfg.get("alert_on_blue", True)
-        self.alert_on_unknown = det_cfg.get("alert_on_unknown", True)
+        self.alert_on_blue = det_cfg.get("alert_on_blue", False)
+        self.alert_on_unknown = det_cfg.get("alert_on_unknown", False)
         self.save_color_trace = det_cfg.get("save_color_trace", True)
 
         # Debug mode — logs per-window timing at DEBUG level
@@ -652,6 +709,20 @@ class DetectionEngine:
             mel_mean=det_cfg.get("mel_mean"),
             mel_std=det_cfg.get("mel_std"),
         )
+        if self.classifier.expected_frames:
+            expected_window_samples = (
+                self.classifier.expected_frames * self.hop_length
+            )
+            if expected_window_samples != self.window_samples:
+                logger.warning(
+                    "Adjusting window_samples from %d to %d to match model "
+                    "input frames=%d",
+                    self.window_samples,
+                    expected_window_samples,
+                    self.classifier.expected_frames,
+                )
+                self.window_samples = expected_window_samples
+                self.classifier.window_samples = expected_window_samples
 
         # Hysteresis state tracker (Schmitt-trigger)
         self.hysteresis = HysteresisState(
@@ -735,8 +806,8 @@ class DetectionEngine:
         self.blue_to_red_threshold = det_cfg.get("blue_to_red_threshold", 0.45)
         self.red_to_blue_threshold = det_cfg.get("red_to_blue_threshold", 0.35)
         self.alert_on_red = det_cfg.get("alert_on_red", True)
-        self.alert_on_blue = det_cfg.get("alert_on_blue", True)
-        self.alert_on_unknown = det_cfg.get("alert_on_unknown", True)
+        self.alert_on_blue = det_cfg.get("alert_on_blue", False)
+        self.alert_on_unknown = det_cfg.get("alert_on_unknown", False)
         self.save_color_trace = det_cfg.get("save_color_trace", True)
         self.alarm_cooldown_s = det_cfg.get(
             "alarm_cooldown_s", self.alarm_cooldown_s
@@ -758,6 +829,25 @@ class DetectionEngine:
             ),
         )
         logger.info("Threshold profile switched to %s", profile)
+        return self.status
+
+    def set_alert_routing(
+        self,
+        *,
+        alert_on_blue: bool | None = None,
+        alert_on_unknown: bool | None = None,
+    ) -> dict:
+        """Update which non-red detection types are allowed to trigger GPIO."""
+        if alert_on_blue is not None:
+            self.alert_on_blue = bool(alert_on_blue)
+        if alert_on_unknown is not None:
+            self.alert_on_unknown = bool(alert_on_unknown)
+        logger.info(
+            "Alert routing updated: red=%s blue=%s unknown=%s",
+            self.alert_on_red,
+            self.alert_on_blue,
+            self.alert_on_unknown,
+        )
         return self.status
 
     @property
@@ -878,21 +968,23 @@ class DetectionEngine:
         blue_conf = color_result.get("blue_confidence")
         color = color_result.get("drone_color")
 
-        if (
-            self.alert_on_red
-            and color == "RED"
-            and red_conf is not None
-            and red_conf >= self.red_alert_threshold
-        ):
-            return "RED_ALERT"
-        if (
-            self.alert_on_blue
-            and color == "BLUE"
-            and blue_conf is not None
-            and blue_conf >= self.blue_alert_threshold
-        ):
-            return "BLUE_ALERT"
-        if self.alert_on_unknown:
+        if color == "RED":
+            if (
+                self.alert_on_red
+                and red_conf is not None
+                and red_conf >= self.red_alert_threshold
+            ):
+                return "RED_ALERT"
+            return "DETECTED"
+        if color == "BLUE":
+            if (
+                self.alert_on_blue
+                and blue_conf is not None
+                and blue_conf >= self.blue_alert_threshold
+            ):
+                return "BLUE_ALERT"
+            return "DETECTED"
+        if color == "UNKNOWN" and self.alert_on_unknown:
             return "UNKNOWN_ALERT"
         return "DETECTED"
 

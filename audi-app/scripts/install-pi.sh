@@ -90,6 +90,7 @@ apt-get install -y -qq \
     flac \
     git \
     jq \
+    rsync \
     > /dev/null 2>&1
 ok "System deps installed"
 
@@ -252,7 +253,7 @@ systemctl start "${SERVICE_NAME}.service"
 sleep 3
 
 # Check if container is running
-if docker ps --filter "name=audio-guard" --format "{{.Names}}" | grep -q "audio-guard"; then
+if docker ps --filter "name=${SERVICE_NAME}" --format "{{.Names}}" | grep -q "^${SERVICE_NAME}$"; then
     ok "Container is running!"
 else
     warn "Container not running yet — checking logs..."

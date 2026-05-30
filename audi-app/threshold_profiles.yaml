@@ -1,29 +1,33 @@
 # AUDI threshold profiles.
 #
-# These are provisional deployment defaults. Replace them with values selected
-# from field and attack-run calibration once the combined model is finalized.
+# Detector thresholds are calibrated from the DyMN10 V4 field/attack evals.
+# Color thresholds are calibrated from the red-positive validation metrics for
+# the DyMN10 blue/red head; RED is intentionally easier to enter than leave.
 threshold_profiles:
   sensitive:
-    confidence_threshold_high: 0.72
-    blue_red_threshold: 0.45
-    blue_red_min_detection_score: 0.72
-    red_alert_threshold: 0.45
-    blue_alert_threshold: 0.55
-    blue_to_red_threshold: 0.42
-    red_to_blue_threshold: 0.30
-  balanced:
-    confidence_threshold_high: 0.80
+    confidence_threshold_high: 0.6459
+    confidence_threshold_low: 0.6459
     blue_red_threshold: 0.50
-    blue_red_min_detection_score: 0.80
-    red_alert_threshold: 0.50
+    blue_red_min_detection_score: 0.6459
+    red_alert_threshold: 0.37
+    blue_alert_threshold: 0.50
+    blue_to_red_threshold: 0.37
+    red_to_blue_threshold: 0.56
+  balanced:
+    confidence_threshold_high: 0.6703
+    confidence_threshold_low: 0.6703
+    blue_red_threshold: 0.50
+    blue_red_min_detection_score: 0.6703
+    red_alert_threshold: 0.37
+    blue_alert_threshold: 0.50
+    blue_to_red_threshold: 0.37
+    red_to_blue_threshold: 0.56
+  quiet:
+    confidence_threshold_high: 0.6988
+    confidence_threshold_low: 0.6988
+    blue_red_threshold: 0.50
+    blue_red_min_detection_score: 0.6988
+    red_alert_threshold: 0.45
     blue_alert_threshold: 0.50
     blue_to_red_threshold: 0.45
-    red_to_blue_threshold: 0.35
-  quiet:
-    confidence_threshold_high: 0.88
-    blue_red_threshold: 0.55
-    blue_red_min_detection_score: 0.86
-    red_alert_threshold: 0.55
-    blue_alert_threshold: 0.60
-    blue_to_red_threshold: 0.48
-    red_to_blue_threshold: 0.32
+    red_to_blue_threshold: 0.60

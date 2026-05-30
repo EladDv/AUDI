@@ -486,26 +486,59 @@
     /* --- Score History (debug) --- */
     .score-history-section {
       margin-bottom: 10px;
+      padding: 8px;
+      border-radius: 8px;
+      background: #fff;
+      border: 1px solid #dde3ea;
     }
 
     .score-history-label {
       font-size: 0.65rem;
-      color: #666;
+      color: #4b5563;
       text-transform: uppercase;
       margin-bottom: 4px;
+      font-weight: 800;
+    }
+
+    .score-canvas {
+      width: 100%;
+      height: 150px;
+      border-radius: 8px;
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      display: block;
     }
 
     .score-history-stats {
       font-size: 0.6rem;
-      color: #555;
+      color: #374151;
       margin-top: 4px;
       display: flex;
       gap: 16px;
       justify-content: center;
+      flex-wrap: wrap;
     }
 
     .score-history-stats span {
-      font-weight: 600;
+      font-weight: 800;
+    }
+
+    body.dark-mode .score-history-section {
+      background: #0e0e16;
+      border-color: #293142;
+    }
+
+    body.dark-mode .score-history-label {
+      color: #cbd5e1;
+    }
+
+    body.dark-mode .score-canvas {
+      background: #090d14;
+      border-color: #293142;
+    }
+
+    body.dark-mode .score-history-stats {
+      color: #d8dee9;
     }
 
     /* --- Health Bar --- */
@@ -664,6 +697,43 @@
       color: #aaa;
     }
 
+    .advanced-actions {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .advanced-test-btn {
+      min-height: 44px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 0.76rem;
+      font-weight: 900;
+      cursor: pointer;
+    }
+
+    .advanced-test-btn.red {
+      background: #c92a2a;
+      border-color: #9f1f1f;
+    }
+
+    .advanced-test-btn.blue {
+      background: #0869c7;
+      border-color: #07569f;
+    }
+
+    .advanced-test-btn.unknown {
+      background: #f0b429;
+      border-color: #b77900;
+      color: #111827;
+    }
+
+    body.dark-mode .advanced-test-btn.unknown {
+      color: #0d0d0d;
+    }
+
     .trace-section {
       display: none;
       margin-bottom: 10px;
@@ -751,6 +821,13 @@
     <label><input type="checkbox" id="darkModeToggle" onchange="setDarkMode(this.checked)"> Dark mode</label>
     <label><input type="checkbox" id="colorTraceToggle" onchange="setColorTrace(this.checked)"> Color trace</label>
     <label><input type="checkbox" id="labelingToggle" onchange="setLabeling(this.checked)"> Labeling buttons</label>
+    <label><input type="checkbox" id="blueAlertToggle" onchange="setAlertRouting()"> Alert on blue</label>
+    <label><input type="checkbox" id="unknownAlertToggle" onchange="setAlertRouting()"> Alert on unknown</label>
+    <div class="advanced-actions">
+      <button class="advanced-test-btn red" onclick="testAlert('RED_ALERT')">Test Red</button>
+      <button class="advanced-test-btn blue" onclick="testAlert('BLUE_ALERT')">Test Blue</button>
+      <button class="advanced-test-btn unknown" onclick="testAlert('UNKNOWN_ALERT')">Test Unknown</button>
+    </div>
   </div>
 
   <!-- Status grid -->
@@ -769,7 +846,7 @@
   <!-- Score History (debug only) -->
   <div class="score-history-section" id="scoreHistorySection" style="display:none">
     <div class="score-history-label">Prediction Score History</div>
-    <canvas id="scoreCanvas" width="780" height="120" style="width:100%;height:120px;border-radius:8px;background:#0e0e16"></canvas>
+    <canvas class="score-canvas" id="scoreCanvas" width="780" height="150"></canvas>
     <div class="score-history-stats" id="scoreStats"></div>
   </div>
 
@@ -807,9 +884,6 @@
     <button class="btn btn-silence" id="btnSilence" onclick="clearAlarm()">Silence</button>
     <button class="btn btn-pause" id="btnPause" onclick="pauseRecording()">Pause 5m</button>
   </div>
-  <div class="btn-group btn-group-debug">
-    <button class="btn btn-debug" id="btnTestAlert" onclick="testAlert()">Test Alert</button>
-  </div>
 
   <!-- System Info -->
   <div class="sys-grid" id="sysGrid"></div>
@@ -828,6 +902,7 @@
     let colorTraceEnabled = localStorage.getItem('audiColorTrace') === '1';
     let labelingEnabled = localStorage.getItem('audiLabeling') === '1';
     let darkModeEnabled = localStorage.getItem('audiDarkMode') === '1';
+    let alertRoutingSyncing = false;
 
     function applyUiPrefs() {
       document.body.classList.toggle('dark-mode', darkModeEnabled);
@@ -837,6 +912,13 @@
       document.getElementById('colorTraceToggle').checked = colorTraceEnabled;
       document.getElementById('labelingToggle').checked = labelingEnabled;
       document.getElementById('advancedToggle').textContent = advancedOpen ? 'Advanced ▲' : 'Advanced ▼';
+    }
+
+    function applyDetectorPrefs(det) {
+      alertRoutingSyncing = true;
+      document.getElementById('blueAlertToggle').checked = !!det.alert_on_blue;
+      document.getElementById('unknownAlertToggle').checked = !!det.alert_on_unknown;
+      alertRoutingSyncing = false;
     }
 
     function toggleAdvanced() {
@@ -863,6 +945,18 @@
       localStorage.setItem('audiLabeling', enabled ? '1' : '0');
       applyUiPrefs();
       update();
+    }
+
+    function setAlertRouting() {
+      if (alertRoutingSyncing) return;
+      fetch('/api/alert_routing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alert_on_blue: document.getElementById('blueAlertToggle').checked,
+          alert_on_unknown: document.getElementById('unknownAlertToggle').checked
+        })
+      }).then(() => update()).catch(() => {});
     }
 
     function alertLabel(level) {
@@ -908,6 +1002,7 @@
         const st = d.storage || {};
         const det = d.detector || {};
         const gp = d.gpio || {};
+        applyDetectorPrefs(det);
 
         const alarming = gp.alarming || false;
         const recording = rec.running && !rec.stopped;
@@ -1081,8 +1176,13 @@
     }
 
     // --- Actions ---
-    function apiPost(url) {
-      fetch(url, { method: 'POST' }).then(() => update()).catch(() => {});
+    function apiPost(url, payload = null) {
+      const options = { method: 'POST' };
+      if (payload) {
+        options.headers = { 'Content-Type': 'application/json' };
+        options.body = JSON.stringify(payload);
+      }
+      fetch(url, options).then(() => update()).catch(() => {});
     }
     function toggleRecording() {
       // Read state from the server, not from the button text.
@@ -1104,7 +1204,9 @@
     }
     function clearAlarm()     { apiPost('/api/clear_alarm');     }
     function pauseRecording() { apiPost('/api/pause_recording'); }
-    function testAlert()      { apiPost('/api/test_alert');      }
+    function testAlert(alertLevel = 'RED_ALERT') {
+      apiPost('/api/test_alert', { alert_level: alertLevel });
+    }
 
     function setThresholdProfile(profile) {
       fetch('/api/threshold_profile', {
@@ -1124,10 +1226,18 @@
 
     function updateVU() {
       fetch('/api/audio_level').then(r => r.json()).then(d => {
-        const peak = d.peak || 0;
-        const db = d.db == null ? -120 : d.db;
-        document.getElementById('vuFill').style.width = Math.min(100, peak * 100) + '%';
-        document.getElementById('vuDb').textContent = db.toFixed(1) + ' dB';
+        const rms = Number(d.rms) || 0;
+        let db = Number(d.db);
+        if (!Number.isFinite(db) || db < -120 || db > 6) {
+          db = rms > 0 ? 20 * Math.log10(Math.max(rms, 0.000001)) : -120;
+        }
+        db = Math.max(-120, Math.min(0, db));
+        const apiPercent = Number(d.vu_percent);
+        const vuPercent = Number.isFinite(apiPercent)
+          ? apiPercent
+          : ((db + 120) / 120) * 100;
+        document.getElementById('vuFill').style.width = Math.max(0, Math.min(100, vuPercent)) + '%';
+        document.getElementById('vuDb').textContent = Math.round(db) + ' dB';
       }).catch(() => { });
     }
 
@@ -1165,12 +1275,34 @@
       const canvas = document.getElementById('scoreCanvas');
       const ctx = canvas.getContext('2d');
       const W = canvas.width, H = canvas.height;
-      const pad = { top: 8, right: 16, bottom: 16, left: 16 };
+      const pad = { top: 12, right: 18, bottom: 18, left: 34 };
+      const dark = document.body.classList.contains('dark-mode');
+      const theme = dark ? {
+        bg: '#090d14',
+        gridStrong: 'rgba(203,213,225,0.28)',
+        grid: 'rgba(148,163,184,0.20)',
+        text: '#e5edf7',
+        muted: '#a6b3c2',
+        score: '#2dd4bf',
+        scoreGlow: 'rgba(45,212,191,0.26)',
+        fill: 'rgba(45,212,191,0.12)',
+        threshold: '#ff5a5f',
+        thresholdBg: 'rgba(255,90,95,0.18)'
+      } : {
+        bg: '#f8fafc',
+        gridStrong: 'rgba(30,41,59,0.32)',
+        grid: 'rgba(71,85,105,0.22)',
+        text: '#111827',
+        muted: '#475569',
+        score: '#008c73',
+        scoreGlow: 'rgba(0,140,115,0.20)',
+        fill: 'rgba(0,140,115,0.12)',
+        threshold: '#c92a2a',
+        thresholdBg: 'rgba(201,42,42,0.12)'
+      };
 
       ctx.clearRect(0, 0, W, H);
-
-      // Background
-      ctx.fillStyle = '#0e0e16';
+      ctx.fillStyle = theme.bg;
       ctx.fillRect(0, 0, W, H);
 
       if (!history || history.length < 2) return;
@@ -1179,39 +1311,36 @@
       const n = scores.length;
       const plotW = W - pad.left - pad.right;
       const plotH = H - pad.top - pad.bottom;
-
-      // Y range: data-driven with 10% padding, but always include threshold
-      const dataMin = Math.min(...scores);
-      const dataMax = Math.max(...scores);
-      const dataRange = dataMax - dataMin || 0.01;
-      const yMin = Math.max(0, dataMin - dataRange * 0.1);
-      const yMax = Math.min(1.0, Math.max(threshold * 1.1, dataMax + dataRange * 0.2));
+      const yMin = 0;
+      const yMax = 1;
 
       const xOf = i => pad.left + (i / (n - 1)) * plotW;
       const yOf = v => pad.top + (1 - (v - yMin) / (yMax - yMin)) * plotH;
 
-      // Grid lines (auto-step based on range)
-      const gridStep = dataRange < 0.1 ? 0.02 : dataRange < 0.5 ? 0.05 : 0.1;
-      ctx.strokeStyle = '#1a1a2e';
-      ctx.lineWidth = 0.5;
-      for (let g = Math.ceil(yMin / gridStep) * gridStep; g <= yMax; g += gridStep) {
+      // Fixed 0.0-1.0 grid: operators need threshold context more than zoom.
+      ctx.font = '10px system-ui';
+      ctx.textBaseline = 'middle';
+      for (let step = 0; step <= 10; step++) {
+        const g = step / 10;
         const gy = yOf(g);
+        ctx.strokeStyle = (step === 0 || step === 10 || step === 5)
+          ? theme.gridStrong
+          : theme.grid;
+        ctx.lineWidth = (step === 0 || step === 10 || step === 5) ? 1.2 : 0.8;
         ctx.beginPath();
         ctx.moveTo(pad.left, gy);
         ctx.lineTo(W - pad.right, gy);
         ctx.stroke();
 
-        // Grid label
-        ctx.fillStyle = '#444';
-        ctx.font = '8px system-ui';
-        ctx.fillText(g.toFixed(2), pad.left + 2, gy - 2);
+        ctx.fillStyle = step % 2 === 0 || step === 10 ? theme.text : theme.muted;
+        ctx.fillText(g.toFixed(1), 5, gy);
       }
 
       // Threshold line
       const thY = yOf(threshold);
-      ctx.strokeStyle = 'rgba(255,68,68,0.4)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = theme.threshold;
+      ctx.lineWidth = 2.4;
+      ctx.setLineDash([8, 5]);
       ctx.beginPath();
       ctx.moveTo(pad.left, thY);
       ctx.lineTo(W - pad.right, thY);
@@ -1219,13 +1348,34 @@
       ctx.setLineDash([]);
 
       // Threshold label
-      ctx.fillStyle = '#e44';
-      ctx.font = '9px system-ui';
-      ctx.fillText('YES≥' + threshold.toFixed(2), W - pad.right - 50, thY - 4);
+      const thresholdLabel = 'YES >= ' + threshold.toFixed(2);
+      ctx.font = 'bold 11px system-ui';
+      const labelW = ctx.measureText(thresholdLabel).width + 12;
+      const labelX = W - pad.right - labelW;
+      const labelY = Math.max(4, Math.min(H - 20, thY - 18));
+      ctx.fillStyle = theme.thresholdBg;
+      ctx.fillRect(labelX, labelY, labelW, 18);
+      ctx.strokeStyle = theme.threshold;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(labelX, labelY, labelW, 18);
+      ctx.fillStyle = theme.threshold;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(thresholdLabel, labelX + 6, labelY + 9);
 
       // Score line
-      ctx.strokeStyle = '#0a7';
-      ctx.lineWidth = 1.8;
+      ctx.strokeStyle = theme.scoreGlow;
+      ctx.lineWidth = 5;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const sx = xOf(i), sy = yOf(scores[i]);
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.stroke();
+
+      ctx.strokeStyle = theme.score;
+      ctx.lineWidth = 2.4;
       ctx.beginPath();
       for (let i = 0; i < n; i++) {
         const sx = xOf(i), sy = yOf(scores[i]);
@@ -1237,7 +1387,7 @@
       ctx.lineTo(xOf(n - 1), yOf(yMin));
       ctx.lineTo(xOf(0), yOf(yMin));
       ctx.closePath();
-      ctx.fillStyle = 'rgba(0,170,119,0.08)';
+      ctx.fillStyle = theme.fill;
       ctx.fill();
 
       // Stats
