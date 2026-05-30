@@ -2,8 +2,8 @@
 """Sweep runner — pass a YAML config path to run a sweep.
 
 Usage:
-    uv run python sweeps/sweep.py configs/arch.yaml
-    uv run python sweeps/sweep.py configs/regularization.yaml
+    uv run python sweeps/sweep.py configs/field_hard_negative_current.yaml
+    uv run python sweeps/sweep.py configs/blue_red_classify.yaml
 
 YAML format:
     name: str
@@ -326,9 +326,17 @@ if __name__ == "__main__":
             positional.append(sys.argv[i])
             i += 1
 
+    usage = (
+        "Usage: uv run python sweeps/sweep.py [--noise-path <path>] "
+        "[--drone-path <path>] configs/<name>.yaml"
+    )
+    if any(arg in {"-h", "--help"} for arg in positional):
+        print(usage)
+        sys.exit(0)
+
     if not positional:
         print(
-            "Usage: uv run python sweeps/sweep.py [--noise-path <path>] [--drone-path <path>] configs/<name>.yaml"
+            usage
         )
         sys.exit(1)
 

@@ -1,4 +1,4 @@
-name: field_hard_negative_finetune_v4_sizes
+name: field_hard_negative_current
 noise_path: data/HF_dataset_v7_background
 drone_path: data/HF_dataset_v2_drone
 description: V4 coverage/FP-TP sweep over MN 0.4/0.5/1.0 plus supported dynamic MN

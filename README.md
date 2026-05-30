@@ -37,8 +37,8 @@ uv run python scripts/train.py \
     --patience 0 \
     --output-dir checkpoints/my_run
 
-# Run an architecture sweep
-uv run python sweeps/sweep.py sweeps/configs/arch.yaml
+# Run the current hard-negative sweep
+uv run python sweeps/sweep.py sweeps/configs/field_hard_negative_current.yaml
 
 # Postprocess + calibrate a sweep
 uv run python scripts/evaluate.py postprocess checkpoints/<sweep_dir>
@@ -180,22 +180,14 @@ The sweep runner also supports `--no-postprocess` and `--no-calibrate` flags to 
 
 | Config | What it tests |
 |--------|--------------|
-| `arch.yaml` | All architectures (cnn8/10/14, resnet18/34/50, convnext tiny/small/base, efficientnet b1/b3/b5, edgenet variants, mobilenet, mobilevit) |
-| `regularization.yaml` | Weight decay, dropout, cosine schedule variants |
-| `multinoise.yaml` | Multi-noise background (secondary noise dataset) across architectures |
-| `multires.yaml` | Clip lengths: 1.28s, 2.56s, 5.12s |
-| `finetune.yaml` | Finetuning from pretrained checkpoints |
-| `classify.yaml` | DADS classification pretraining sweeps |
-| `production.yaml` | Production sweep combining best hyperparams |
-| `bce_wd_sweep.yaml` | BCE loss with varying weight decay |
-| `bce_wd_warmup.yaml` | Weight decay × warmup combinations |
-| `bce_push.yaml` | BCE training with extended epochs |
-| `convnext_bfr.yaml` | ConvNeXt with focal loss, specaug, long clips |
-| `convnext_lr.yaml` | ConvNeXt learning rate sweep |
-| `convnext_reg.yaml` | ConvNeXt regularization (focal, mixup, dropout, weight decay) |
-| `prod_focal.yaml` | Production focal loss sweep |
-| `prod_focal_long.yaml` | Production focal loss with 30 epochs |
-| `prod_escape.yaml` | Production escape (longer training, no early stopping) |
+| `field_hard_negative_current.yaml` | Current V4 field hard-negative finetune across MN/DyMN sizes |
+| `blue_red_classify.yaml` | Combined detector plus blue/red classification workflow |
+| `classify_mn.yaml` | MN classification pretraining for detector finetuning |
+| `efficientat*.yaml` | EfficientAT/MN size and noise coverage |
+| `mn_sweep_v6.yaml` | Current MN architecture research sweep on v6 backgrounds |
+| `dsp_sweep.yaml`, `dsp_v3v4_sweep.yaml`, `dsp_validation.yaml` | DSP feature research |
+| `mel_sweep.yaml` | Mel geometry and PCEN research |
+| `frontend_sweep.yaml`, `frontend_sweep_mn.yaml` | CQT/CWT frontend research |
 
 ---
 
