@@ -7,19 +7,23 @@ set -euo pipefail
 
 echo "=== AUDI Entrypoint ==="
 
-# Ensure data directory exists
-mkdir -p /data/recordings
+# Ensure data directories exist
+mkdir -p /app/data/recordings /app/data/alerts /data/recordings
 
-# Auto-discover USB audio device
-AUDIO_DEVICE="default"
+# Auto-discover USB audio device unless a device was provided by compose/env.
+AUDIO_DEVICE="${AUDIO_DEVICE:-default}"
 if arecord -l 2>/dev/null | grep -q "card"; then
     echo "Audio device found:"
     arecord -l
-    # Extract first USB device: "card N: ... [USB ...], device M: ..."
-    USB_DEV=$(arecord -l 2>/dev/null | grep "USB" | head -1 | sed -n 's/.*card \([0-9]*\):.*device \([0-9]*\):.*/hw:\1,\2/p')
-    if [ -n "$USB_DEV" ]; then
-        AUDIO_DEVICE="$USB_DEV"
-        echo "Auto-discovered USB device: $AUDIO_DEVICE"
+    if [ "$AUDIO_DEVICE" = "default" ] || [ "$AUDIO_DEVICE" = "auto" ]; then
+        # Extract first USB device: "card N: ... [USB ...], device M: ..."
+        USB_DEV=$(arecord -l 2>/dev/null | grep "USB" | head -1 | sed -n 's/.*card \([0-9]*\):.*device \([0-9]*\):.*/hw:\1,\2/p' || true)
+        if [ -n "$USB_DEV" ]; then
+            AUDIO_DEVICE="$USB_DEV"
+            echo "Auto-discovered USB device: $AUDIO_DEVICE"
+        fi
+    else
+        echo "Using configured audio device: $AUDIO_DEVICE"
     fi
 else
     echo "WARNING: No audio capture device detected."

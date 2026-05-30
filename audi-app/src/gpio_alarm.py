@@ -13,6 +13,7 @@ Auto-detects Pi hardware vs dev machine (mock fallback).
 """
 
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -132,9 +133,22 @@ class GPIOController:
             )
         except Exception as e:
             logger.error("GPIO init FAILED: %s", e)
-            raise RuntimeError(
-                f"GPIO is enabled in config but RPi.GPIO failed to initialize: {e}"
-            ) from e
+            self._gpio = None
+            self._has_gpio = False
+            require_gpio = os.getenv("REQUIRE_GPIO", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if require_gpio:
+                raise RuntimeError(
+                    "GPIO is enabled in config but RPi.GPIO failed to "
+                    f"initialize: {e}"
+                ) from e
+            logger.warning(
+                "Continuing with mock GPIO; set REQUIRE_GPIO=true to fail hard"
+            )
 
     # ------------------------------------------------------------------
     # Alarm API

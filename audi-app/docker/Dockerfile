@@ -12,7 +12,8 @@
 # =============================================================================
 
 # --- Stage 1: Base ----------------------------------------------------------
-FROM --platform=linux/arm64 python:3.11-slim-bookworm AS base
+ARG TARGETPLATFORM
+FROM --platform=${TARGETPLATFORM} python:3.11-slim-bookworm AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -48,6 +49,7 @@ COPY src/ /app/src/
 COPY models/ /app/models/
 COPY webui/ /app/webui/
 COPY config.yaml /app/config.yaml
+COPY threshold_profiles.yaml /app/threshold_profiles.yaml
 COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh

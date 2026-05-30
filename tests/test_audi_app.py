@@ -2,10 +2,12 @@
 
 import importlib
 import sys
+import types
 import wave
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def _import_from_audi_app(module_name: str):
@@ -37,6 +39,36 @@ class TestAudiApp:
         """gpio_alarm.py imports without error."""
         mod = _import_from_audi_app("gpio_alarm")
         assert hasattr(mod, "GPIOController")
+
+    def test_gpio_falls_back_to_mock_unless_required(self, monkeypatch):
+        """GPIO setup failures are fatal only when REQUIRE_GPIO is set."""
+        mod = _import_from_audi_app("gpio_alarm")
+
+        rpi_pkg = types.ModuleType("RPi")
+        gpio_mod = types.ModuleType("RPi.GPIO")
+        gpio_mod.BCM = "BCM"
+        gpio_mod.OUT = "OUT"
+        gpio_mod.IN = "IN"
+        gpio_mod.LOW = 0
+        gpio_mod.PUD_UP = "PUD_UP"
+        gpio_mod.FALLING = "FALLING"
+        gpio_mod.setmode = lambda mode: None
+        gpio_mod.setwarnings = lambda enabled: None
+
+        def fail_setup(*args, **kwargs):
+            raise RuntimeError("gpio unavailable")
+
+        gpio_mod.setup = fail_setup
+        monkeypatch.setitem(sys.modules, "RPi", rpi_pkg)
+        monkeypatch.setitem(sys.modules, "RPi.GPIO", gpio_mod)
+
+        monkeypatch.delenv("REQUIRE_GPIO", raising=False)
+        controller = mod.GPIOController({"gpio": {"enabled": True}})
+        assert controller.status()["has_gpio"] is False
+
+        monkeypatch.setenv("REQUIRE_GPIO", "true")
+        with pytest.raises(RuntimeError):
+            mod.GPIOController({"gpio": {"enabled": True}})
 
     def test_main_imports(self):
         """main.py imports without error."""

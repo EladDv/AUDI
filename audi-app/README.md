@@ -142,25 +142,22 @@ curl http://localhost:8080/api/status
 
 ## Docker
 
-The compose stack uses `network_mode: host` for GPIO + ALSA access.
+The compose stack uses `network_mode: host` for GPIO + ALSA access. Runtime
+recordings and alert snapshots are bind-mounted to local `./data/` instead of a
+Docker-managed volume.
 
 - `docker/docker-compose.yml` — Base config
 - `docker/docker-compose.pi.yml` — Pi-specific overrides (privileged mode, GPIO group)
 - `docker/Dockerfile` — arm64 multi-stage build
 - `docker/audio-guard.service` — systemd unit for auto-start
 
-### Data Volume
+### Local Data
 
-Audio recordings persist in a Docker volume `audio_data`. To inspect:
-
-```bash
-docker volume inspect audio-guard_audio_data
-```
-
-To reset storage:
+Audio recordings persist in `audi-app/data/recordings`, and alert snapshots in
+`audi-app/data/alerts`. To reset storage:
 
 ```bash
-docker compose -f docker/docker-compose.yml down -v
+rm -rf data/recordings data/alerts
 ```
 
 ## Development (without Pi)
