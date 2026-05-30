@@ -3,10 +3,10 @@ name: frontend_sweep
 noise_path: data/HF_dataset_v6_background
 drone_path: data/HF_dataset_v2_drone
 description: >
-  Test CQT and CWT frontends (alone and combined with mel) on mn05_as.
+  Test CQT and CWT frontends (alone and combined with mel) on dymn10_as.
   Compares against mel-only baseline.
 base_flags: >-
-  --arch mn05_as --clip-seconds 5.12 --patience 0
+  --arch dymn10_as --clip-seconds 5.12 --patience 0
   --noise2 data/hf_dataset_sharded_expanded_merged --batch-size 24
   --loss bce --label-smoothing 0.1 --augment --lr 1e-4
   --lr-schedule linear --warmup-epochs 8 --weight-decay 0.03 

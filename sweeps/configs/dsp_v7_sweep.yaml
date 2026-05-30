@@ -1,5 +1,5 @@
 name: dsp_v3v4_sweep
-noise_path: data/HF_dataset_v3_background
+noise_path: data/HF_dataset_v7_background
 drone_path: data/HF_dataset_v2_drone
 description: >
   Build on dsp_sweep winners (07_all, 12_proj128) with v3 and v4 background
@@ -16,55 +16,39 @@ configs:
   # 07_all baselines (all DSP features, no projector)
   # ════════════════════════════════════════════════════════════════
 
-  - name: "01_v3_baseline"
+  - name: "01_baseline"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5
     note: 07_all on v3 bg — reference point.
-
-  - name: "02_v4_baseline"
-    flags: >-
-      --noise-path data/HF_dataset_v4_background
-      --dsp-feature-sets v3,v4,v5
-    note: 07_all on v4 bg — larger bg set, should be harder.
 
   # ════════════════════════════════════════════════════════════════
   # 12_proj128 baselines (all DSP + large projector)
   # ════════════════════════════════════════════════════════════════
 
-  - name: "03_v3_proj128"
+  - name: "02_v7_proj128"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
     note: 12_proj128 on v3 bg.
 
-  - name: "04_v4_proj128"
-    flags: >-
-      --noise-path data/HF_dataset_v4_background
-      --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
-    note: 12_proj128 on v4 bg.
 
   # ════════════════════════════════════════════════════════════════
   # Weight decay sweep on best combos (v3 + proj128)
   # ════════════════════════════════════════════════════════════════
 
-  - name: "05_v3_proj128_wd002"
+  - name: "03_v7_proj128_wd002"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --weight-decay 0.02
     note: Lower wd — may extend sigma range.
 
-  - name: "06_v3_proj128_wd001"
+  - name: "04_v7_proj128_wd001"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --weight-decay 0.01
     note: Minimal wd — test if DSP features already provide enough regularization.
 
-  - name: "07_v3_proj128_wd005"
+  - name: "05_v7_proj128_wd005"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --weight-decay 0.05
     note: Higher wd — may reduce BG at cost of coverage.
@@ -73,78 +57,42 @@ configs:
   # Loss function variants (proj128 on v3)
   # ════════════════════════════════════════════════════════════════
 
-  - name: "08_v3_proj128_focal"
+  - name: "06_v7_proj128_focal"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --loss focal --label-smoothing 0.1 --weight-decay 0.01
     note: Focal loss + low wd — focal needs low LR/wd to avoid collapse.
 
-  - name: "09_v3_proj128_bce_nosmooth"
+  - name: "07_v7_proj128_bce_nosmooth"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --loss bce --label-smoothing 0.0
     note: BCE without label smoothing — test if smoothing helps with DSP features.
 
   # ════════════════════════════════════════════════════════════════
-  # Longer training (proj128 on v3)
-  # ════════════════════════════════════════════════════════════════
-  - name: "10_v3_proj128_ep35"
-    flags: >-
-      --noise-path data/HF_dataset_v3_background
-      --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
-      --epochs 35
-    note: 35 epochs — push training further. Watch for overfit.
-
-  # ════════════════════════════════════════════════════════════════
   # Regularization (proj128 on v3)
   # ════════════════════════════════════════════════════════════════
 
-  - name: "11_v3_proj128_dropout01"
+  - name: "08_v7_proj128_dropout01"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --dropout 0.1
     note: Light dropout on backbone — prevent overfit to DSP features.
 
-  - name: "12_v3_proj128_mixup"
+  - name: "09_v7_proj128_mixup"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --mixup-alpha 0.2
     note: MixUp augmentation — may help generalization with DSP features.
 
-  # ════════════════════════════════════════════════════════════════
-  # DSP hop length on v4 (07_all base)
-  # ════════════════════════════════════════════════════════════════
-
-  - name: "13_v4_hop128"
-    flags: >-
-      --noise-path data/HF_dataset_v4_background
-      --dsp-feature-sets v3,v4,v5 --dsp-hop-length 128
-    note: Fine DSP time resolution (8ms) on v4.
-
-  - name: "14_v4_hop320"
-    flags: >-
-      --noise-path data/HF_dataset_v4_background
-      --dsp-feature-sets v3,v4,v5 --dsp-hop-length 320
-    note: Coarse DSP time (20ms) on v4 — faster, less overhead.
 
   # ════════════════════════════════════════════════════════════════
   # Combined best-guess configs
   # ════════════════════════════════════════════════════════════════
 
-  - name: "15_v3_proj128_ep35_wd002"
+  - name: "10_v7_proj128_ep35_wd002"
     flags: >-
-      --noise-path data/HF_dataset_v3_background
       --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
       --epochs 35 --weight-decay 0.02
     note: Longer training + lower wd — compound improvement hypothesis.
 
-  - name: "16_v4_proj128_ep35_wd002"
-    flags: >-
-      --noise-path data/HF_dataset_v4_background
-      --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128
-      --epochs 35 --weight-decay 0.02
-    note: Same compound config on v4 background.
