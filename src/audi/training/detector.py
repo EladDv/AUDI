@@ -125,6 +125,9 @@ class DroneDetector(L.LightningModule):
         bn_momentum: float = 0.1,
         clip_seconds: float = 2.56,
         freeze_backbone_epochs: int = 0,
+        teacher: torch.nn.Module | None = None,
+        distillation_weight: float = 0.0,
+        distillation_temperature: float = 2.0,
     ) -> None:
         super().__init__()
 
@@ -132,7 +135,7 @@ class DroneDetector(L.LightningModule):
         mel_cfg = mel or MelConfig()
         opt_cfg = optimizer or OptimizerConfig()
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["teacher"])
 
         # ── Frontend ───────────────────────────────────────────────
         self._frontend_type = mel_cfg.frontend_type
@@ -229,6 +232,13 @@ class DroneDetector(L.LightningModule):
         self._per_bin_weights = bool(per_bin_weights)
         self._mixup_alpha = float(mixup_alpha)
         self._cutmix_alpha = float(cutmix_alpha)
+        self._teacher = teacher
+        self._distillation_weight = float(distillation_weight)
+        self._distillation_temperature = float(distillation_temperature)
+        if self._teacher is not None:
+            self._teacher.eval()
+            for p in self._teacher.parameters():
+                p.requires_grad = False
 
         # SpecAugment
         self.spec_augment_prob = float(spec_augment_prob)
@@ -288,9 +298,19 @@ class DroneDetector(L.LightningModule):
 
     def on_train_epoch_start(self) -> None:
         """Apply scheduled backbone freezing at epoch boundaries."""
+        if self._teacher is not None:
+            self._teacher.eval()
         if self._freeze_backbone_epochs <= 0:
             return
         self._set_backbone_frozen(self.current_epoch < self._freeze_backbone_epochs)
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Keep distillation teacher weights out of student checkpoints."""
+        state = checkpoint.get("state_dict")
+        if not isinstance(state, dict):
+            return
+        for key in [k for k in state if k.startswith("_teacher.")]:
+            del state[key]
 
     # ── Featurization ────────────────────────────────────────────
 
@@ -417,6 +437,33 @@ class DroneDetector(L.LightningModule):
 
         return loss
 
+    def _compute_distillation_loss(
+        self,
+        wav: torch.Tensor,
+        student_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Match teacher detector probabilities on the same waveform batch."""
+        if self._teacher is None or self._distillation_weight <= 0:
+            return torch.tensor(0.0, device=wav.device)
+
+        teacher_param = next(self._teacher.parameters(), None)
+        teacher_device = teacher_param.device if teacher_param is not None else None
+        if teacher_device != wav.device:
+            self._teacher.to(wav.device)
+        self._teacher.eval()
+        temp = max(self._distillation_temperature, 1e-6)
+        with torch.no_grad():
+            teacher_logits = self._teacher(wav).detach()
+        teacher_prob = torch.sigmoid(teacher_logits / temp)
+        return (
+            F.binary_cross_entropy_with_logits(
+                student_logits / temp,
+                teacher_prob,
+            )
+            * temp
+            * temp
+        )
+
     # ── Training step ────────────────────────────────────────────
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
@@ -433,10 +480,33 @@ class DroneDetector(L.LightningModule):
             bin_idx = None
 
         spec = self._to_mel(wav)
+        distill_logits: torch.Tensor | None = None
+        if self._teacher is not None and self._distillation_weight > 0:
+            distill_logits = self.backbone(spec).squeeze(1)
+
         spec, label, bin_idx = self._apply_mixup_cutmix(spec, label, bin_idx)
-        logits = self.backbone(spec).squeeze(1)
+        if (
+            distill_logits is not None
+            and self._mixup_alpha <= 0
+            and self._cutmix_alpha <= 0
+        ):
+            logits = distill_logits
+        else:
+            logits = self.backbone(spec).squeeze(1)
         loss = self._compute_loss(logits, label, bin_idx)
-        self.log("train_loss", loss, prog_bar=True)
+        distill_loss = (
+            self._compute_distillation_loss(wav, distill_logits)
+            if distill_logits is not None
+            else torch.tensor(0.0, device=wav.device)
+        )
+        loss = loss + self._distillation_weight * distill_loss
+        self.log_dict(
+            {
+                "train_loss": loss,
+                "train_distill_loss": distill_loss,
+            },
+            prog_bar=True,
+        )
         return loss
 
     # ── Validation step ──────────────────────────────────────────
@@ -585,8 +655,9 @@ class DroneDetector(L.LightningModule):
 
     def configure_optimizers(self) -> Any:
         """Configure AdamW with optional cosine schedule + warmup."""
+        trainable_params = [p for p in self.parameters() if p.requires_grad]
         opt = torch.optim.AdamW(
-            self.parameters(), lr=self._lr, weight_decay=self._weight_decay
+            trainable_params, lr=self._lr, weight_decay=self._weight_decay
         )
         if self._schedule == "constant":
             return opt

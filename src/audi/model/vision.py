@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Final
 
 from torch import nn
-from torchvision import models
+
+try:
+    from torchvision import models
+except ModuleNotFoundError:
+    models = None
 
 EFFICIENTNET_MODEL_ARCHS: Final[tuple[str, ...]] = tuple(
     f"efficientnet_b{i}" for i in range(8)
@@ -83,12 +87,21 @@ def _build_fastervit(
 # ── TorchVision backbones ────────────────────────────────────────────────
 
 
+def _require_torchvision():
+    if models is None:
+        raise ModuleNotFoundError(
+            "torchvision is required for torchvision backbones"
+        )
+    return models
+
+
 def _build_resnet(
     arch: str, *, num_classes: int, pretrained: bool
 ) -> nn.Module:
     """Build a ResNet backbone with 3-channel mel-spectrogram input."""
+    tv_models = _require_torchvision()
     weight = "IMAGENET1K_V1" if pretrained else None
-    model_fn = getattr(models, arch)
+    model_fn = getattr(tv_models, arch)
     model = model_fn(weights=weight)
     in_features = model.fc.in_features
     model.fc = nn.Linear(in_features, num_classes)
@@ -99,8 +112,9 @@ def _build_convnext(
     arch: str, *, num_classes: int, pretrained: bool
 ) -> nn.Module:
     """Build a ConvNeXt backbone."""
+    tv_models = _require_torchvision()
     weight = "IMAGENET1K_V1" if pretrained else None
-    model_fn = getattr(models, arch)
+    model_fn = getattr(tv_models, arch)
     model = model_fn(weights=weight)
     if hasattr(model, "classifier"):
         in_features = model.classifier[-1].in_features
@@ -112,9 +126,10 @@ def _build_efficientnet(
     arch: str, *, num_classes: int, pretrained: bool
 ) -> nn.Module:
     """Build an EfficientNet backbone."""
-    model_fn = getattr(models, arch)
+    tv_models = _require_torchvision()
+    model_fn = getattr(tv_models, arch)
     if pretrained:
-        weights_cls = getattr(models, _efficientnet_weights_name(arch))
+        weights_cls = getattr(tv_models, _efficientnet_weights_name(arch))
         model = model_fn(weights=weights_cls.DEFAULT)
     else:
         model = model_fn(weights=None)

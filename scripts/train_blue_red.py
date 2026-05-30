@@ -88,7 +88,13 @@ def _binary_rates(scores: np.ndarray, labels: np.ndarray, threshold: float) -> d
         "tpr": float(tpr),
         "fnr": float(fnr),
         "fpr": float(fpr),
+        "fp_rate": float(fpr),
+        "fn_rate": float(fnr),
         "precision": float(precision),
+        "tp": float(tp),
+        "fp": float(fp),
+        "fn": float(fn),
+        "tn": float(tn),
     }
 
 
@@ -492,14 +498,26 @@ class BlueRedDetector(L.LightningModule):
             "val_red_tpr": default["tpr"],
             "val_red_fnr": default["fnr"],
             "val_red_fpr": default["fpr"],
+            "val_red_fn_rate": default["fn_rate"],
+            "val_red_fp_rate": default["fp_rate"],
             "val_red_precision": default["precision"],
+            "val_red_tp": default["tp"],
+            "val_red_fp": default["fp"],
+            "val_red_fn": default["fn"],
+            "val_red_tn": default["tn"],
         }
-        for target_fnr in (0.05, 0.10, 0.20):
+        fp_fn_points = []
+        for target_fnr in (0.01, 0.05, 0.10, 0.20, 0.30, 0.50):
             rates = _rates_at_max_fnr(scores, labels, target_fnr)
             suffix = f"{int(target_fnr * 100):02d}"
             metrics[f"val_red_tpr_at_fnr_{suffix}"] = rates["tpr"]
             metrics[f"val_red_fpr_at_fnr_{suffix}"] = rates["fpr"]
             metrics[f"val_red_threshold_at_fnr_{suffix}"] = rates["threshold"]
+            metrics[f"val_red_fp_rate_at_fn_rate_{suffix}"] = rates["fp_rate"]
+            metrics[f"val_red_threshold_at_fn_rate_{suffix}"] = rates["threshold"]
+            fp_fn_points.append(
+                f"fnr<={target_fnr:.2f}:fpr={rates['fp_rate']:.3f}@{rates['threshold']:.3f}"
+            )
 
         self.log_dict(metrics, prog_bar=False)
         print(
@@ -510,7 +528,8 @@ class BlueRedDetector(L.LightningModule):
             f"fpr={metrics['val_red_fpr']:.3f} "
             f"tpr@fnr10={metrics['val_red_tpr_at_fnr_10']:.3f} "
             f"fpr@fnr10={metrics['val_red_fpr_at_fnr_10']:.3f} "
-            f"thr@fnr10={metrics['val_red_threshold_at_fnr_10']:.3f}"
+            f"thr@fnr10={metrics['val_red_threshold_at_fnr_10']:.3f} "
+            f"fp-vs-fn=[{', '.join(fp_fn_points)}]"
         )
 
     def on_train_epoch_start(self):

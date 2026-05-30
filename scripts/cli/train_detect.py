@@ -14,6 +14,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 
+from audi.checkpoint import load_model_from_checkpoint, strip_compile_prefix
 from audi.config import (
     AugmentationConfig,
     MelConfig,
@@ -217,9 +218,31 @@ def run(argv: list[str] | None = None) -> int:
     # ── Finetuning ──
     ap.add_argument("--finetune-from", type=Path, default=None)
     ap.add_argument("--pretrained-checkpoint", type=Path, default=None)
+    ap.add_argument(
+        "--distill-from",
+        type=Path,
+        default=None,
+        help="Regular detector teacher checkpoint for student distillation",
+    )
+    ap.add_argument(
+        "--distillation-weight",
+        type=float,
+        default=0.0,
+        help="Weight for teacher probability distillation loss",
+    )
+    ap.add_argument(
+        "--distillation-temperature",
+        type=float,
+        default=2.0,
+        help="Temperature used when matching teacher detector probabilities",
+    )
     args = ap.parse_args(argv)
 
     L.seed_everything(args.seed)
+    if args.distillation_weight > 0 and args.distill_from is None:
+        raise SystemExit("--distillation-weight requires --distill-from")
+    if args.distill_from is not None and args.distillation_weight <= 0:
+        raise SystemExit("--distill-from requires --distillation-weight > 0")
 
     snr_bins = parse_snr_bins(args.snr_bin)
     if args.mel_preset == "vit_224" or args.arch.startswith("fastervit"):
@@ -365,6 +388,24 @@ def run(argv: list[str] | None = None) -> int:
             dsp_emb_dim=args.dsp_emb_dim,
             fusion_hidden=args.fusion_hidden,
         )
+    if args.distill_from is not None and detector_cls is not DroneDetector:
+        raise SystemExit(
+            "Detector distillation is currently supported for DroneDetector only"
+        )
+
+    teacher = None
+    if args.distill_from is not None:
+        teacher = load_model_from_checkpoint(args.distill_from, quiet=True)
+        for p in teacher.parameters():
+            p.requires_grad = False
+
+    if teacher is not None:
+        detector_kwargs.update(
+            teacher=teacher,
+            distillation_weight=args.distillation_weight,
+            distillation_temperature=args.distillation_temperature,
+        )
+
     detector = detector_cls(
         model=model_cfg,
         mel=mel_cfg,
@@ -394,7 +435,9 @@ def run(argv: list[str] | None = None) -> int:
         ckpt = torch.load(
             str(args.finetune_from), map_location="cpu", weights_only=False
         )
-        detector.load_state_dict(ckpt["state_dict"], strict=False)
+        detector.load_state_dict(
+            strip_compile_prefix(ckpt["state_dict"]), strict=False
+        )
 
     # ── Trainer ──
     callbacks = [
