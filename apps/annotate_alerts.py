@@ -278,14 +278,19 @@ def main():
 
         st.divider()
         if st.button("← Prev", use_container_width=True):
-            st.session_state.alert_idx = max(0, idx - 1); st.rerun()
+            st.session_state.alert_idx = max(0, idx - 1)
+            st.rerun()
         if st.button("Next →", use_container_width=True):
-            st.session_state.alert_idx = min(len(ordered) - 1, idx + 1) if ordered else 0; st.rerun()
+            st.session_state.alert_idx = (
+                min(len(ordered) - 1, idx + 1) if ordered else 0
+            )
+            st.rerun()
         st.caption(f"{idx + 1} / {len(ordered)}")
         fst = next((i for i, a in enumerate(ordered) if a["alert_dir"] not in labels), None)
         if fst is not None:
             if st.button("→ Next unlabeled", use_container_width=True, type="primary"):
-                st.session_state.alert_idx = fst; st.rerun()
+                st.session_state.alert_idx = fst
+                st.rerun()
 
         st.divider()
         if st.button("Export all"):
@@ -300,7 +305,8 @@ def main():
             st.success(f"Exported {n_seg} segments to {DATA / 'segments_dataset.csv'}")
 
     if not ordered:
-        st.info("No alerts."); return
+        st.info("No alerts.")
+        return
 
     alert = ordered[idx]
     alert_dir = alert["alert_dir"]
@@ -313,28 +319,39 @@ def main():
     bc1, bc2, bc3 = st.columns([1, 1, 1])
     with bc1:
         if st.button("🛸 DRONE", key="btn_drone", use_container_width=True):
-            labels[alert_dir] = "drone"; st.session_state.labels = labels; save_labels(labels)
+            labels[alert_dir] = "drone"
+            st.session_state.labels = labels
+            save_labels(labels)
             nu = next((i for i in range(idx + 1, len(ordered))
                        if ordered[i]["alert_dir"] not in labels), None)
             st.session_state.alert_idx = nu if nu is not None else min(idx + 1, len(ordered) - 1)
             st.rerun()
     with bc2:
         if st.button("❌ NO DRONE", key="btn_nodrone", use_container_width=True):
-            labels[alert_dir] = "nodrone"; st.session_state.labels = labels; save_labels(labels)
+            labels[alert_dir] = "nodrone"
+            st.session_state.labels = labels
+            save_labels(labels)
             nu = next((i for i in range(idx + 1, len(ordered))
                        if ordered[i]["alert_dir"] not in labels), None)
             st.session_state.alert_idx = nu if nu is not None else min(idx + 1, len(ordered) - 1)
             st.rerun()
     with bc3:
         if st.button("⏭ Skip", key="btn_skip", use_container_width=True):
-            st.session_state.alert_idx = min(idx + 1, len(ordered) - 1); st.rerun()
+            st.session_state.alert_idx = min(idx + 1, len(ordered) - 1)
+            st.rerun()
 
     if current_label:
         clr = "#2F9E44" if current_label == "drone" else "#E03131"
-        st.markdown(f"**Label:** <span style='color:{clr};font-size:1rem'>{current_label.upper()}</span>",
-                    unsafe_allow_html=True)
+        st.markdown(
+            f"**Label:** <span style='color:{clr};font-size:1rem'>"
+            f"{current_label.upper()}</span>",
+            unsafe_allow_html=True,
+        )
         if st.button("Clear label"):
-            labels.pop(alert_dir, None); st.session_state.labels = labels; save_labels(labels); st.rerun()
+            labels.pop(alert_dir, None)
+            st.session_state.labels = labels
+            save_labels(labels)
+            st.rerun()
 
     # ── Segment controls ──
     # Use pending values from quick-set buttons
