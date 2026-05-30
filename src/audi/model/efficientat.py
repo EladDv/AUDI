@@ -114,7 +114,12 @@ class _EfficientATWrapper(nn.Module):
         return self.classifier(features)
 
 
-def _build_mn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapper:
+def _build_mn(
+    pretrained_name: str,
+    num_classes: int = 1,
+    *,
+    pretrained: bool = True,
+) -> _EfficientATWrapper:
     """Build an AudioSet-pretrained MobileNetV3 wrapper.
 
     The original first conv (1→16, stride 2) receives our 1-channel
@@ -135,7 +140,7 @@ def _build_mn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapper
     model = _quiet_get_model(
         get_model,
         num_classes=527,
-        pretrained_name=pretrained_name,
+        pretrained_name=pretrained_name if pretrained else None,
         width_mult=width,
         head_type="mlp",
         input_dim_f=128,
@@ -151,7 +156,12 @@ def _build_mn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapper
     return wrapper
 
 
-def _build_dymn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapper:
+def _build_dymn(
+    pretrained_name: str,
+    num_classes: int = 1,
+    *,
+    pretrained: bool = True,
+) -> _EfficientATWrapper:
     """Build an AudioSet-pretrained Dynamic MobileNet wrapper."""
     from models.dymn.model import get_model
 
@@ -159,7 +169,7 @@ def _build_dymn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapp
     model = _quiet_get_model(
         get_model,
         num_classes=527,
-        pretrained_name=pretrained_name,
+        pretrained_name=pretrained_name if pretrained else None,
         width_mult=width,
     )
     # DyMN classifier[2] is the first Linear (lastconv_output_channels → last_channel)
@@ -171,6 +181,7 @@ def _build_dymn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapp
 def build_efficientat(
     pretrained_name: str,
     num_classes: int = 1,
+    pretrained: bool = True,
     cache_dir: str | None = None,
 ) -> _EfficientATWrapper:
     """Factory: build an EfficientAT model wrapper by pretrained name.
@@ -178,6 +189,8 @@ def build_efficientat(
     Args:
         pretrained_name: Any key from EFFICIENTAT_MODELS (e.g. "mn10_as").
         num_classes: Number of output logits (default 1 for binary).
+        pretrained: Whether to load AudioSet weights. Set False for offline
+            shape tests and smoke builds.
         cache_dir: Optional directory for downloaded checkpoints.
 
     Returns:
@@ -194,9 +207,17 @@ def build_efficientat(
         _dymn.model_dir = cache_dir
 
     if _is_mn(pretrained_name):
-        return _build_mn(pretrained_name, num_classes=num_classes)
+        return _build_mn(
+            pretrained_name,
+            num_classes=num_classes,
+            pretrained=pretrained,
+        )
     elif any(pretrained_name.startswith(p) for p in ("dymn04_", "dymn10_", "dymn20_")):
-        return _build_dymn(pretrained_name, num_classes=num_classes)
+        return _build_dymn(
+            pretrained_name,
+            num_classes=num_classes,
+            pretrained=pretrained,
+        )
     else:
         supported = ", ".join(EFFICIENTAT_MODELS)
         raise ValueError(

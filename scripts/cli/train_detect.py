@@ -14,7 +14,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 
-from audi.checkpoint import load_model_from_checkpoint, strip_compile_prefix
+from audi.checkpoint import strip_compile_prefix
 from audi.config import (
     AugmentationConfig,
     MelConfig,
@@ -109,27 +109,33 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--use-pcen",
         action="store_true",
-        help="Use PCEN instead of dB conversion + scalar normalization",
+        help="Research mode: use PCEN instead of dB conversion + scalar normalization",
     )
     ap.add_argument("--pcen-s", type=float, default=0.025)
     ap.add_argument("--pcen-alpha", type=float, default=0.98)
     ap.add_argument("--pcen-delta", type=float, default=2.0)
     ap.add_argument("--pcen-r", type=float, default=0.5)
-    ap.add_argument("--frontend-type", default="mel",
-                    help="Frontend type: mel, cqt, cwt, or comma-separated like mel,cqt")
+    ap.add_argument(
+        "--frontend-type",
+        default="mel",
+        help=(
+            "Research mode frontend: mel, cqt, cwt, or comma-separated "
+            "like mel,cqt"
+        ),
+    )
     ap.add_argument("--cqt-bins", type=int, default=84)
     ap.add_argument("--cqt-bpo", type=int, default=12)
     ap.add_argument("--cwt-scales", type=int, default=64)
     ap.add_argument(
         "--use-dsp-features",
         action="store_true",
-        help="Use DSP feature channels in mel input (DSPDroneDetector)",
+        help="Research mode: use DSP feature channels in mel input (DSPDroneDetector)",
     )
     ap.add_argument(
         "--use-dsp-branch",
         action="store_true",
         help=(
-            "Use DSP features as separate branch fused with backbone embedding "
+            "Research mode: use DSP features as separate branch fused with backbone embedding "
             "(MNBranchDSPDetector)"
         ),
     )
@@ -218,31 +224,9 @@ def run(argv: list[str] | None = None) -> int:
     # ── Finetuning ──
     ap.add_argument("--finetune-from", type=Path, default=None)
     ap.add_argument("--pretrained-checkpoint", type=Path, default=None)
-    ap.add_argument(
-        "--distill-from",
-        type=Path,
-        default=None,
-        help="Regular detector teacher checkpoint for student distillation",
-    )
-    ap.add_argument(
-        "--distillation-weight",
-        type=float,
-        default=0.0,
-        help="Weight for teacher probability distillation loss",
-    )
-    ap.add_argument(
-        "--distillation-temperature",
-        type=float,
-        default=2.0,
-        help="Temperature used when matching teacher detector probabilities",
-    )
     args = ap.parse_args(argv)
 
     L.seed_everything(args.seed)
-    if args.distillation_weight > 0 and args.distill_from is None:
-        raise SystemExit("--distillation-weight requires --distill-from")
-    if args.distill_from is not None and args.distillation_weight <= 0:
-        raise SystemExit("--distill-from requires --distillation-weight > 0")
 
     snr_bins = parse_snr_bins(args.snr_bin)
     if args.mel_preset == "vit_224" or args.arch.startswith("fastervit"):
@@ -388,24 +372,6 @@ def run(argv: list[str] | None = None) -> int:
             dsp_emb_dim=args.dsp_emb_dim,
             fusion_hidden=args.fusion_hidden,
         )
-    if args.distill_from is not None and detector_cls is not DroneDetector:
-        raise SystemExit(
-            "Detector distillation is currently supported for DroneDetector only"
-        )
-
-    teacher = None
-    if args.distill_from is not None:
-        teacher = load_model_from_checkpoint(args.distill_from, quiet=True)
-        for p in teacher.parameters():
-            p.requires_grad = False
-
-    if teacher is not None:
-        detector_kwargs.update(
-            teacher=teacher,
-            distillation_weight=args.distillation_weight,
-            distillation_temperature=args.distillation_temperature,
-        )
-
     detector = detector_cls(
         model=model_cfg,
         mel=mel_cfg,

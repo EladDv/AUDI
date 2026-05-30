@@ -189,6 +189,13 @@ The sweep runner also supports `--no-postprocess` and `--no-calibrate` flags to 
 | `mel_sweep.yaml` | Mel geometry and PCEN research |
 | `frontend_sweep.yaml`, `frontend_sweep_mn.yaml` | CQT/CWT frontend research |
 
+Blue/red training and export are maintained commands:
+
+```bash
+uv run audi-train-blue-red --help
+uv run audi-export-blue-red-tflite --help
+```
+
 ---
 
 ## Training Reference

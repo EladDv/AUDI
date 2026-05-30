@@ -76,6 +76,8 @@ audi-data = "scripts.build_data:main"
 audi-infer = "scripts.inference:main"
 audi-ensemble = "scripts.eval_ensemble:main"
 audi-export-tflite = "scripts.export_tflite:main"
+audi-train-blue-red = "scripts.train_blue_red:main"
+audi-export-blue-red-tflite = "scripts.export_blue_red_tflite:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audi", "scripts"]
@@ -89,3 +91,6 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: expensive optional tests that are skipped by default unless enabled",
+]

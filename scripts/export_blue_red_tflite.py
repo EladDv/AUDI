@@ -13,7 +13,6 @@ class for the color head.
 from __future__ import annotations
 
 import argparse
-import sys
 import tempfile
 import types
 from pathlib import Path
@@ -45,10 +44,7 @@ class CombinedDetectorBlueRed(nn.Module):
 
 
 def _load_blue_red_model(ckpt_path: Path) -> nn.Module:
-    scripts_dir = Path(__file__).resolve().parent
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-    from train_blue_red import BlueRedDetector
+    from scripts.train_blue_red import BlueRedDetector
 
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     state = ckpt.get("state_dict", {})

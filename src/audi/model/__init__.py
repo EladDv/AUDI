@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 import torch
 from torch import nn
 
+from audi.model.efficientat import EFFICIENTAT_MODELS, build_efficientat
 from audi.model.vision import (
     _FASTERVIT_ARCHS,
     EFFICIENTNET_LITE_ARCHS,
@@ -20,7 +21,6 @@ from audi.model.vision import (
     _build_resnet,
     _build_timm,
 )
-from audi.model.efficientat import EFFICIENTAT_MODELS, build_efficientat
 
 
 class AudioBackbone(nn.Module, ABC):
@@ -118,7 +118,7 @@ def build_model(
 
     if arch_lower in EFFICIENTAT_MODELS:
         return build_efficientat(
-            arch_lower, num_classes=num_classes
+            arch_lower, num_classes=num_classes, pretrained=pretrained
         )
 
     supported = ", ".join(SUPPORTED_MODEL_ARCHS)
