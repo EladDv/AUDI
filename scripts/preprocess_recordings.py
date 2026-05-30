@@ -11,13 +11,15 @@ Pipeline:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
-from datasets import Audio, Dataset, DatasetDict, Features, Value, concatenate_datasets
+from datasets import Audio, Dataset, DatasetDict, Features, Value
 
 # AudioSet class indices for bird/rooster detection (from EfficientAT metadata)
 # Verified against EfficientAT/metadata/class_labels_indices.csv
@@ -95,14 +97,15 @@ def load_as_model():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from models.mn.model import get_model
 
-    model = get_model(
-        num_classes=527,
-        pretrained_name="mn05_as",
-        width_mult=0.5,
-        head_type="mlp",
-        input_dim_f=128,
-        input_dim_t=1000,
-    )
+    with contextlib.redirect_stdout(io.StringIO()):
+        model = get_model(
+            num_classes=527,
+            pretrained_name="mn05_as",
+            width_mult=0.5,
+            head_type="mlp",
+            input_dim_f=128,
+            input_dim_t=1000,
+        )
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
@@ -167,7 +170,9 @@ def build_dataset(records: list[dict]) -> Dataset:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Preprocess field recordings for blue/red classification")
+    ap = argparse.ArgumentParser(
+        description="Preprocess field recordings for blue/red classification"
+    )
     ap.add_argument("--recordings-dir", type=Path,
                     default=Path("data/recordings_20260501T061603"))
     ap.add_argument("--output-dir", type=Path,
@@ -287,10 +292,13 @@ def main() -> int:
         "validation": full_ds.select(sorted(val_idx)),
     })
 
-    print(f"\nTrain: {len(ds_dict['train'])} ({sum(1 for r in ds_dict['train'] if r['label']=='blue')} blue, "
-          f"{sum(1 for r in ds_dict['train'] if r['label']=='red')} red)")
-    print(f"Val:   {len(ds_dict['validation'])} ({sum(1 for r in ds_dict['validation'] if r['label']=='blue')} blue, "
-          f"{sum(1 for r in ds_dict['validation'] if r['label']=='red')} red)")
+    train_blue = sum(1 for r in ds_dict["train"] if r["label"] == "blue")
+    train_red = sum(1 for r in ds_dict["train"] if r["label"] == "red")
+    val_blue = sum(1 for r in ds_dict["validation"] if r["label"] == "blue")
+    val_red = sum(1 for r in ds_dict["validation"] if r["label"] == "red")
+
+    print(f"\nTrain: {len(ds_dict['train'])} ({train_blue} blue, {train_red} red)")
+    print(f"Val:   {len(ds_dict['validation'])} ({val_blue} blue, {val_red} red)")
 
     ds_dict.save_to_disk(str(args.output_dir))
     print(f"\nSaved: {args.output_dir}")

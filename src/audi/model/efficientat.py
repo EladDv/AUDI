@@ -11,6 +11,9 @@ and 527 output classes.  This module adapts them to:
 
 from __future__ import annotations
 
+import contextlib
+import io
+
 import torch
 from torch import nn
 
@@ -72,6 +75,11 @@ def _is_mn(name: str) -> bool:
     return any(name.startswith(p) for p in ("mn04_", "mn05_", "mn10_", "mn20_", "mn30_", "mn40_"))
 
 
+def _quiet_get_model(get_model, *args, **kwargs):
+    with contextlib.redirect_stdout(io.StringIO()):
+        return get_model(*args, **kwargs)
+
+
 class _EfficientATWrapper(nn.Module):
     """Generic wrapper that adapts an EfficientAT model for our pipeline.
 
@@ -124,7 +132,8 @@ def _build_mn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapper
 
     width = _parse_width(pretrained_name)
     # Build with 527 AudioSet classes to match pretrained weights
-    model = get_model(
+    model = _quiet_get_model(
+        get_model,
         num_classes=527,
         pretrained_name=pretrained_name,
         width_mult=width,
@@ -132,7 +141,8 @@ def _build_mn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapper
         input_dim_f=128,
         input_dim_t=1000,
     )
-    # The last channel before classifier in MN is lastconv_output_channels = 6 * lastconv_input_channels
+    # The last channel before classifier in MN is
+    # lastconv_output_channels = 6 * lastconv_input_channels.
     # where lastconv_input_channels = inverted_residual_setting[-1].out_channels
     # For mn10 (width=1.0): lastconv_output_channels = 6 * 160 = 960
     feature_dim = model.classifier[2].in_features  # Linear: lastconv_output_channels → last_channel
@@ -146,7 +156,8 @@ def _build_dymn(pretrained_name: str, num_classes: int = 1) -> _EfficientATWrapp
     from models.dymn.model import get_model
 
     width = _parse_width(pretrained_name)
-    model = get_model(
+    model = _quiet_get_model(
+        get_model,
         num_classes=527,
         pretrained_name=pretrained_name,
         width_mult=width,
@@ -176,8 +187,8 @@ def build_efficientat(
         ValueError: If pretrained_name is not recognized.
     """
     if cache_dir is not None:
-        import models.mn.model as _mn
         import models.dymn.model as _dymn
+        import models.mn.model as _mn
 
         _mn.model_dir = cache_dir
         _dymn.model_dir = cache_dir
@@ -198,7 +209,13 @@ if __name__ == "__main__":
     print("Building mn10_as (no download, dry-run architecture check)...")
     from models.mn.model import get_model
 
-    backbone = get_model(num_classes=527, pretrained_name=None, width_mult=1.0, head_type="mlp")
+    backbone = _quiet_get_model(
+        get_model,
+        num_classes=527,
+        pretrained_name=None,
+        width_mult=1.0,
+        head_type="mlp",
+    )
     feature_dim = backbone.classifier[2].in_features
     wrapper = _EfficientATWrapper(backbone, feature_dim)
     x = torch.randn(2, 3, 128, 100)

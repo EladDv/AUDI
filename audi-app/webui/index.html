@@ -174,11 +174,6 @@
       border: 2px solid #1a1a3e;
     }
 
-    /* .state-card.state-blue {
-      background: #081828;
-      border: 2px solid #08f;
-    } */
-
     .state-card.state-yes {
       background: #2a0808;
       border: 2px solid #e33;
@@ -207,7 +202,6 @@
       color: #555;
     }
 
-    /* .state-label.blue { color: #08f; } */
     .state-label.yes {
       color: #f44;
     }
@@ -549,12 +543,16 @@
         <div class="val" style="color:#e44" id="yesVal">0.00</div>
         <div class="lbl">YES</div>
       </div>
-      <!-- <div class="state-conf-item">
-        <div class="val" style="color:#08f" id="blueVal">0.00</div>
+      <div class="state-conf-item">
+        <div class="val" style="color:#f55" id="redVal">--</div>
+        <div class="lbl">RED</div>
+      </div>
+      <div class="state-conf-item">
+        <div class="val" style="color:#4af" id="blueVal">--</div>
         <div class="lbl">BLUE</div>
-      </div> -->
+      </div>
     </div>
-    <div class="threshold-info" id="thresholdInfo">YES ≥ 0.70 &nbsp; BLUE ≥ 0.40</div>
+    <div class="threshold-info" id="thresholdInfo">YES >= 0.70 &nbsp; RED >= 0.50</div>
   </div>
 
   <!-- Action buttons -->
@@ -618,7 +616,7 @@
       <div class="status-card">
         <div class="label">Detections</div>
         <div class="value white">
-          YES ${det.yes_count || 0}
+          Y ${det.yes_count || 0} / R ${det.red_count || 0} / B ${det.blue_count || 0}
         </div>
       </div>
       <div class="status-card">
@@ -634,20 +632,24 @@
         const label = document.getElementById('stateLabel');
         const sub = document.getElementById('stateSub');
         card.className = 'state-card state-' + state.toLowerCase();
+        const color = det.drone_color || 'UNKNOWN';
+        const colorText = color === 'UNKNOWN' ? '' : ` - ${color}`;
         if (state === 'YES') {
           label.className = 'state-label yes'; label.textContent = 'YES';
-          sub.textContent = 'ALARM — snapshot saved';
-        } else if (state === 'BLUE') {
-          label.className = 'state-label blue'; label.textContent = 'BLUE';
-          sub.textContent = 'Suspicious — logged only';
+          sub.textContent = `ALARM${colorText} - snapshot saved`;
         } else {
           label.className = 'state-label no'; label.textContent = 'NO';
-          sub.textContent = 'Nothing detected';
+          sub.textContent = color === 'UNKNOWN' ? 'Nothing detected' : `Last typed ${color}`;
         }
         document.getElementById('yesVal').textContent = (det.yes_confidence || 0).toFixed(2);
-        // document.getElementById('blueVal').textContent = (det.blue_confidence || 0).toFixed(2);
+        document.getElementById('redVal').textContent =
+          det.red_confidence == null ? '--' : det.red_confidence.toFixed(2);
+        document.getElementById('blueVal').textContent =
+          det.blue_confidence == null ? '--' : det.blue_confidence.toFixed(2);
         document.getElementById('thresholdInfo').textContent =
-          'YES ≥ ' + (det.threshold_yes || 0.7).toFixed(2) + '  BLUE ≥ ' + (det.threshold_blue || 0.4).toFixed(2);
+          'YES >= ' + (det.threshold_yes || 0.7).toFixed(2) +
+          '  RED >= ' + (det.blue_red_threshold || 0.5).toFixed(2) +
+          (det.blue_red_model_loaded ? '' : '  color model offline');
 
         // Record button — same state as the recording label
         const btn = document.getElementById('btnRecord');
@@ -696,8 +698,10 @@
         const state = det.current_state || 'NO';
         const pills = [];
 
-        if (state === 'YES') pills.push({ label: 'ALARM', cls: 'pill-bad' });
-        else if (state === 'BLUE') pills.push({ label: 'BLUE', cls: 'pill-blue' });
+        if (state === 'YES') {
+          const color = det.drone_color && det.drone_color !== 'UNKNOWN' ? ` ${det.drone_color}` : '';
+          pills.push({ label: `ALARM${color}`, cls: 'pill-bad' });
+        }
         else if (rec.running && rec.audio_healthy) pills.push({ label: 'Audio OK', cls: 'pill-ok' });
         else if (rec.running && !rec.audio_healthy) pills.push({ label: 'No Audio', cls: 'pill-warn' });
         else pills.push({ label: 'Stopped', cls: 'pill-bad' });
@@ -723,11 +727,12 @@
           const t = new Date(e.timestamp * 1000);
           const state = e.state || 'NO';
           const yesC = (e.yes_confidence * 100).toFixed(0) || '0';
-          // const blueC = (e.blue_confidence * 100).toFixed(0) || '0';
+          const redC = e.red_confidence == null ? '--' : (e.red_confidence * 100).toFixed(0);
+          const color = e.drone_color && e.drone_color !== 'UNKNOWN' ? ` ${e.drone_color}` : '';
           return `<div class="history-item">
         <span class="time">${t.toLocaleDateString()} ${t.toLocaleTimeString()}</span>
-        <span class="event state-${state.toLowerCase()}">${state}</span>
-        <span class="conf">Y:${yesC}%</span>
+        <span class="event state-${state.toLowerCase()}">${state}${color}</span>
+        <span class="conf">Y:${yesC}% R:${redC}%</span>
       </div>`;
         }).join('');
       }).catch(() => { });

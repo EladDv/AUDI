@@ -1,0 +1,35 @@
+name: field_hard_negative_finetune_v2
+noise_path: data/HF_dataset_v7_background
+drone_path: data/HF_dataset_v2_drone
+description: >-
+  Conservative hard-negative finetune. Base noise remains the field-background
+  dataset; mined field false-positive windows are sampled as a minority base
+  background. HF_dataset_v2_drone remains the full positive drone set and is
+  mixed with stronger field-noise overlays/augmentations. This intentionally
+  does not use 551 data.
+base_flags: >-
+  --clip-seconds 5.12 --patience 0 --epochs 16
+  --batch-size 24 --steps-per-epoch 250 --val-steps-per-epoch 120
+  --loss bce --label-smoothing 0.05 --augment
+  --lr 8e-6 --lr-schedule linear --warmup-epochs 1 --weight-decay 0.03
+  --freeze-backbone-epochs 8 --positive-probability 0.55
+  --hard-noise data/field_recordings_20260514/mined_hard_negatives/hf_dataset
+  --hard-noise-prob 0.20
+  --noise2 data/HF_dataset_v7_background --noise2-prob 0.80
+  --noise2-multi-prob 0.65 --noise2-count 4 --noise2-max-attenuation -25
+  --doppler-prob 0.35 --pitch-prob 0.35 --stretch-prob 0.35
+  --reverb-prob 0.45 --eq-prob 0.55 --noise-inject-prob 0.45
+  --noise-inject-db -32 --time-mask-prob 0.35 --lowpass-prob 0.45
+  --atmospheric-prob 0.55
+configs:
+  - name: "01_mn10_hardmix_freeze8_lr8e6"
+    flags: >-
+      --arch mn10_as
+      --finetune-from checkpoints/efficientat_20260528_232959/16_mn10_as/checkpoints/epoch=22-step=5750.ckpt
+    note: Best low-FP field model with hard negatives as minority field noise.
+
+  - name: "02_dymn10_hardmix_freeze8_lr8e6"
+    flags: >-
+      --arch dymn10_as
+      --finetune-from checkpoints/efficientat_20260528_232959/12_dymn10_as/checkpoints/epoch=14-step=3750.ckpt
+    note: Higher attack-coverage candidate with conservative hard-negative mix.

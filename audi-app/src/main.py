@@ -87,6 +87,8 @@ def load_config(config_path: str = None) -> dict:
             "num_threads": 2,
             "confidence_threshold_high": 0.70,
             "confidence_threshold_low": 0.40,
+            "blue_red_threshold": 0.50,
+            "blue_red_min_detection_score": 0.70,
             "inference_interval": 5,
             "labels": ["drone"],
         },

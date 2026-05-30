@@ -1,0 +1,31 @@
+name: field_hard_negative_finetune_v4_sizes
+noise_path: data/HF_dataset_v7_background
+drone_path: data/HF_dataset_v2_drone
+description: V4 coverage/FP-TP sweep over MN 0.4/0.5/1.0 plus supported dynamic MN
+  0.4/1.0. Starts from current hard-negative finetuned checkpoints, backs off hard-negative/noise
+  pressure, and does not use 551 data.
+base_flags: --clip-seconds 5.12 --patience 0 --epochs 14 --batch-size 24 --steps-per-epoch
+  250 --val-steps-per-epoch 120 --loss bce --label-smoothing 0.05 --augment --lr 1.0e-5
+  --lr-schedule linear --warmup-epochs 1 --weight-decay 0.03 --freeze-backbone-epochs
+  3 --positive-probability 0.62 --hard-noise data/field_recordings_20260514/mined_hard_negatives/hf_dataset
+  --hard-noise-prob 0.07 --noise2 data/HF_dataset_v7_background --noise2-prob 0.45
+  --noise2-multi-prob 0.40 --noise2-count 3 --noise2-max-attenuation -38 --doppler-prob
+  0.35 --pitch-prob 0.25 --stretch-prob 0.25 --reverb-prob 0.25 --eq-prob 0.35 --noise-inject-prob
+  0.25 --noise-inject-db -40 --time-mask-prob 0.20 --lowpass-prob 0.20 --atmospheric-prob
+  0.25
+configs:
+- name: 01_mn04_v4_hard07_freeze3_lr10e6
+  flags: --arch mn04_as --finetune-from checkpoints/field_hard_negative_finetune_v3_small_sizes_20260530_115703/01_mn04_cov_hard10_freeze4_lr12e6/checkpoints/epoch=8-step=2250.ckpt
+  note: V4 MN width 0.4 from current hard-negative finetune.
+- name: 02_mn05_v4_hard07_freeze3_lr10e6
+  flags: --arch mn05_as --finetune-from checkpoints/field_hard_negative_finetune_v3_small_sizes_20260530_115703/02_mn05_cov_hard10_freeze4_lr12e6/checkpoints/epoch=9-step=2500.ckpt
+  note: V4 MN width 0.5 from current hard-negative finetune.
+- name: 03_mn10_v4_hard07_freeze3_lr10e6
+  flags: --arch mn10_as --finetune-from checkpoints/field_hard_negative_finetune_v3_coverage_20260530_110102/01_mn10_cov_hard10_freeze4_lr12e6/checkpoints/epoch=12-step=3250.ckpt
+  note: V4 MN width 1.0 from current hard-negative finetune.
+- name: 04_dymn04_v4_hard07_freeze3_lr10e6
+  flags: --arch dymn04_as --finetune-from checkpoints/field_hard_negative_finetune_v3_small_sizes_20260530_115703/03_dymn04_cov_hard10_freeze4_lr12e6/checkpoints/epoch=13-step=3500.ckpt
+  note: V4 supported dynamic MN width 0.4.
+- name: 05_dymn10_v4_hard07_freeze3_lr10e6
+  flags: --arch dymn10_as --finetune-from checkpoints/field_hard_negative_finetune_v3_coverage_20260530_110102/02_dymn10_cov_hard10_freeze4_lr12e6/checkpoints/epoch=6-step=1750.ckpt
+  note: V4 supported dynamic MN width 1.0.

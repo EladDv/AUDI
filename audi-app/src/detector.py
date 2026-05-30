@@ -1,7 +1,7 @@
 """
 Pi Audio Guard — Detection Engine (TFLite int8)
 
-Real TFLite inference with three-state detection (YES/BLUE/NO).
+Real TFLite inference with drone detection and optional blue/red typing.
 
 Pipeline:
   1. Capture audio from ring buffer (configurable SR, default 48kHz)
@@ -9,8 +9,9 @@ Pipeline:
   3. Compute Mel spectrogram (numpy/scipy, no torch needed)
   4. Normalize + convert to 3-channel grayscale
   5. Feed to TFLite int8 interpreter
-  6. Sigmoid → confidence score
-  7. Temporal smoothing → YES/BLUE/NO decision
+  6. Sigmoid -> confidence score
+  7. Optional combined blue/red output from the same model
+  8. Temporal smoothing -> YES/NO decision
 
 Falls back to mock if model not found or ai_edge_litert unavailable.
 """
@@ -165,6 +166,7 @@ class TFLiteClassifier:
         self._input_details = None
         self._output_details = None
         self._loaded = False
+        self.output_size = 1
 
         try:
             self._load_model(num_threads)
@@ -184,10 +186,18 @@ class TFLiteClassifier:
         self._loaded = True
 
         inp_shape = self._input_details[0]["shape"]
+        out_shape = self._output_details[0]["shape"]
+        if len(out_shape) == 0:
+            self.output_size = 1
+        elif len(out_shape) == 1:
+            self.output_size = int(out_shape[0])
+        else:
+            self.output_size = int(np.prod(out_shape[1:]))
         logger.info(
-            "TFLite model loaded: %s, input=%s, threads=%d",
+            "TFLite model loaded: %s, input=%s, output=%s, threads=%d",
             Path(self.model_path).name,
             inp_shape,
+            out_shape,
             num_threads,
         )
 
@@ -248,19 +258,31 @@ class TFLiteClassifier:
 
         return mel.astype(np.float32)
 
+    def predict_logits(self, spec: np.ndarray) -> np.ndarray:
+        """Run inference and return all raw logits as a flat float32 array."""
+        if not self._loaded:
+            return np.zeros(1, dtype=np.float32)
+
+        input_shape = self._input_details[0].get("shape")
+        if input_shape is not None and len(input_shape) >= 1:
+            expected_batch = int(input_shape[0])
+            if expected_batch > 1 and spec.shape[0] == 1:
+                spec = np.repeat(spec, expected_batch, axis=0)
+        self._interpreter.set_tensor(self._input_details[0]["index"], spec)
+        self._interpreter.invoke()
+        logits = self._interpreter.get_tensor(self._output_details[0]["index"])
+        logits = np.asarray(logits, dtype=np.float32)
+        if logits.ndim > 1:
+            logits = logits[0]
+        return logits.flatten()
+
     def predict(self, spec: np.ndarray) -> float:
         """Run inference on a preprocessed spectrogram.
 
         Returns:
-            Raw logit (before sigmoid).
+            First raw logit (before sigmoid), for binary detector models.
         """
-        if not self._loaded:
-            return 0.0
-
-        self._interpreter.set_tensor(self._input_details[0]["index"], spec)
-        self._interpreter.invoke()
-        logit = self._interpreter.get_tensor(self._output_details[0]["index"])
-        return float(logit.flatten()[0])
+        return float(self.predict_logits(spec)[0])
 
 
 # ===========================================================================
@@ -374,6 +396,9 @@ class AlarmSnapshotter:
                 "state": state,
                 "yes_confidence": yes_conf,
                 "threshold_yes": detection.get("threshold_yes", 0.70),
+                "drone_color": detection.get("drone_color"),
+                "red_confidence": detection.get("red_confidence"),
+                "blue_confidence": detection.get("blue_confidence"),
                 "files": {
                     "pre_60s": str(pre_path),
                     "post_60s": str(post_path),
@@ -460,12 +485,10 @@ class AlertHistory:
 
 
 class DetectionEngine:
-    """Orchestrates periodic inference with TFLite model.
+    """Orchestrates periodic inference with one combined TFLite model.
 
-    Three output states:
-      YES  — confidence >= high threshold → GPIO alarm + snapshot + history
-      BLUE — low <= confidence < high      → log + history only
-      NO   — confidence < low              → nothing
+    Output shape may be a legacy single detector logit or the combined
+    [detector_logit, blue_logit, red_logit]. RED is the positive color class.
     """
 
     def __init__(
@@ -491,8 +514,17 @@ class DetectionEngine:
 
         # Thresholds
         self.threshold_yes = det_cfg.get("confidence_threshold_high", 0.70)
+        self.threshold_blue = det_cfg.get(
+            "confidence_threshold_low", self.threshold_yes
+        )
         self.labels = det_cfg.get("labels", DEFAULT_LABELS)
         self.inference_interval = det_cfg.get("inference_interval", 0.320)
+
+        # Combined model output: [detector_logit, blue_logit, red_logit].
+        self.blue_red_threshold = det_cfg.get("blue_red_threshold", 0.5)
+        self.blue_red_min_detection_score = det_cfg.get(
+            "blue_red_min_detection_score", self.threshold_blue
+        )
 
         # Debug mode — logs per-window timing at DEBUG level
         self.debug = det_cfg.get("debug", False)
@@ -542,6 +574,8 @@ class DetectionEngine:
         self._last_inference_time = 0.0
         self._total_inferences = 0
         self._yes_count = 0
+        self._red_count = 0
+        self._blue_count = 0
         self._last_alarm_time = 0.0
         self.alarm_cooldown_s = det_cfg.get("alarm_cooldown_s", 0)
         self._last_timing: dict = {}  # {preprocess_ms, inference_ms, total_ms, n_windows}
@@ -568,6 +602,10 @@ class DetectionEngine:
     def is_real_model(self) -> bool:
         return self.classifier.is_loaded
 
+    @property
+    def has_blue_red_model(self) -> bool:
+        return self.classifier.is_loaded and self.classifier.output_size >= 3
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -575,8 +613,10 @@ class DetectionEngine:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         logger.info(
-            f"Detection started — YES≥{self.threshold_yes:.2f} "
-            f"interval={self.inference_interval:.3f}s model={'real' if self.is_real_model else 'mock'}",
+            f"Detection started - YES>={self.threshold_yes:.2f} "
+            f"interval={self.inference_interval:.3f}s "
+            f"model={'real' if self.is_real_model else 'mock'} "
+            f"combined_blue_red={'on' if self.has_blue_red_model else 'off'}",
         )
 
     def stop(self):
@@ -600,6 +640,61 @@ class DetectionEngine:
             )
             self._stop_event.wait(max(0.01, remaining))
 
+    def _classify_blue_red(
+        self,
+        detection_score: float,
+        color_logits: np.ndarray | None,
+    ) -> dict:
+        """Classify a detected drone window as BLUE or RED.
+
+        RED is the positive class. The color is reported only when the drone
+        detector score is high enough; otherwise the color head would be
+        classifying background.
+        """
+        result = {
+            "drone_color": "UNKNOWN",
+            "red_confidence": None,
+            "blue_confidence": None,
+            "red_logit": None,
+            "blue_logit": None,
+            "blue_red_enabled": color_logits is not None
+            and np.asarray(color_logits).size >= 2,
+            "blue_red_threshold": self.blue_red_threshold,
+            "blue_red_min_detection_score": self.blue_red_min_detection_score,
+        }
+        if detection_score < self.blue_red_min_detection_score:
+            return result
+
+        if color_logits is None:
+            return result
+        logits = np.asarray(color_logits, dtype=np.float32)
+
+        if logits.size < 2:
+            logger.warning(
+                "Blue/red model returned %d logits; expected [blue, red]",
+                logits.size,
+            )
+            return result
+
+        logits = logits[:2].astype(np.float64)
+        logits = logits - np.max(logits)
+        exp = np.exp(logits)
+        probs = exp / max(float(exp.sum()), 1e-12)
+        blue_conf = float(probs[0])
+        red_conf = float(probs[1])
+        color = "RED" if red_conf >= self.blue_red_threshold else "BLUE"
+
+        result.update(
+            {
+                "drone_color": color,
+                "red_confidence": round(red_conf, 4),
+                "blue_confidence": round(blue_conf, 4),
+                "red_logit": round(float(logits[1]), 4),
+                "blue_logit": round(float(logits[0]), 4),
+            }
+        )
+        return result
+
     def _inference_cycle(self):
         """Take latest window from ring buffer, run single inference, determine state."""
         t0 = time.perf_counter()
@@ -622,7 +717,7 @@ class DetectionEngine:
         t_pre = time.perf_counter()
         spec = self.classifier.preprocess(audio, self.capture_sample_rate)
         t_mid = time.perf_counter()
-        logit = self.classifier.predict(spec)
+        logits = self.classifier.predict_logits(spec)
         t_post = time.perf_counter()
 
         preprocess_ms = (t_mid - t_pre) * 1000
@@ -645,10 +740,13 @@ class DetectionEngine:
             )
 
         # Hysteresis → binary YES/NO
-        prob = 1.0 / (1.0 + np.exp(-np.clip(logit, -50, 50)))
+        det_logit = float(logits[0])
+        color_logits = logits[1:3] if logits.size >= 3 else None
+        prob = 1.0 / (1.0 + np.exp(-np.clip(det_logit, -50, 50)))
         raw_score = float(prob)
         alarm = self.hysteresis.add(raw_score)
         state = "YES" if alarm else "NO"
+        color_result = self._classify_blue_red(raw_score, color_logits)
 
         result = {
             "timestamp": time.time(),
@@ -656,6 +754,7 @@ class DetectionEngine:
             "yes_confidence": round(self.hysteresis.confidence, 4),
             "raw_score": round(raw_score, 4),
             "threshold_yes": self.threshold_yes,
+            **color_result,
         }
 
         self._last_inference = result
@@ -663,7 +762,14 @@ class DetectionEngine:
 
         # Record in score history for debug UI
         self._score_history.append(
-            {"ts": time.time(), "raw": raw_score, "state": state}
+            {
+                "ts": time.time(),
+                "raw": raw_score,
+                "state": state,
+                "red": color_result.get("red_confidence"),
+                "blue": color_result.get("blue_confidence"),
+                "color": color_result.get("drone_color"),
+            }
         )
         if len(self._score_history) > self._score_history_max:
             self._score_history.pop(0)
@@ -690,6 +796,10 @@ class DetectionEngine:
 
         if state == "YES":
             self._yes_count += 1
+            if color_result.get("drone_color") == "RED":
+                self._red_count += 1
+            elif color_result.get("drone_color") == "BLUE":
+                self._blue_count += 1
             now = time.time()
             in_cooldown = (
                 self.alarm_cooldown_s > 0
@@ -697,17 +807,21 @@ class DetectionEngine:
             )
             if in_cooldown:
                 logger.info(
-                    "YES suppressed (cooldown: %.1fs remaining): conf=%.2f (raw=%.2f)",
+                    "YES suppressed (cooldown: %.1fs remaining): conf=%.2f (raw=%.2f, color=%s, red=%s)",
                     self.alarm_cooldown_s - (now - self._last_alarm_time),
                     self.hysteresis.confidence,
                     raw_score,
+                    color_result.get("drone_color"),
+                    color_result.get("red_confidence"),
                 )
             else:
                 self._last_alarm_time = now
                 logger.warning(
-                    "YES ALARM: conf=%.2f (raw=%.2f)",
+                    "YES ALARM: conf=%.2f (raw=%.2f, color=%s, red=%s)",
                     self.hysteresis.confidence,
                     raw_score,
+                    color_result.get("drone_color"),
+                    color_result.get("red_confidence"),
                 )
                 self.alert_history.append(result)
                 threading.Thread(
@@ -742,16 +856,28 @@ class DetectionEngine:
             "model_type": self.model_type,
             "labels": self.labels,
             "threshold_yes": self.threshold_yes,
+            "threshold_blue": self.threshold_blue,
             "inference_interval": self.inference_interval,
             "window_samples": self.window_samples,
             "stride": self.stride,
             "model_sample_rate": self.model_sample_rate,
+            "blue_red_model_loaded": bool(
+                self.has_blue_red_model
+                or last.get("blue_red_enabled", False)
+            ),
+            "blue_red_threshold": self.blue_red_threshold,
+            "blue_red_min_detection_score": self.blue_red_min_detection_score,
             "running": self._thread is not None and self._thread.is_alive(),
             "total_inferences": self._total_inferences,
             "yes_count": self._yes_count,
+            "red_count": self._red_count,
+            "blue_count": self._blue_count,
             "alert_history_count": self.alert_history.count,
             "current_state": last.get("state", "NO"),
             "yes_confidence": last.get("yes_confidence", 0.0),
+            "drone_color": last.get("drone_color", "UNKNOWN"),
+            "red_confidence": last.get("red_confidence"),
+            "blue_confidence": last.get("blue_confidence"),
             "timing": self._last_timing,
             "last_inference": self._last_inference,
             "real_model": self.is_real_model,
@@ -787,5 +913,8 @@ class DetectionEngine:
         last = self._last_inference or {}
         return {
             "yes": last.get("yes_confidence", 0.0),
+            "red": last.get("red_confidence"),
+            "blue": last.get("blue_confidence"),
+            "drone_color": last.get("drone_color", "UNKNOWN"),
             "state": last.get("state", "NO"),
         }

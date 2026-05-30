@@ -1,0 +1,35 @@
+name: field_hard_negative_finetune_v3_coverage
+noise_path: data/HF_dataset_v7_background
+drone_path: data/HF_dataset_v2_drone
+description: >-
+  Coverage-recovery finetune after v2 reduced field FP/TP but left attack
+  coverage low. This keeps mined field false-positive windows as a smaller
+  minority background source, uses shorter backbone freezing, and backs off the
+  most destructive noising so attack-run sensitivity is less suppressed. This
+  intentionally does not use 551 data.
+base_flags: >-
+  --clip-seconds 5.12 --patience 0 --epochs 14
+  --batch-size 24 --steps-per-epoch 250 --val-steps-per-epoch 120
+  --loss bce --label-smoothing 0.05 --augment
+  --lr 1.2e-5 --lr-schedule linear --warmup-epochs 1 --weight-decay 0.03
+  --freeze-backbone-epochs 4 --positive-probability 0.60
+  --hard-noise data/field_recordings_20260514/mined_hard_negatives/hf_dataset
+  --hard-noise-prob 0.10
+  --noise2 data/HF_dataset_v7_background --noise2-prob 0.55
+  --noise2-multi-prob 0.45 --noise2-count 3 --noise2-max-attenuation -35
+  --doppler-prob 0.30 --pitch-prob 0.30 --stretch-prob 0.30
+  --reverb-prob 0.30 --eq-prob 0.40 --noise-inject-prob 0.30
+  --noise-inject-db -38 --time-mask-prob 0.25 --lowpass-prob 0.25
+  --atmospheric-prob 0.30
+configs:
+  - name: "01_mn10_cov_hard10_freeze4_lr12e6"
+    flags: >-
+      --arch mn10_as
+      --finetune-from checkpoints/efficientat_20260528_232959/16_mn10_as/checkpoints/epoch=22-step=5750.ckpt
+    note: Coverage-recovery version of the best zero-attack-bg v2 candidate.
+
+  - name: "02_dymn10_cov_hard10_freeze4_lr12e6"
+    flags: >-
+      --arch dymn10_as
+      --finetune-from checkpoints/efficientat_20260528_232959/12_dymn10_as/checkpoints/epoch=14-step=3750.ckpt
+    note: Coverage-recovery version of the high-field-recall v2 candidate.

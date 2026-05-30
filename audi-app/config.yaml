@@ -50,12 +50,14 @@ detection:
   # Inference timing
   inference_interval: 0.320      # Seconds between inference runs
 
-  # Three output states:
-  #   YES  (confidence >= high)  → GPIO alarm + snapshot + history
-  #   BLUE (low <= conf < high)  → log + history only, no alarm
-  #   NO   (confidence < low)    → nothing
+  # Combined model output:
+  #   logit 0: drone detector
+  #   logit 1: blue drone
+  #   logit 2: red drone (positive class for color)
   confidence_threshold_high: 0.80    # Triggers alarm
-  confidence_threshold_low: 0.80     # Triggers "blue" log entry
+  confidence_threshold_low: 0.80     # Minimum raw drone score for color typing
+  blue_red_threshold: 0.50            # RED is positive; red >= threshold => RED else BLUE
+  blue_red_min_detection_score: 0.80  # Only type windows that look like drones
   hysteresis_window: 5               # Hysteresis window size
   hysteresis_ratio: 0.6              # Hysteresis ratio
   hysteresis_margin: 0.05            # Hysteresis margin

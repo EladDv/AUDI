@@ -35,6 +35,18 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--noise-path", type=Path, required=True)
     ap.add_argument("--drone-path", type=Path, required=True)
     ap.add_argument(
+        "--hard-noise",
+        type=Path,
+        default=None,
+        help="Hard-negative background dataset sampled as base noise",
+    )
+    ap.add_argument(
+        "--hard-noise-prob",
+        type=float,
+        default=0.0,
+        help="Probability of sampling base noise from --hard-noise",
+    )
+    ap.add_argument(
         "--noise2", type=Path, default=None, help="Secondary noise dataset"
     )
     ap.add_argument("--noise2-prob", type=float, default=0.25,
@@ -115,7 +127,10 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--use-dsp-branch",
         action="store_true",
-        help="Use DSP features as separate branch fused with backbone embedding (MNBranchDSPDetector)",
+        help=(
+            "Use DSP features as separate branch fused with backbone embedding "
+            "(MNBranchDSPDetector)"
+        ),
     )
     ap.add_argument(
         "--dsp-feature-sets",
@@ -156,6 +171,12 @@ def run(argv: list[str] | None = None) -> int:
         default="constant",
     )
     ap.add_argument("--warmup-epochs", type=int, default=0)
+    ap.add_argument(
+        "--freeze-backbone-epochs",
+        type=int,
+        default=0,
+        help="Freeze backbone params and BN stats for the first N epochs",
+    )
     # ── Training ──
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=32)
@@ -184,6 +205,15 @@ def run(argv: list[str] | None = None) -> int:
         default=0.2,
         help="Probability of Doppler shift on drone (0-1)",
     )
+    ap.add_argument("--pitch-prob", type=float, default=0.25)
+    ap.add_argument("--stretch-prob", type=float, default=0.25)
+    ap.add_argument("--reverb-prob", type=float, default=0.25)
+    ap.add_argument("--eq-prob", type=float, default=0.25)
+    ap.add_argument("--noise-inject-prob", type=float, default=0.25)
+    ap.add_argument("--noise-inject-db", type=float, default=-40.0)
+    ap.add_argument("--time-mask-prob", type=float, default=0.25)
+    ap.add_argument("--lowpass-prob", type=float, default=0.25)
+    ap.add_argument("--atmospheric-prob", type=float, default=0.25)
     # ── Finetuning ──
     ap.add_argument("--finetune-from", type=Path, default=None)
     ap.add_argument("--pretrained-checkpoint", type=Path, default=None)
@@ -209,15 +239,27 @@ def run(argv: list[str] | None = None) -> int:
         warmup_epochs=args.warmup_epochs,
         max_epochs=args.epochs,
     )
-    aug_cfg = (
-        AugmentationConfig(enable=True, doppler_prob=args.doppler_prob)
-        if args.augment
-        else None
-    )
+    aug_cfg = None
+    if args.augment:
+        aug_cfg = AugmentationConfig(
+            enable=True,
+            doppler_prob=args.doppler_prob,
+            pitch_prob=args.pitch_prob,
+            stretch_prob=args.stretch_prob,
+            reverb_prob=args.reverb_prob,
+            eq_prob=args.eq_prob,
+            noise_inject_prob=args.noise_inject_prob,
+            noise_inject_db=args.noise_inject_db,
+            time_mask_prob=args.time_mask_prob,
+            lowpass_prob=args.lowpass_prob,
+            atmospheric_prob=args.atmospheric_prob,
+        )
 
     mix_cfg = MixConfig(
         noise_path=args.noise_path,
         drone_path=args.drone_path,
+        hard_noise_path=args.hard_noise,
+        hard_noise_prob=args.hard_noise_prob,
         noise2_path=args.noise2,
         noise2_prob=args.noise2_prob,
         noise2_multi_noise_prob=args.noise2_multi_prob,
@@ -238,6 +280,8 @@ def run(argv: list[str] | None = None) -> int:
     val_mix_cfg = MixConfig(
         noise_path=args.noise_path,
         drone_path=args.drone_path,
+        hard_noise_path=args.hard_noise,
+        hard_noise_prob=args.hard_noise_prob,
         snr_bins=snr_bins,
         target_length_samples=clip_samples,
         positive_probability=0.5,
@@ -336,6 +380,7 @@ def run(argv: list[str] | None = None) -> int:
         dropout=args.dropout,
         bn_momentum=args.bn_momentum,
         clip_seconds=args.clip_seconds,
+        freeze_backbone_epochs=args.freeze_backbone_epochs,
     )
 
     if args.pretrained_checkpoint is not None:

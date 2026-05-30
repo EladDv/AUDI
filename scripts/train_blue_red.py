@@ -16,8 +16,9 @@ Model: AudioSet-pretrained EfficientAT MN backbone
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import random
-import sys
 from pathlib import Path
 
 import lightning as L
@@ -30,6 +31,7 @@ from datasets import load_from_disk
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, Dataset
 
+from audi.checkpoint import load_model_from_checkpoint
 from audi.cli_utils import NUM_WORKERS
 
 SR = 16000
@@ -43,11 +45,77 @@ def _rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
 
 
-def _fit_length(audio: np.ndarray, target: int) -> np.ndarray:
+def _binary_auc(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Compute binary ROC AUC with average ranks for tied scores."""
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int64)
+    n_pos = int(labels.sum())
+    n_neg = int(labels.size - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+
+    order = np.argsort(scores, kind="mergesort")
+    sorted_scores = scores[order]
+    ranks = np.empty(labels.size, dtype=np.float64)
+    start = 0
+    while start < labels.size:
+        end = start + 1
+        while end < labels.size and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        avg_rank = 0.5 * (start + 1 + end)
+        ranks[order[start:end]] = avg_rank
+        start = end
+
+    pos_rank_sum = ranks[labels == 1].sum()
+    return float((pos_rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def _binary_rates(scores: np.ndarray, labels: np.ndarray, threshold: float) -> dict[str, float]:
+    """Return red-positive rates at a probability threshold."""
+    pred = scores >= threshold
+    pos = labels == 1
+    neg = ~pos
+    tp = int(np.logical_and(pred, pos).sum())
+    fp = int(np.logical_and(pred, neg).sum())
+    fn = int(np.logical_and(~pred, pos).sum())
+    tn = int(np.logical_and(~pred, neg).sum())
+    tpr = tp / max(tp + fn, 1)
+    fnr = fn / max(tp + fn, 1)
+    fpr = fp / max(fp + tn, 1)
+    precision = tp / max(tp + fp, 1)
+    return {
+        "threshold": float(threshold),
+        "tpr": float(tpr),
+        "fnr": float(fnr),
+        "fpr": float(fpr),
+        "precision": float(precision),
+    }
+
+
+def _rates_at_max_fnr(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    max_fnr: float,
+) -> dict[str, float]:
+    """Pick the strictest threshold whose red FNR stays below target."""
+    thresholds = np.unique(np.concatenate(([0.0, 1.0], scores)))
+    best: dict[str, float] | None = None
+    for threshold in thresholds:
+        rates = _binary_rates(scores, labels, float(threshold))
+        if rates["fnr"] <= max_fnr:
+            if best is None or rates["threshold"] > best["threshold"]:
+                best = rates
+    if best is None:
+        return _binary_rates(scores, labels, 0.0)
+    return best
+
+
+def _fit_length(audio: np.ndarray, target: int, *, random_crop: bool = True) -> np.ndarray:
     """Fit audio to exactly `target` samples by looping or trimming."""
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
     if len(audio) >= target:
-        return audio[:target]
+        start = random.randint(0, len(audio) - target) if random_crop else 0
+        return audio[start:start + target]
     reps = int(np.ceil(target / len(audio)))
     return np.tile(audio, reps)[:target].astype(np.float32)
 
@@ -74,6 +142,10 @@ class BlueRedMixedDataset(Dataset):
         snr_min: float = -20.0,
         snr_max: float = 10.0,
         positive_probability: float = 0.5,
+        clip_seconds: float = CLIP_S,
+        noise2_prob: float = 0.0,
+        noise2_count: int = 3,
+        noise2_max_attenuation: float = -38.0,
         length: int | None = None,
     ):
         bg_dd = load_from_disk(str(bg_path))
@@ -83,6 +155,10 @@ class BlueRedMixedDataset(Dataset):
         self.snr_min = snr_min
         self.snr_max = snr_max
         self.positive_probability = positive_probability
+        self.clip_samples = int(round(SR * clip_seconds))
+        self.noise2_prob = float(noise2_prob)
+        self.noise2_count = max(0, int(noise2_count))
+        self.noise2_max_attenuation = float(noise2_max_attenuation)
         self.length = length or max(len(self.bg_ds), len(self.drone_ds))
 
         # Pre-index blue/red samples for faster sampling
@@ -92,16 +168,38 @@ class BlueRedMixedDataset(Dataset):
     def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        L = CLIP_SAMPLES
-
-        # ── Load background ──
+    def _background(self) -> np.ndarray:
         bg_idx = random.randint(0, len(self.bg_ds) - 1)
         bg = np.asarray(self.bg_ds[bg_idx]["audio"]["array"], dtype=np.float32)
-        bg = _fit_length(bg, L)
+        bg = _fit_length(bg, self.clip_samples)
         bg_rms = _rms(bg)
         if bg_rms > 1e-8:
             bg = bg / bg_rms
+
+        if self.noise2_prob <= 0 or self.noise2_count <= 0:
+            return bg
+        if random.random() >= self.noise2_prob:
+            return bg
+
+        for _ in range(random.randint(1, self.noise2_count)):
+            extra_idx = random.randint(0, len(self.bg_ds) - 1)
+            extra = np.asarray(
+                self.bg_ds[extra_idx]["audio"]["array"], dtype=np.float32
+            )
+            extra = _fit_length(extra, self.clip_samples)
+            extra_rms = _rms(extra)
+            if extra_rms > 1e-8:
+                extra = extra / extra_rms
+            att_db = random.uniform(self.noise2_max_attenuation, 0.0)
+            bg = bg + extra * (10.0 ** (att_db / 20.0))
+
+        bg_rms = _rms(bg)
+        if bg_rms > 1e-8:
+            bg = bg / bg_rms
+        return bg
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        bg = self._background()
 
         is_drone = random.random() < self.positive_probability
 
@@ -122,7 +220,7 @@ class BlueRedMixedDataset(Dataset):
 
         drone_idx = random.choice(pool)
         drone = np.asarray(self.drone_ds[drone_idx]["audio"]["array"], dtype=np.float32)
-        drone = _fit_length(drone, L)
+        drone = _fit_length(drone, self.clip_samples)
         drone_rms = _rms(drone)
         if drone_rms > 1e-8:
             drone = drone / drone_rms
@@ -162,44 +260,64 @@ class BlueRedDetector(L.LightningModule):
         n_fft: int = 1024,
         hop_length: int = 160,
         cls_loss_weight: float = 1.0,
+        det_loss_weight: float = 1.0,
         mixup_alpha: float = 0.0,
         freeze_backbone_epochs: int = 2,
+        detector_checkpoint: Path | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.lr = lr
         self.cls_loss_weight = cls_loss_weight
+        self.det_loss_weight = det_loss_weight
         self.mixup_alpha = mixup_alpha
         self.freeze_backbone_epochs = freeze_backbone_epochs
+        self._uses_detector_checkpoint = detector_checkpoint is not None
 
         # ── Frontend ──
-        self.mel_transform = T.MelSpectrogram(
-            sample_rate=SR, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels,
-        )
-        self.to_db = T.AmplitudeToDB()
+        if detector_checkpoint is None:
+            self.mel_transform = T.MelSpectrogram(
+                sample_rate=SR, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels,
+            )
+            self.to_db = T.AmplitudeToDB()
+        else:
+            self.mel_transform = None
+            self.to_db = None
 
         # ── Backbone + heads ──
-        self._build_model(model_arch, dropout=dropout)
-
-    def _build_model(self, model_arch: str, dropout: float):
-        from models.mn.model import get_model
-
-        width_map = {"mn04_as": 0.4, "mn05_as": 0.5, "mn10_as": 1.0}
-        width = width_map.get(model_arch, 1.0)
-
-        full_model = get_model(
-            num_classes=527,
-            pretrained_name=model_arch,
-            width_mult=width,
-            head_type="mlp",
-            input_dim_f=128,
-            input_dim_t=1000,
+        self._build_model(
+            model_arch,
+            dropout=dropout,
+            detector_checkpoint=detector_checkpoint,
         )
-        feature_dim = full_model.classifier[2].in_features  # 480 for mn05, 960 for mn10
+        self._val_red_scores: list[torch.Tensor] = []
+        self._val_red_labels: list[torch.Tensor] = []
+        if self._uses_detector_checkpoint and self.freeze_backbone_epochs > 0:
+            self._set_backbone_frozen(True)
 
-        self.backbone = full_model.features
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.flatten = nn.Flatten(1)
+    def _build_model(
+        self,
+        model_arch: str,
+        dropout: float,
+        detector_checkpoint: Path | None,
+    ):
+        if detector_checkpoint is not None:
+            detector = load_model_from_checkpoint(detector_checkpoint, quiet=True)
+            detector.eval()
+            self.detector = detector
+            source_arch = self.detector.hparams["model"].arch
+            if source_arch != model_arch:
+                print(
+                    f"Warning: --model-arch={model_arch} but checkpoint is {source_arch}; "
+                    "using checkpoint backbone."
+                )
+            feature_dim = self.detector.backbone.classifier[1].in_features
+            self.backbone = self.detector.backbone
+            self.pool = None
+            self.flatten = None
+        else:
+            self.detector = None
+            feature_dim = self._build_audioset_model(model_arch)
 
         # Shared embedding
         self.shared_fc = nn.Sequential(
@@ -208,37 +326,90 @@ class BlueRedDetector(L.LightningModule):
             nn.Dropout(dropout),
         )
 
-        # Detection head: binary (drone vs no-drone)
-        self.det_head = nn.Linear(640, 1)
+        # Detection head: binary (drone vs no-drone). In detector-checkpoint
+        # mode we use the detector's already-trained binary head.
+        self.det_head = None if detector_checkpoint is not None else nn.Linear(640, 1)
 
         # Classification head: 2-class (blue vs red)
         self.cls_head = nn.Linear(640, 2)
 
+    def _build_audioset_model(self, model_arch: str) -> int:
+        from models.mn.model import get_model
+
+        width_map = {"mn04_as": 0.4, "mn05_as": 0.5, "mn10_as": 1.0}
+        width = width_map.get(model_arch, 1.0)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            full_model = get_model(
+                num_classes=527,
+                pretrained_name=model_arch,
+                width_mult=width,
+                head_type="mlp",
+                input_dim_f=128,
+                input_dim_t=1000,
+            )
+        feature_dim = full_model.classifier[2].in_features  # 480 for mn05, 960 for mn10
+
+        self.backbone = full_model.features
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.flatten = nn.Flatten(1)
+        return feature_dim
+
+    def _set_backbone_frozen(self, frozen: bool) -> None:
+        module = self.detector if self._uses_detector_checkpoint else self.backbone
+        if module is None:
+            return
+        for p in module.parameters():
+            p.requires_grad = not frozen
+        if frozen:
+            module.eval()
+        else:
+            module.train(self.training)
+
     def _to_spec(self, wav: torch.Tensor) -> torch.Tensor:
+        if self.detector is not None:
+            return self.detector._to_mel(wav)
         mel = self.to_db(self.mel_transform(wav))
         mean = mel.mean(dim=(1, 2), keepdim=True)
         std = mel.std(dim=(1, 2), keepdim=True) + 1e-8
         mel = (mel - mean) / std
         return mel.unsqueeze(1)  # (B, 1, 128, T)
 
-    def forward(self, wav: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return (det_logits[B, 1], cls_logits[B, 2])."""
-        spec = self._to_spec(wav)
+    def _extract_features(self, spec: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.detector is not None:
+            if self.freeze_backbone_epochs > 0 and self.current_epoch < self.freeze_backbone_epochs:
+                self.detector.eval()
+            detector_logits = self.detector.backbone(spec).squeeze(1)
+            _, features = self.detector.backbone.backbone(spec[:, :1])
+            return features, detector_logits
+
         feats = self.backbone(spec)
         pooled = self.pool(feats)
         flat = self.flatten(pooled)
-        emb = self.shared_fc(flat)
-        return self.det_head(emb), self.cls_head(emb)
+        return flat, None
+
+    def forward(self, wav: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (det_logits[B, 1], cls_logits[B, 2])."""
+        spec = self._to_spec(wav)
+        features, detector_logits = self._extract_features(spec)
+        emb = self.shared_fc(features)
+        cls_logits = self.cls_head(emb)
+        if detector_logits is not None:
+            return detector_logits.unsqueeze(-1), cls_logits
+        return self.det_head(emb), cls_logits
 
     def training_step(self, batch, batch_idx):
         wav, det_label, cls_label = batch
 
         det_logits, cls_logits = self(wav)
 
-        # Detection loss (always)
-        det_loss = F.binary_cross_entropy_with_logits(
-            det_logits.squeeze(-1), det_label
-        )
+        # Detection loss is optional for frozen detector-head training.
+        if self.det_loss_weight > 0:
+            det_loss = F.binary_cross_entropy_with_logits(
+                det_logits.squeeze(-1), det_label
+            )
+        else:
+            det_loss = torch.tensor(0.0, device=wav.device)
 
         # Classification loss (only on positives)
         pos_mask = det_label > 0.5
@@ -249,7 +420,7 @@ class BlueRedDetector(L.LightningModule):
         else:
             cls_loss = torch.tensor(0.0, device=wav.device)
 
-        loss = det_loss + self.cls_loss_weight * cls_loss
+        loss = self.det_loss_weight * det_loss + self.cls_loss_weight * cls_loss
 
         # Metrics
         det_acc = ((det_logits.squeeze(-1) > 0) == det_label.bool()).float().mean()
@@ -270,16 +441,19 @@ class BlueRedDetector(L.LightningModule):
 
         det_logits, cls_logits = self(wav)
 
-        det_loss = F.binary_cross_entropy_with_logits(
-            det_logits.squeeze(-1), det_label
-        )
+        if self.det_loss_weight > 0:
+            det_loss = F.binary_cross_entropy_with_logits(
+                det_logits.squeeze(-1), det_label
+            )
+        else:
+            det_loss = torch.tensor(0.0, device=wav.device)
 
         pos_mask = det_label > 0.5
         cls_loss = torch.tensor(0.0, device=wav.device)
         if pos_mask.any():
             cls_loss = F.cross_entropy(cls_logits[pos_mask], cls_label[pos_mask])
 
-        loss = det_loss + self.cls_loss_weight * cls_loss
+        loss = self.det_loss_weight * det_loss + self.cls_loss_weight * cls_loss
 
         det_acc = ((det_logits.squeeze(-1) > 0) == det_label.bool()).float().mean()
         self.log_dict({
@@ -291,17 +465,59 @@ class BlueRedDetector(L.LightningModule):
         if pos_mask.any():
             cls_acc = (cls_logits[pos_mask].argmax(-1) == cls_label[pos_mask]).float().mean()
             self.log("val_cls_acc", cls_acc, prog_bar=True)
+            red_scores = cls_logits[pos_mask].softmax(dim=-1)[:, 1]
+            red_labels = (cls_label[pos_mask] == 1).long()
+            self._val_red_scores.append(red_scores.detach().cpu())
+            self._val_red_labels.append(red_labels.detach().cpu())
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-4)
 
+    def on_validation_epoch_start(self):
+        self._val_red_scores.clear()
+        self._val_red_labels.clear()
+
+    def on_validation_epoch_end(self):
+        if not self._val_red_scores:
+            return
+
+        scores = torch.cat(self._val_red_scores).numpy()
+        labels = torch.cat(self._val_red_labels).numpy()
+        if labels.size == 0:
+            return
+
+        default = _binary_rates(scores, labels, 0.5)
+        metrics = {
+            "val_red_auc": _binary_auc(scores, labels),
+            "val_red_tpr": default["tpr"],
+            "val_red_fnr": default["fnr"],
+            "val_red_fpr": default["fpr"],
+            "val_red_precision": default["precision"],
+        }
+        for target_fnr in (0.05, 0.10, 0.20):
+            rates = _rates_at_max_fnr(scores, labels, target_fnr)
+            suffix = f"{int(target_fnr * 100):02d}"
+            metrics[f"val_red_tpr_at_fnr_{suffix}"] = rates["tpr"]
+            metrics[f"val_red_fpr_at_fnr_{suffix}"] = rates["fpr"]
+            metrics[f"val_red_threshold_at_fnr_{suffix}"] = rates["threshold"]
+
+        self.log_dict(metrics, prog_bar=False)
+        print(
+            "red-val "
+            f"auc={metrics['val_red_auc']:.3f} "
+            f"tpr={metrics['val_red_tpr']:.3f} "
+            f"fnr={metrics['val_red_fnr']:.3f} "
+            f"fpr={metrics['val_red_fpr']:.3f} "
+            f"tpr@fnr10={metrics['val_red_tpr_at_fnr_10']:.3f} "
+            f"fpr@fnr10={metrics['val_red_fpr_at_fnr_10']:.3f} "
+            f"thr@fnr10={metrics['val_red_threshold_at_fnr_10']:.3f}"
+        )
+
     def on_train_epoch_start(self):
         if self.freeze_backbone_epochs > 0 and self.current_epoch < self.freeze_backbone_epochs:
-            for p in self.backbone.parameters():
-                p.requires_grad = False
+            self._set_backbone_frozen(True)
         elif self.freeze_backbone_epochs > 0 and self.current_epoch == self.freeze_backbone_epochs:
-            for p in self.backbone.parameters():
-                p.requires_grad = True
+            self._set_backbone_frozen(False)
             print(f"\n[Epoch {self.current_epoch}] Unfroze backbone")
 
 
@@ -314,25 +530,40 @@ def main() -> int:
         description="Train multi-task blue/red detector+classifier with noise mixing"
     )
     ap.add_argument("--bg-path", type=Path,
-                    default=Path("data/HF_dataset_v6_background"))
+                    default=Path("data/HF_dataset_v7_background"))
     ap.add_argument("--drone-path", type=Path,
                     default=Path("data/hf_blue_red"))
     ap.add_argument("--model-arch", default="mn10_as",
-                    choices=["mn04_as", "mn05_as", "mn10_as"])
+                    choices=["mn04_as", "mn05_as", "mn10_as", "dymn10_as"])
+    ap.add_argument("--detector-checkpoint", type=Path, default=None,
+                    help="Trained detector checkpoint to use as frozen feature source")
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--dropout", type=float, default=0.2)
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--batch-size", type=int, default=64)
+    ap.add_argument("--clip-seconds", type=float, default=CLIP_S)
     ap.add_argument("--snr-min", type=float, default=-20.0)
     ap.add_argument("--snr-max", type=float, default=10.0)
     ap.add_argument("--positive-prob", type=float, default=0.5)
+    ap.add_argument("--noise2-prob", type=float, default=0.0,
+                    help="Probability of layering extra background clips")
+    ap.add_argument("--noise2-count", type=int, default=3,
+                    help="Maximum extra background layers")
+    ap.add_argument("--noise2-max-attenuation", type=float, default=-38.0,
+                    help="Lowest attenuation in dB for extra background layers")
     ap.add_argument("--cls-loss-weight", type=float, default=0.5,
                     help="Weight for classification loss relative to detection loss")
+    ap.add_argument("--det-loss-weight", type=float, default=1.0,
+                    help="Set to 0 to train only the blue/red head")
     ap.add_argument("--freeze-backbone-epochs", type=int, default=2)
     ap.add_argument("--dataset-length", type=int, default=2000,
                     help="Virtual dataset size per epoch")
+    ap.add_argument("--val-length", type=int, default=None,
+                    help="Virtual validation size; defaults to max(200, dataset_length / 5)")
     ap.add_argument("--output-dir", type=Path, default=Path("checkpoints/blue_red_detect"))
     ap.add_argument("--save-top-k", type=int, default=1)
+    ap.add_argument("--monitor", default="val_cls_acc",
+                    help="Metric for ModelCheckpoint, e.g. val_cls_acc or val_det_acc")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -346,6 +577,10 @@ def main() -> int:
         snr_min=args.snr_min,
         snr_max=args.snr_max,
         positive_probability=args.positive_prob,
+        clip_seconds=args.clip_seconds,
+        noise2_prob=args.noise2_prob,
+        noise2_count=args.noise2_count,
+        noise2_max_attenuation=args.noise2_max_attenuation,
         length=args.dataset_length,
     )
     val_ds = BlueRedMixedDataset(
@@ -355,7 +590,11 @@ def main() -> int:
         snr_min=args.snr_min,
         snr_max=args.snr_max,
         positive_probability=args.positive_prob,
-        length=max(200, args.dataset_length // 5),
+        clip_seconds=args.clip_seconds,
+        noise2_prob=args.noise2_prob,
+        noise2_count=args.noise2_count,
+        noise2_max_attenuation=args.noise2_max_attenuation,
+        length=args.val_length or max(200, args.dataset_length // 5),
     )
 
     train_dl = DataLoader(
@@ -371,7 +610,13 @@ def main() -> int:
     red_count = len(train_ds._red_indices)
     print(f"Blue drones: {blue_count}, Red drones: {red_count}")
     print(f"Background: {len(train_ds.bg_ds)} train clips")
+    print(f"Clip length: {args.clip_seconds:.2f}s")
     print(f"SNR range: [{args.snr_min}, {args.snr_max}] dB")
+    print(f"Positive probability: {args.positive_prob:.2f}")
+    print(
+        f"Extra noise: p={args.noise2_prob:.2f}, count={args.noise2_count}, "
+        f"attenuation=[{args.noise2_max_attenuation}, 0.0] dB"
+    )
     print(f"Virtual dataset size: {args.dataset_length}")
 
     # ── Model ──
@@ -380,7 +625,9 @@ def main() -> int:
         lr=args.lr,
         dropout=args.dropout,
         cls_loss_weight=args.cls_loss_weight,
+        det_loss_weight=args.det_loss_weight,
         freeze_backbone_epochs=args.freeze_backbone_epochs,
+        detector_checkpoint=args.detector_checkpoint,
     )
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
@@ -394,8 +641,11 @@ def main() -> int:
         default_root_dir=str(args.output_dir),
         callbacks=[
             ModelCheckpoint(
-                monitor="val_det_acc", mode="max", save_top_k=args.save_top_k,
-                filename="{epoch:02d}-det{val_det_acc:.3f}-cls{val_cls_acc:.3f}",
+                monitor=args.monitor, mode="max", save_top_k=args.save_top_k,
+                filename=(
+                    "{epoch:02d}-cls{val_cls_acc:.3f}-redauc{val_red_auc:.3f}"
+                    "-redfnr{val_red_fnr:.3f}"
+                ),
             ),
         ],
     )

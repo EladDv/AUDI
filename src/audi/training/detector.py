@@ -13,6 +13,20 @@ import torchaudio.transforms as T
 
 from audi.config import MelConfig, ModelConfig, OptimizerConfig
 from audi.model import build_model
+from audi.training.validation import (
+    compute_calibration,
+    compute_pr_curve,
+    compute_precision,
+    compute_roc_values,
+    find_threshold_at_precision,
+    split_by_bin,
+    tpr_at_fpr,
+)
+from audi.training.validation_plots import (
+    render_det_pr_calibration,
+    render_spectrogram_samples,
+    render_validation_grid,
+)
 
 
 class PCEN(torch.nn.Module):
@@ -67,20 +81,6 @@ class PCEN(torch.nn.Module):
         denom = (self.eps + M_smooth) ** self.alpha
         gain = mel_power / torch.clamp(denom, min=self.eps)
         return (gain + self.delta) ** self.r - self.delta ** self.r
-from audi.training.validation import (
-    compute_calibration,
-    compute_pr_curve,
-    compute_precision,
-    compute_roc_values,
-    find_threshold_at_precision,
-    split_by_bin,
-    tpr_at_fpr,
-)
-from audi.training.validation_plots import (
-    render_det_pr_calibration,
-    render_spectrogram_samples,
-    render_validation_grid,
-)
 
 
 class DroneDetector(L.LightningModule):
@@ -104,6 +104,8 @@ class DroneDetector(L.LightningModule):
         dropout: Dropout probability before classifier head.
         bn_momentum: BatchNorm momentum (higher = less drift).
         clip_seconds: Training clip length in seconds (for eval to match).
+        freeze_backbone_epochs: Keep backbone weights and batchnorm statistics
+            frozen for this many initial epochs.
     """
 
     def __init__(
@@ -122,6 +124,7 @@ class DroneDetector(L.LightningModule):
         dropout: float = 0.0,
         bn_momentum: float = 0.1,
         clip_seconds: float = 2.56,
+        freeze_backbone_epochs: int = 0,
     ) -> None:
         super().__init__()
 
@@ -222,6 +225,7 @@ class DroneDetector(L.LightningModule):
         self._loss_type = loss_type
         self._label_smoothing = float(label_smoothing)
         self._clip_seconds = float(clip_seconds)
+        self._freeze_backbone_epochs = max(0, int(freeze_backbone_epochs))
         self._per_bin_weights = bool(per_bin_weights)
         self._mixup_alpha = float(mixup_alpha)
         self._cutmix_alpha = float(cutmix_alpha)
@@ -252,6 +256,41 @@ class DroneDetector(L.LightningModule):
         self._val_noise: list[torch.Tensor] = []
         self._val_snr: list[torch.Tensor] = []
         self._val_mix: list[torch.Tensor] = []
+
+    def _set_backbone_frozen(self, frozen: bool) -> None:
+        """Freeze feature extractor params while leaving classifier trainable."""
+        model = getattr(self.backbone, "_orig_mod", self.backbone)
+        for p in model.parameters():
+            p.requires_grad = not frozen
+        if frozen:
+            trainable_head_found = False
+            for attr in ("classifier", "fc", "head", "heads"):
+                head = getattr(model, attr, None)
+                if isinstance(head, torch.nn.Module):
+                    head.train()
+                    for p in head.parameters():
+                        p.requires_grad = True
+                    trainable_head_found = True
+            if not trainable_head_found:
+                last_linear: torch.nn.Linear | None = None
+                for module in model.modules():
+                    if isinstance(module, torch.nn.Linear):
+                        last_linear = module
+                if last_linear is not None:
+                    last_linear.train()
+                    for p in last_linear.parameters():
+                        p.requires_grad = True
+
+            feature_extractor = getattr(model, "backbone", model)
+            feature_extractor.eval()
+        else:
+            model.train(self.training)
+
+    def on_train_epoch_start(self) -> None:
+        """Apply scheduled backbone freezing at epoch boundaries."""
+        if self._freeze_backbone_epochs <= 0:
+            return
+        self._set_backbone_frozen(self.current_epoch < self._freeze_backbone_epochs)
 
     # ── Featurization ────────────────────────────────────────────
 
@@ -382,6 +421,11 @@ class DroneDetector(L.LightningModule):
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """Training step with optional MixUp/CutMix."""
+        if (
+            self._freeze_backbone_epochs > 0
+            and self.current_epoch < self._freeze_backbone_epochs
+        ):
+            self._set_backbone_frozen(True)
         if len(batch) == 3:
             wav, label, bin_idx = batch
         else:
