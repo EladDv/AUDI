@@ -126,33 +126,76 @@ def run() -> None:
         chunks.append(audio[total - chunk_samples : total].copy())
         return chunks
 
+    _CHUNK_SIZE = 1000  # records per in-memory shard (~2 GB peak)
+
     def _build_dataset(files, label: str, output_path: Path):
+        import shutil
+
         features = Features(
             {
                 "audio": Audio(sampling_rate=args.target_sr),
                 "label": Value("string"),
             }
         )
+        tmp_dir = output_path.parent / f"_tmp_{output_path.name}"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True)
+
+        chunk_dirs = []
         records = []
+        chunk_idx = 0
+        total = 0
         for fp in files:
             audio = _load_audio(fp)
             if audio is None:
                 continue
-            for chunk in _chunk_audio(audio):
+            for c in _chunk_audio(audio):
                 records.append(
                     {
                         "audio": {
-                            "array": chunk,
+                            "array": c,
                             "sampling_rate": args.target_sr,
                         },
                         "label": label,
                     }
                 )
-        if not records:
+                if len(records) >= _CHUNK_SIZE:
+                    chunk = Dataset.from_list(records, features=features)
+                    cd = tmp_dir / f"chunk_{chunk_idx:06d}"
+                    chunk.save_to_disk(str(cd))
+                    chunk_dirs.append(cd)
+                    total += len(records)
+                    print(f"  {label}: chunk {chunk_idx} ({len(records)} records) → {cd}")
+                    records = []
+                    chunk_idx += 1
+
+        # Flush remaining
+        if records:
+            chunk = Dataset.from_list(records, features=features)
+            cd = tmp_dir / f"chunk_{chunk_idx:06d}"
+            chunk.save_to_disk(str(cd))
+            chunk_dirs.append(cd)
+            total += len(records)
+            print(f"  {label}: chunk {chunk_idx} ({len(records)} records) → {cd}")
+            records = []
+
+        if not chunk_dirs:
             print(f"  WARNING: No records — skipping {output_path}")
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             return
-        print(f"  {label}: {len(records)} records")
-        ds = Dataset.from_list(records, features=features)
+
+        print(f"  {label}: {total} records across {len(chunk_dirs)} chunks")
+
+        # Combine chunks
+        from datasets import concatenate_datasets as _concat
+
+        print(f"  Combining {len(chunk_dirs)} chunks ...")
+        ds = _concat([Dataset.load_from_disk(str(cd)) for cd in chunk_dirs])
+        for cd in chunk_dirs:
+            shutil.rmtree(cd, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
         dd = _split_dataset(
             ds,
             val_ratio=args.val_ratio,
@@ -162,6 +205,8 @@ def run() -> None:
         if dd is None:
             print(f"  ERROR: Empty dataset for {output_path}")
             return
+        if output_path.exists():
+            shutil.rmtree(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
         dd.save_to_disk(str(output_path))
         for split_name, split_ds in dd.items():
@@ -182,7 +227,24 @@ def run() -> None:
             args.output_path.with_name(args.output_path.name + "_drone"),
         )
     else:
+        # Incremental chunked build — same approach as _build_dataset
+        import shutil
+
+        fs = Features(
+            {
+                "audio": Audio(sampling_rate=args.target_sr),
+                "label": Value("string"),
+            }
+        )
+        tmp_dir = args.output_path.parent / f"_tmp_{args.output_path.name}"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True)
+
+        chunk_dirs = []
         records = []
+        chunk_idx = 0
+        total = 0
         for fp in audio_files:
             audio = _load_audio(fp)
             if audio is None:
@@ -193,24 +255,49 @@ def run() -> None:
                 if relative.parent != Path(".")
                 else args.label
             )
-            for chunk in _chunk_audio(audio):
+            for c in _chunk_audio(audio):
                 records.append(
                     {
                         "audio": {
-                            "array": chunk,
+                            "array": c,
                             "sampling_rate": args.target_sr,
                         },
                         "label": category,
                     }
                 )
-        print(f"Loaded {len(records)} records")
-        fs = Features(
-            {
-                "audio": Audio(sampling_rate=args.target_sr),
-                "label": Value("string"),
-            }
-        )
-        ds = Dataset.from_list(records, features=fs)
+                if len(records) >= _CHUNK_SIZE:
+                    chunk = Dataset.from_list(records, features=fs)
+                    cd = tmp_dir / f"chunk_{chunk_idx:06d}"
+                    chunk.save_to_disk(str(cd))
+                    chunk_dirs.append(cd)
+                    total += len(records)
+                    print(f"  chunk {chunk_idx} ({len(records)} records) → {cd}")
+                    records = []
+                    chunk_idx += 1
+
+        if records:
+            chunk = Dataset.from_list(records, features=fs)
+            cd = tmp_dir / f"chunk_{chunk_idx:06d}"
+            chunk.save_to_disk(str(cd))
+            chunk_dirs.append(cd)
+            total += len(records)
+            print(f"  chunk {chunk_idx} ({len(records)} records) → {cd}")
+            records = []
+
+        if not chunk_dirs:
+            print("ERROR: Empty dataset")
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            sys.exit(1)
+
+        print(f"Loaded {total} records across {len(chunk_dirs)} chunks")
+        print(f"Combining {len(chunk_dirs)} chunks ...")
+        from datasets import concatenate_datasets as _concat
+
+        ds = _concat([Dataset.load_from_disk(str(cd)) for cd in chunk_dirs])
+        for cd in chunk_dirs:
+            shutil.rmtree(cd, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
         dd = _split_dataset(
             ds,
             val_ratio=args.val_ratio,
@@ -220,6 +307,8 @@ def run() -> None:
         if dd is None:
             print("ERROR: Empty dataset")
             sys.exit(1)
+        if args.output_path.exists():
+            shutil.rmtree(args.output_path)
         args.output_path.mkdir(parents=True, exist_ok=True)
         dd.save_to_disk(str(args.output_path))
         for split_name, split_ds in dd.items():

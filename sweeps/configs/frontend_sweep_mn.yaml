@@ -1,0 +1,60 @@
+# CQT/CWT frontend sweep — test alternative time-frequency representations
+name: frontend_sweep
+noise_path: data/HF_dataset_v6_background
+drone_path: data/HF_dataset_v2_drone
+description: >
+  Test CQT and CWT frontends (alone and combined with mel) on mn05_as.
+  Compares against mel-only baseline.
+base_flags: >-
+  --arch mn05_as --clip-seconds 5.12 --patience 0
+  --noise2 data/hf_dataset_sharded_expanded_merged --batch-size 24
+  --loss bce --label-smoothing 0.1 --augment --lr 1e-4
+  --lr-schedule linear --warmup-epochs 8 --weight-decay 0.03 
+  --epochs 25
+configs:
+
+  # Baseline: mel only
+  - name: "01_mel_baseline"
+    flags: ""
+    note: mel-only baseline (96 mels, 1024 FFT).
+
+  # CQT only
+  - name: "02_cqt_only"
+    flags: --frontend-type cqt --cqt-bins 84
+    note: CQT frontend only. 84 log-spaced bins.
+
+  - name: "03_cqt_hires"
+    flags: --frontend-type cqt --cqt-bins 120 --cqt-bpo 24
+    note: Higher-res CQT 120 bins and 24 bins per octave.
+
+  # CWT only
+  - name: "04_cwt_only"
+    flags: --frontend-type cwt --cwt-scales 64
+    note: CWT frontend only. 64 Morlet wavelet scales.
+
+  - name: "05_cwt_hires"
+    flags: --frontend-type cwt --cwt-scales 128
+    note: Higher-res CWT with 128 scales.
+
+  # Mel + CQT
+  - name: "06_mel_cqt"
+    flags: --frontend-type mel,cqt --cqt-bins 84
+    note: Mel (96) + CQT (84) = 180 channels.
+
+  - name: "07_mel_cqt_hires"
+    flags: --frontend-type mel,cqt --cqt-bins 120 --cqt-bpo 24
+    note: Mel + high-res CQT = 216 channels.
+
+  # Mel + CWT
+  - name: "08_mel_cwt"
+    flags: --frontend-type mel,cwt --cwt-scales 64
+    note: Mel (96) + CWT (64) = 160 channels.
+
+  - name: "09_mel_cwt_hires"
+    flags: --frontend-type mel,cwt --cwt-scales 128
+    note: Mel + high-res CWT = 224 channels.
+
+  # Mel + CQT + CWT
+  - name: "10_mel_cqt_cwt"
+    flags: --frontend-type mel,cqt,cwt --cqt-bins 84 --cwt-scales 64
+    note: All three frontends - mel 96 plus CQT 84 plus CWT 64 = 244 channels.
