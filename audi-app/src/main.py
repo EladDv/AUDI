@@ -28,6 +28,41 @@ sys.path.insert(0, str(HERE))
 # ---------------------------------------------------------------------------
 
 
+def _load_threshold_profiles(cfg: dict, config_file: Path) -> dict:
+    """Load external threshold profiles referenced by the app config."""
+    import yaml
+
+    det_cfg = cfg.get("detection", {})
+    profiles_file = det_cfg.get("threshold_profiles_file")
+    if not profiles_file:
+        return cfg
+
+    profiles_path = Path(profiles_file)
+    if not profiles_path.is_absolute():
+        profiles_path = config_file.parent / profiles_path
+    if not profiles_path.exists():
+        logging.getLogger("audio_guard").warning(
+            "Threshold profiles file not found: %s", profiles_path
+        )
+        return cfg
+
+    with open(profiles_path) as f:
+        profiles_cfg = yaml.safe_load(f) or {}
+    profiles = profiles_cfg.get("threshold_profiles", profiles_cfg)
+    if not isinstance(profiles, dict):
+        logging.getLogger("audio_guard").warning(
+            "Threshold profiles file has no usable profiles: %s",
+            profiles_path,
+        )
+        return cfg
+
+    det_cfg["threshold_profiles"] = profiles
+    logging.getLogger("audio_guard").info(
+        "Threshold profiles loaded from %s", profiles_path
+    )
+    return cfg
+
+
 def load_config(config_path: str = None) -> dict:
     """Load YAML config. Falls back to defaults if file missing."""
     import yaml
@@ -48,7 +83,7 @@ def load_config(config_path: str = None) -> dict:
             with open(p) as f:
                 cfg = yaml.safe_load(f) or {}
             logging.getLogger("audio_guard").info("Config loaded from %s", p)
-            return cfg
+            return _load_threshold_profiles(cfg, p)
 
     # Defaults
     logging.getLogger("audio_guard").warning(
@@ -85,10 +120,22 @@ def load_config(config_path: str = None) -> dict:
             "window_samples": 40960,
             "stride": 0.125,
             "num_threads": 2,
+            "active_threshold_profile": None,
+            "threshold_profiles_file": "/etc/audio-guard/threshold_profiles.yaml",
             "confidence_threshold_high": 0.70,
             "confidence_threshold_low": 0.40,
             "blue_red_threshold": 0.50,
             "blue_red_min_detection_score": 0.70,
+            "red_alert_threshold": 0.50,
+            "blue_alert_threshold": 0.50,
+            "blue_to_red_threshold": 0.45,
+            "red_to_blue_threshold": 0.35,
+            "color_hysteresis_window": 5,
+            "color_hysteresis_ratio": 0.6,
+            "alert_on_red": True,
+            "alert_on_blue": True,
+            "alert_on_unknown": True,
+            "save_color_trace": True,
             "inference_interval": 5,
             "labels": ["drone"],
         },
@@ -102,6 +149,12 @@ def load_config(config_path: str = None) -> dict:
             "pause_button_pin": 25,
             "alert_duration_ms": 5000,
             "pulse_interval_ms": 500,
+            "red_buzzer_on_ms": 120,
+            "red_buzzer_off_ms": 80,
+            "blue_buzzer_on_ms": 420,
+            "blue_buzzer_off_ms": 280,
+            "unknown_buzzer_on_ms": 250,
+            "unknown_buzzer_off_ms": 250,
         },
         "web": {"host": "0.0.0.0", "port": 8080},
         "logging": {
@@ -300,11 +353,13 @@ class AudioGuardApp:
 
     def _on_alarm(self, detection: dict):
         """Callback when the detector finds something."""
-        label = detection.get("label", "unknown")
+        label = detection.get("alert_level") or detection.get("label", "unknown")
         confidence = detection.get("confidence", 0.0)
+        if not confidence:
+            confidence = detection.get("yes_confidence", 0.0)
         self.logger.warning("ALARM CALLBACK: %s (%.2f)", label, confidence)
         if self.gpio:
-            self.gpio.trigger_alarm()
+            self.gpio.trigger_alarm(label)
 
     def _on_record_toggle(self):
         """Toggle recording on/off (from GPIO record button or UI)."""

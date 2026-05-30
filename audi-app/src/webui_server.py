@@ -10,7 +10,7 @@ import logging
 import threading
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 logger = logging.getLogger("audio_guard.webui")
 
@@ -132,15 +132,18 @@ class WebUI:
         @app.route("/api/audio_level")
         def api_audio_level():
             """Live RMS audio level (0.0–1.0) for VU meter."""
+            import math
+
             if not self.recorder:
-                return jsonify({"rms": 0.0, "peak": 0.0})
+                return jsonify({"rms": 0.0, "peak": 0.0, "db": -120.0})
             r = self.recorder.recorder
             rms = r.get_rms_level()
+            db = 20.0 * math.log10(max(float(rms), 1e-10))
             return jsonify(
                 {
                     "rms": round(rms, 4),
                     "peak": min(1.0, rms * 3.0),
-                    "db": round(20 * (rms if rms > 0 else 1e-10) / 2.3026, 1),
+                    "db": round(db, 1),
                 }
             )
 
@@ -204,12 +207,17 @@ class WebUI:
 
             result = {
                 "timestamp": time.time(),
+                "alert_id": f"test_{int(time.time())}",
                 "state": "YES",
+                "alert_level": "RED_ALERT",
                 "yes_confidence": 0.95,
                 "threshold_yes": self.detector.threshold_yes
                 if self.detector
                 else 0.70,
                 "test_alert": True,
+                "drone_color": "RED",
+                "red_confidence": 0.95,
+                "blue_confidence": 0.05,
             }
             if self.detector:
                 # Persist to alert history
@@ -223,9 +231,27 @@ class WebUI:
                     daemon=True,
                 ).start()
             if self.gpio:
-                self.gpio.trigger_alarm()
+                self.gpio.trigger_alarm(result["alert_level"])
             logger.warning("TEST ALERT TRIGGERED (simulated YES detection)")
             return jsonify({"status": "alert_triggered", "result": result})
+
+        @app.route("/api/label_alert", methods=["POST"])
+        def api_label_alert():
+            """Attach an operator label to an alert history entry."""
+            if not self.detector:
+                return jsonify({"error": "Detector not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            alert_id = str(payload.get("alert_id", ""))
+            label = str(payload.get("label", ""))
+            if not alert_id or not label:
+                return jsonify({"error": "alert_id and label are required"}), 400
+            try:
+                updated = self.detector.alert_history.label_alert(alert_id, label)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            if updated is None:
+                return jsonify({"error": "alert not found"}), 404
+            return jsonify({"status": "labeled", "alert": updated})
 
         @app.route("/api/system")
         def api_system():

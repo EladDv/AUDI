@@ -50,6 +50,11 @@ detection:
   # Inference timing
   inference_interval: 0.320      # Seconds between inference runs
 
+  # Threshold profiles. Values are loaded from threshold_profiles_file so field
+  # tuning can happen without code changes.
+  active_threshold_profile: "balanced"
+  threshold_profiles_file: "./threshold_profiles.yaml"
+
   # Combined model output:
   #   logit 0: drone detector
   #   logit 1: blue drone
@@ -58,6 +63,16 @@ detection:
   confidence_threshold_low: 0.80     # Minimum raw drone score for color typing
   blue_red_threshold: 0.50            # RED is positive; red >= threshold => RED else BLUE
   blue_red_min_detection_score: 0.80  # Only type windows that look like drones
+  red_alert_threshold: 0.50           # RED alert if red confidence is above this
+  blue_alert_threshold: 0.50          # BLUE alert if blue confidence is above this
+  blue_to_red_threshold: 0.45         # Lower threshold to enter RED state
+  red_to_blue_threshold: 0.35         # Harder threshold to leave RED state
+  color_hysteresis_window: 5
+  color_hysteresis_ratio: 0.6
+  alert_on_red: true
+  alert_on_blue: true
+  alert_on_unknown: true
+  save_color_trace: true
   hysteresis_window: 5               # Hysteresis window size
   hysteresis_ratio: 0.6              # Hysteresis ratio
   hysteresis_margin: 0.05            # Hysteresis margin
@@ -77,6 +92,12 @@ gpio:
   pause_button_pin: 18           # Pause recording for 5 minutes (pull-up input)
   alert_duration_ms: 15000       # How long to hold alert active
   pulse_interval_ms: 500         # Blink/pulse interval during alert
+  red_buzzer_on_ms: 120          # Fast urgent pattern for RED ALERT
+  red_buzzer_off_ms: 80
+  blue_buzzer_on_ms: 420         # Slower pattern for BLUE ALERT
+  blue_buzzer_off_ms: 280
+  unknown_buzzer_on_ms: 250
+  unknown_buzzer_off_ms: 250
 
 # --- Web UI ---
 web:

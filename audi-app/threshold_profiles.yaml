@@ -1,0 +1,29 @@
+# AUDI threshold profiles.
+#
+# These are provisional deployment defaults. Replace them with values selected
+# from field and attack-run calibration once the combined model is finalized.
+threshold_profiles:
+  sensitive:
+    confidence_threshold_high: 0.72
+    blue_red_threshold: 0.45
+    blue_red_min_detection_score: 0.72
+    red_alert_threshold: 0.45
+    blue_alert_threshold: 0.55
+    blue_to_red_threshold: 0.42
+    red_to_blue_threshold: 0.30
+  balanced:
+    confidence_threshold_high: 0.80
+    blue_red_threshold: 0.50
+    blue_red_min_detection_score: 0.80
+    red_alert_threshold: 0.50
+    blue_alert_threshold: 0.50
+    blue_to_red_threshold: 0.45
+    red_to_blue_threshold: 0.35
+  quiet:
+    confidence_threshold_high: 0.88
+    blue_red_threshold: 0.55
+    blue_red_min_detection_score: 0.86
+    red_alert_threshold: 0.55
+    blue_alert_threshold: 0.60
+    blue_to_red_threshold: 0.48
+    red_to_blue_threshold: 0.32

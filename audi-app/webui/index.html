@@ -14,8 +14,8 @@
 
     body {
       font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-      background: #0d0d0d;
-      color: #e0e0e0;
+      background: #f4f6f8;
+      color: #1d2530;
       padding: 10px;
       max-width: 800px;
       margin: 0 auto;
@@ -180,6 +180,22 @@
       animation: pulse-bg 1.5s ease-in-out infinite;
     }
 
+    .state-card.state-red-alert {
+      background: #2a0808;
+      border: 2px solid #e33;
+      animation: pulse-bg 1.5s ease-in-out infinite;
+    }
+
+    .state-card.state-blue-alert {
+      background: #071d33;
+      border: 2px solid #08f;
+    }
+
+    .state-card.state-unknown-alert {
+      background: #2a2108;
+      border: 2px solid #da0;
+    }
+
     @keyframes pulse-bg {
 
       0%,
@@ -204,6 +220,18 @@
 
     .state-label.yes {
       color: #f44;
+    }
+
+    .state-label.red-alert {
+      color: #f44;
+    }
+
+    .state-label.blue-alert {
+      color: #4af;
+    }
+
+    .state-label.unknown-alert {
+      color: #da0;
     }
 
     .state-sub {
@@ -380,6 +408,18 @@
       color: #f66;
     }
 
+    .history-item .event.state-red-alert {
+      color: #d33;
+    }
+
+    .history-item .event.state-blue-alert {
+      color: #08f;
+    }
+
+    .history-item .event.state-unknown-alert {
+      color: #b70;
+    }
+
     .history-item .event.state-blue {
       color: #08f;
     }
@@ -504,6 +544,172 @@
       color: #444;
       text-align: center;
     }
+
+    body.dark-mode {
+      background: #0d0d0d;
+      color: #e0e0e0;
+    }
+
+    body:not(.dark-mode) .status-card,
+    body:not(.dark-mode) .sys-card,
+    body:not(.dark-mode) .history-scroll,
+    body:not(.dark-mode) .score-history-section,
+    body:not(.dark-mode) .advanced-panel,
+    body:not(.dark-mode) .trace-table {
+      background: #fff;
+      border: 1px solid #dde3ea;
+    }
+
+    body:not(.dark-mode) .history-item {
+      background: #f8fafc;
+      border: 1px solid #e6ebf0;
+    }
+
+    body:not(.dark-mode) .vu-track {
+      background: #e8edf3;
+      border-color: #d8e0e8;
+    }
+
+    body:not(.dark-mode) .state-card.state-no {
+      background: #eef3f7;
+      border-color: #d7e1ea;
+    }
+
+    body:not(.dark-mode) .state-card.state-yes,
+    body:not(.dark-mode) .state-card.state-red-alert {
+      background: #fff0f0;
+      border-color: #d33;
+    }
+
+    body:not(.dark-mode) .state-card.state-blue-alert {
+      background: #edf5ff;
+      border-color: #08f;
+    }
+
+    body:not(.dark-mode) .state-card.state-unknown-alert {
+      background: #fff8e8;
+      border-color: #da0;
+    }
+
+    .advanced-toggle {
+      width: 100%;
+      min-height: 44px;
+      margin-bottom: 8px;
+      border: 1px solid #ccd6df;
+      border-radius: 8px;
+      background: #fff;
+      color: #1d2530;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    body.dark-mode .advanced-toggle {
+      background: #151522;
+      border-color: #333;
+      color: #e0e0e0;
+    }
+
+    .advanced-panel {
+      display: none;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 10px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .advanced-panel.open {
+      display: flex;
+    }
+
+    .advanced-panel label {
+      min-height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: #45515f;
+    }
+
+    body.dark-mode .advanced-panel label {
+      color: #aaa;
+    }
+
+    .trace-section {
+      display: none;
+      margin-bottom: 10px;
+    }
+
+    .trace-table {
+      width: 100%;
+      border-collapse: collapse;
+      border-radius: 8px;
+      overflow: hidden;
+      font-size: 0.72rem;
+      background: #fff;
+    }
+
+    .trace-table th,
+    .trace-table td {
+      padding: 6px;
+      border-bottom: 1px solid #e6ebf0;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .trace-table th:first-child,
+    .trace-table td:first-child {
+      text-align: left;
+    }
+
+    body.dark-mode .trace-table {
+      background: #0e0e16;
+    }
+
+    body.dark-mode .trace-table th,
+    body.dark-mode .trace-table td {
+      border-bottom-color: #222;
+    }
+
+    .label-actions {
+      display: none;
+      gap: 4px;
+      margin-left: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .labeling-on .label-actions {
+      display: flex;
+    }
+
+    .label-btn {
+      border: 1px solid #ccd6df;
+      background: #fff;
+      color: #1d2530;
+      border-radius: 6px;
+      padding: 5px 7px;
+      min-height: 28px;
+      font-size: 0.66rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    body.dark-mode .label-btn {
+      background: #181822;
+      border-color: #333;
+      color: #ddd;
+    }
+
+    .operator-label {
+      color: #0a7;
+      font-size: 0.65rem;
+      margin-left: 6px;
+      font-weight: 700;
+    }
   </style>
 </head>
 
@@ -513,6 +719,13 @@
 
   <!-- Health pills -->
   <div class="health-bar" id="healthBar"></div>
+
+  <button class="advanced-toggle" id="advancedToggle" onclick="toggleAdvanced()">Advanced</button>
+  <div class="advanced-panel" id="advancedPanel">
+    <label><input type="checkbox" id="darkModeToggle" onchange="setDarkMode(this.checked)"> Dark mode</label>
+    <label><input type="checkbox" id="colorTraceToggle" onchange="setColorTrace(this.checked)"> Color trace</label>
+    <label><input type="checkbox" id="labelingToggle" onchange="setLabeling(this.checked)"> Labeling buttons</label>
+  </div>
 
   <!-- Status grid -->
   <div class="status-grid" id="statusGrid"></div>
@@ -532,6 +745,11 @@
     <div class="score-history-label">Prediction Score History</div>
     <canvas id="scoreCanvas" width="780" height="120" style="width:100%;height:120px;border-radius:8px;background:#0e0e16"></canvas>
     <div class="score-history-stats" id="scoreStats"></div>
+  </div>
+
+  <div class="trace-section" id="colorTraceSection">
+    <div class="score-history-label">Color Trace</div>
+    <div id="colorTraceTable"></div>
   </div>
 
   <!-- State: YES / BLUE / NO -->
@@ -580,6 +798,58 @@
 
   <script>
     let lastAlarmState = false;
+    let advancedOpen = localStorage.getItem('audiAdvanced') === '1';
+    let colorTraceEnabled = localStorage.getItem('audiColorTrace') === '1';
+    let labelingEnabled = localStorage.getItem('audiLabeling') === '1';
+    let darkModeEnabled = localStorage.getItem('audiDarkMode') === '1';
+
+    function applyUiPrefs() {
+      document.body.classList.toggle('dark-mode', darkModeEnabled);
+      document.body.classList.toggle('labeling-on', labelingEnabled);
+      document.getElementById('advancedPanel').classList.toggle('open', advancedOpen);
+      document.getElementById('darkModeToggle').checked = darkModeEnabled;
+      document.getElementById('colorTraceToggle').checked = colorTraceEnabled;
+      document.getElementById('labelingToggle').checked = labelingEnabled;
+      document.getElementById('advancedToggle').textContent = advancedOpen ? 'Advanced ▲' : 'Advanced ▼';
+    }
+
+    function toggleAdvanced() {
+      advancedOpen = !advancedOpen;
+      localStorage.setItem('audiAdvanced', advancedOpen ? '1' : '0');
+      applyUiPrefs();
+    }
+
+    function setDarkMode(enabled) {
+      darkModeEnabled = enabled;
+      localStorage.setItem('audiDarkMode', enabled ? '1' : '0');
+      applyUiPrefs();
+    }
+
+    function setColorTrace(enabled) {
+      colorTraceEnabled = enabled;
+      localStorage.setItem('audiColorTrace', enabled ? '1' : '0');
+      applyUiPrefs();
+      update();
+    }
+
+    function setLabeling(enabled) {
+      labelingEnabled = enabled;
+      localStorage.setItem('audiLabeling', enabled ? '1' : '0');
+      applyUiPrefs();
+      update();
+    }
+
+    function alertLabel(level) {
+      if (level === 'RED_ALERT') return 'RED ALERT';
+      if (level === 'BLUE_ALERT') return 'BLUE ALERT';
+      if (level === 'UNKNOWN_ALERT') return 'UNKNOWN ALERT';
+      if (level === 'DETECTED') return 'DETECTED';
+      return 'NO';
+    }
+
+    function alertClass(level) {
+      return (level || 'NO').toLowerCase().replaceAll('_', '-');
+    }
 
     function update() {
       // --- Status poll ---
@@ -597,8 +867,10 @@
         // Dot color based on detection state
         const dot = document.getElementById('recDot');
         const state = det.current_state || 'NO';
-        if (state === 'YES') dot.className = 'dot red';
-        else if (state === 'BLUE') dot.className = 'dot blue';
+        const alertLevel = det.alert_level || state;
+        if (alertLevel === 'RED_ALERT') dot.className = 'dot red';
+        else if (alertLevel === 'BLUE_ALERT') dot.className = 'dot blue';
+        else if (alertLevel === 'UNKNOWN_ALERT') dot.className = 'dot yellow';
         else if (paused) dot.className = 'dot yellow';
         else if (recording && healthy) dot.className = 'dot green';
         else if (recording && !healthy) dot.className = 'dot yellow';
@@ -625,18 +897,23 @@
           ${avgMs.toFixed(0)}ms avg
         </div>
       </div>
+      <div class="status-card">
+        <div class="label">Profile</div>
+        <div class="value white">${det.threshold_profile || 'manual'}</div>
+      </div>
     `;
 
-        // State card (YES/BLUE/NO)
+        // State card
         const card = document.getElementById('stateCard');
         const label = document.getElementById('stateLabel');
         const sub = document.getElementById('stateSub');
-        card.className = 'state-card state-' + state.toLowerCase();
+        card.className = 'state-card state-' + alertClass(alertLevel);
         const color = det.drone_color || 'UNKNOWN';
         const colorText = color === 'UNKNOWN' ? '' : ` - ${color}`;
         if (state === 'YES') {
-          label.className = 'state-label yes'; label.textContent = 'YES';
-          sub.textContent = `ALARM${colorText} - snapshot saved`;
+          label.className = 'state-label ' + alertClass(alertLevel);
+          label.textContent = alertLabel(alertLevel);
+          sub.textContent = `Snapshot saved${colorText}`;
         } else {
           label.className = 'state-label no'; label.textContent = 'NO';
           sub.textContent = color === 'UNKNOWN' ? 'Nothing detected' : `Last typed ${color}`;
@@ -648,7 +925,8 @@
           det.blue_confidence == null ? '--' : det.blue_confidence.toFixed(2);
         document.getElementById('thresholdInfo').textContent =
           'YES >= ' + (det.threshold_yes || 0.7).toFixed(2) +
-          '  RED >= ' + (det.blue_red_threshold || 0.5).toFixed(2) +
+          '  B→R >= ' + (det.blue_to_red_threshold || 0.45).toFixed(2) +
+          '  R→B <= ' + (det.red_to_blue_threshold || 0.35).toFixed(2) +
           (det.blue_red_model_loaded ? '' : '  color model offline');
 
         // Record button — same state as the recording label
@@ -668,6 +946,7 @@
         } else {
           document.getElementById('scoreHistorySection').style.display = 'none';
         }
+        drawColorTrace(det.color_trace || []);
       });
 
       // --- System info ---
@@ -696,11 +975,12 @@
         const gp = d.gpio || {};
         const det = d.detector || {};
         const state = det.current_state || 'NO';
+        const alertLevel = det.alert_level || state;
         const pills = [];
 
         if (state === 'YES') {
-          const color = det.drone_color && det.drone_color !== 'UNKNOWN' ? ` ${det.drone_color}` : '';
-          pills.push({ label: `ALARM${color}`, cls: 'pill-bad' });
+          const cls = alertLevel === 'BLUE_ALERT' ? 'pill-blue' : alertLevel === 'UNKNOWN_ALERT' ? 'pill-warn' : 'pill-bad';
+          pills.push({ label: alertLabel(alertLevel), cls });
         }
         else if (rec.running && rec.audio_healthy) pills.push({ label: 'Audio OK', cls: 'pill-ok' });
         else if (rec.running && !rec.audio_healthy) pills.push({ label: 'No Audio', cls: 'pill-warn' });
@@ -726,13 +1006,22 @@
         list.innerHTML = h.reverse().slice(0, 30).map(e => {
           const t = new Date(e.timestamp * 1000);
           const state = e.state || 'NO';
+          const alertLevel = e.alert_level || state;
           const yesC = (e.yes_confidence * 100).toFixed(0) || '0';
           const redC = e.red_confidence == null ? '--' : (e.red_confidence * 100).toFixed(0);
           const color = e.drone_color && e.drone_color !== 'UNKNOWN' ? ` ${e.drone_color}` : '';
+          const labelText = e.operator_label ? `<span class="operator-label">${e.operator_label.replace('_', ' ')}</span>` : '';
+          const labelActions = e.alert_id ? `<span class="label-actions">
+            <button class="label-btn" onclick="labelAlert('${e.alert_id}','no_drone')">No</button>
+            <button class="label-btn" onclick="labelAlert('${e.alert_id}','drone_red')">Red</button>
+            <button class="label-btn" onclick="labelAlert('${e.alert_id}','drone_blue')">Blue</button>
+            <button class="label-btn" onclick="labelAlert('${e.alert_id}','unclear')">?</button>
+          </span>` : '';
           return `<div class="history-item">
         <span class="time">${t.toLocaleDateString()} ${t.toLocaleTimeString()}</span>
-        <span class="event state-${state.toLowerCase()}">${state}${color}</span>
+        <span class="event state-${alertClass(alertLevel)}">${alertLabel(alertLevel)}${color}${labelText}</span>
         <span class="conf">Y:${yesC}% R:${redC}%</span>
+        ${labelActions}
       </div>`;
         }).join('');
       }).catch(() => { });
@@ -767,13 +1056,48 @@
     function pauseRecording() { apiPost('/api/pause_recording'); }
     function testAlert()      { apiPost('/api/test_alert');      }
 
+    function labelAlert(alertId, label) {
+      fetch('/api/label_alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert_id: alertId, label })
+      }).then(() => update()).catch(() => {});
+    }
+
     function updateVU() {
       fetch('/api/audio_level').then(r => r.json()).then(d => {
-        const rms = d.rms || 0;
-        const db = (d.db * 10) || 0.0;
-        document.getElementById('vuFill').style.width = Math.min(100, db) + '%';
-        document.getElementById('vuDb').textContent = db.toFixed(0) + ' dB';
+        const peak = d.peak || 0;
+        const db = d.db == null ? -120 : d.db;
+        document.getElementById('vuFill').style.width = Math.min(100, peak * 100) + '%';
+        document.getElementById('vuDb').textContent = db.toFixed(1) + ' dB';
       }).catch(() => { });
+    }
+
+    function drawColorTrace(trace) {
+      const section = document.getElementById('colorTraceSection');
+      if (!colorTraceEnabled || !trace || trace.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+      section.style.display = 'block';
+      const rows = trace.slice(-12).reverse().map(e => {
+        const t = new Date(e.ts * 1000).toLocaleTimeString();
+        const red = e.red_confidence == null ? '--' : e.red_confidence.toFixed(2);
+        const blue = e.blue_confidence == null ? '--' : e.blue_confidence.toFixed(2);
+        return `<tr>
+          <td>${t}</td>
+          <td>${alertLabel(e.alert_level)}</td>
+          <td>${(e.raw_score || 0).toFixed(2)}</td>
+          <td>${red}</td>
+          <td>${blue}</td>
+          <td>${e.drone_color || 'UNKNOWN'}</td>
+        </tr>`;
+      }).join('');
+      document.getElementById('colorTraceTable').innerHTML =
+        `<table class="trace-table">
+          <thead><tr><th>Time</th><th>Level</th><th>Drone</th><th>Red</th><th>Blue</th><th>Type</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
     }
 
     // --- Score history sparkline (canvas) ---
@@ -871,6 +1195,7 @@
 
     setInterval(update, 1500);
     setInterval(updateVU, 33);
+    applyUiPrefs();
     update();
     updateVU();
   </script>

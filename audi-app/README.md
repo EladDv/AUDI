@@ -79,6 +79,8 @@ storage:
 detection:
   model_path: /app/models/model.tflite
   inference_interval: 0.320
+  active_threshold_profile: balanced
+  threshold_profiles_file: ./threshold_profiles.yaml
   confidence_threshold_high: 0.70    # YES → GPIO alarm
 
 gpio:
@@ -94,6 +96,10 @@ web:
   host: 0.0.0.0
   port: 8080
 ```
+
+Edit `threshold_profiles.yaml` to tune deployment thresholds without changing
+application code. The active profile overrides detector and color thresholds at
+startup.
 
 ## Deployment on Pi
 
