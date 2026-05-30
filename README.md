@@ -374,21 +374,18 @@ TOP MODELS at PRECISION=0.90
   ...
 ```
 
-### Other Evaluation Commands
+### Field Evaluation
 
 ```bash
-# Per-bin thresholds at 10% FPR
-uv run python scripts/evaluate.py fpr-thresholds
+# Regenerate field alert TP/FP/FN table from attack-run thresholds
+uv run python scripts/evaluate.py field
 
-# Thresholds at multiple FPR targets (1%–50%)
-uv run python scripts/evaluate.py fpr-multi
-
-# Operational metrics: detections vs FPs at deployment thresholds
-uv run python scripts/evaluate.py operational
-
-# Ensemble two models by averaging logits
-uv run python scripts/evaluate.py ensemble
+# Limit to the current hard-negative sweep
+uv run python scripts/evaluate.py field \
+    --sweep field_hard_negative_finetune_v4_sizes_20260530_130027
 ```
+
+Results are saved to `checkpoints/field_eval_all.csv`.
 
 ---
 

@@ -1,13 +1,14 @@
-"""Evaluate mn sweep models on field recordings at all P levels.
+"""Evaluate checkpoint models on field recordings at all precision levels.
 
 Usage:
-    uv run python scripts/eval_field_mn.py
-    uv run python scripts/eval_field_mn.py --top 10
+    uv run audi-eval field
+    uv run audi-eval field --top 10
+    uv run audi-eval field --sweep field_hard_negative_finetune_v4_sizes_20260530_130027
 """
 from __future__ import annotations
 
 import csv
-import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -16,8 +17,11 @@ import torchaudio
 import tqdm
 
 
-def main():
+def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
+    del noise_path, drone_path
+
     import argparse
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=0, help="Evaluate only top N models by P90 cov")
     ap.add_argument("--sweep", default=None, help="Only evaluate models from this sweep")
@@ -26,23 +30,20 @@ def main():
     args = ap.parse_args()
 
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
-    PROJECT = Path(__file__).resolve().parents[1]
+    PROJECT = Path(__file__).resolve().parents[3]
     SR = 16000
     STRIDE = 0.125
     FIELD_DIR = PROJECT / "data" / "field_recordings_20260514"
     CSV_PATH = PROJECT / "checkpoints" / "attack_run_precision_eval.csv"
 
-    # ── All sweeps ──────────────────────────────────────────────────────
-    # ── Load thresholds from attack CSV ──────────────────────────────────
     LEVELS = ["P50", "P60", "P70", "P75", "P80", "P85", "P90", "P95", "P99"]
-    PRECISIONS = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99]
 
     model_thresholds: dict[str, dict[str, float]] = {}  # "sweep/model" -> {P_level: sigma}
     with open(CSV_PATH) as f:
         for r in csv.DictReader(f):
             ref = f"{r['sweep']}/{r['model']}"
             # Filter by sweep if specified
-            if args.sweep and r['sweep'] != args.sweep:
+            if args.sweep and r["sweep"] != args.sweep:
                 continue
             # Only include models that exist on disk
             sweep_dir = PROJECT / "checkpoints" / r["sweep"]
@@ -60,14 +61,21 @@ def main():
                 model_thresholds[ref] = {}
             model_thresholds[ref][r["precision"]] = float(r["sigma"])
 
-    model_order = sorted(model_thresholds, key=lambda m: model_thresholds[m].get("P90", 0), reverse=True)
+    model_order = sorted(
+        model_thresholds,
+        key=lambda m: model_thresholds[m].get("P90", 0),
+        reverse=True,
+    )
     if args.top > 0:
         model_order = model_order[:args.top]
 
     print(f"Models: {len(model_order)}")
 
     # ── Load field audio once ───────────────────────────────────────────
-    def load_audio_files(directory: Path, glob_pattern: str = "*.wav") -> list[tuple[str, np.ndarray]]:
+    def load_audio_files(
+        directory: Path,
+        glob_pattern: str = "*.wav",
+    ) -> list[tuple[str, np.ndarray]]:
         files = []
         for fp in sorted(directory.glob(glob_pattern)):
             if fp.stat().st_size == 0:
@@ -135,8 +143,18 @@ def main():
     results = []  # [{ref, model, sweep, P_level, sigma, bg_fp, ...}]
 
     OUT_PATH = PROJECT / "checkpoints" / "field_eval_all.csv"
-    FIELD_NAMES = ["ref", "sweep", "model", "P", "sigma",
-                   "alert_tp", "alert_fn", "alert_fp", "alert_tn", "alert_total"]
+    FIELD_NAMES = [
+        "ref",
+        "sweep",
+        "model",
+        "P",
+        "sigma",
+        "alert_tp",
+        "alert_fn",
+        "alert_fp",
+        "alert_tn",
+        "alert_total",
+    ]
 
     # Load existing results for resume
     done_refs: set[str] = set()
@@ -183,7 +201,7 @@ def main():
         ckpt_path = ckpts[-1]
 
         try:
-            from audi.checkpoint import strip_compile_prefix, get_clip_seconds
+            from audi.checkpoint import get_clip_seconds, strip_compile_prefix
             from audi.config import MelConfig, ModelConfig, OptimizerConfig
             from audi.training.detector import DroneDetector
 
@@ -197,15 +215,26 @@ def main():
                     compile=False,
                 )
             else:
-                model_cfg = ModelConfig(arch=model_hp.arch, pretrained=model_hp.pretrained, compile=False)
+                model_cfg = ModelConfig(
+                    arch=model_hp.arch,
+                    pretrained=model_hp.pretrained,
+                    compile=False,
+                )
             mel_hp = hp.get("mel", {})
             if isinstance(mel_hp, dict):
-                mel_cfg = MelConfig(n_mels=mel_hp.get("n_mels", 128), n_fft=mel_hp.get("n_fft", 1024),
-                                    hop_length=mel_hp.get("hop_length", 160))
+                mel_cfg = MelConfig(
+                    n_mels=mel_hp.get("n_mels", 128),
+                    n_fft=mel_hp.get("n_fft", 1024),
+                    hop_length=mel_hp.get("hop_length", 160),
+                )
             else:
                 mel_cfg = mel_hp
-            model = DroneDetector(model=model_cfg, mel=mel_cfg, optimizer=OptimizerConfig(),
-                                  bin_names=hp.get("bin_names", []))
+            model = DroneDetector(
+                model=model_cfg,
+                mel=mel_cfg,
+                optimizer=OptimizerConfig(),
+                bin_names=hp.get("bin_names", []),
+            )
             model.load_state_dict(strip_compile_prefix(ckpt["state_dict"]), strict=False)
             model = model.to(device).eval()
             clip_s = get_clip_seconds(hp)
@@ -240,7 +269,7 @@ def main():
             alert_fn = 0
             alert_fp = 0
             alert_tn = 0
-            for dir_name, scores, label in alert_scores_per_file:
+            for _dir_name, scores, label in alert_scores_per_file:
                 dets = apply_hysteresis(scores, sigma)
                 a = count_alerts(dets)
                 has_alert = a > 0
@@ -256,17 +285,25 @@ def main():
                         alert_tn += 1
             alert_total = alert_tp + alert_fn + alert_fp + alert_tn
 
-            results.append({
-                "ref": ref, "model": model_name, "sweep": sweep_name, "P": lvl, "sigma": round(sigma, 4),
-                "alert_tp": alert_tp, "alert_fn": alert_fn,
-                "alert_fp": alert_fp, "alert_tn": alert_tn,
-                "alert_total": alert_total,
-            })
+            results.append(
+                {
+                    "ref": ref,
+                    "model": model_name,
+                    "sweep": sweep_name,
+                    "P": lvl,
+                    "sigma": round(sigma, 4),
+                    "alert_tp": alert_tp,
+                    "alert_fn": alert_fn,
+                    "alert_fp": alert_fp,
+                    "alert_tn": alert_tn,
+                    "alert_total": alert_total,
+                }
+            )
 
         del model
         torch.cuda.empty_cache()
         flush_results()
-        print(f"done")
+        print("done")
 
     # ── Print results table ─────────────────────────────────────────────
     print(f"\n{'='*120}")
@@ -277,13 +314,12 @@ def main():
         print(f"  {lvl:>12}  ", end="")
     print()
     print(f"{'':35}", end="")
-    for lvl in LEVELS:
-        print(f" TP FP FN", end="")
+    for _lvl in LEVELS:
+        print(" TP FP FN", end="")
     print()
     print("-" * 80)
 
     # Group by ref
-    from collections import defaultdict
     by_model = defaultdict(dict)
     for r in results:
         p = r["P"]
@@ -304,4 +340,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run()
