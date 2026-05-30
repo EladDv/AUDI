@@ -8,7 +8,6 @@ extracts audio for matches inline, processes to 16kHz chunks. Saves each shard's
 results immediately to disk — restart picks up where it left off.
 
 Usage:
-    uv run python scripts/build_data.py audioset-fp
     uv run audi-data audioset-fp --max-per-category 500
 """
 
@@ -152,7 +151,8 @@ def run() -> None:
 
     if (args.output_path / "dataset").exists() and not args.overwrite:
         print(
-            f"Output dataset {args.output_path / 'dataset'} already exists. Use --overwrite to replace."
+            f"Output dataset {args.output_path / 'dataset'} already exists. "
+            "Use --overwrite to replace."
         )
         return
 
@@ -184,7 +184,8 @@ def run() -> None:
             1 for c in categories if per_cat_counts.get(c, 0) < limits[c]
         )
         print(
-            f"\n╔══ Resuming: {len(completed)} shards completed, {total_existing} clips collected ══╗"
+            f"\nResuming: {len(completed)} shards completed, "
+            f"{total_existing} clips collected"
         )
         print(
             f"║  {remaining} categories still below target ({args.max_per_category})"

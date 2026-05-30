@@ -13,6 +13,7 @@ Auto-detects Pi hardware vs dev machine (mock fallback).
 """
 
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -41,6 +42,20 @@ class GPIOController:
 
         self.alert_duration_ms = gpio_cfg.get("alert_duration_ms", 5000)
         self.pulse_interval_ms = gpio_cfg.get("pulse_interval_ms", 500)
+        self.buzzer_patterns = {
+            "RED_ALERT": {
+                "on_ms": gpio_cfg.get("red_buzzer_on_ms", 120),
+                "off_ms": gpio_cfg.get("red_buzzer_off_ms", 80),
+            },
+            "BLUE_ALERT": {
+                "on_ms": gpio_cfg.get("blue_buzzer_on_ms", 420),
+                "off_ms": gpio_cfg.get("blue_buzzer_off_ms", 280),
+            },
+            "UNKNOWN_ALERT": {
+                "on_ms": gpio_cfg.get("unknown_buzzer_on_ms", 250),
+                "off_ms": gpio_cfg.get("unknown_buzzer_off_ms", 250),
+            },
+        }
 
         # Callbacks (set by main.py)
         self.on_record_toggle: Callable[[], None] | None = None
@@ -53,7 +68,9 @@ class GPIOController:
         self._record_led_active = False
         self._stop_event = threading.Event()
         self._alarm_end_time: float = 0
+        self._active_alert_level = "UNKNOWN_ALERT"
         self._strobe_thread: threading.Thread | None = None
+        self._buzzer_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
         self._init_gpio()
@@ -116,16 +133,30 @@ class GPIOController:
             )
         except Exception as e:
             logger.error("GPIO init FAILED: %s", e)
-            raise RuntimeError(
-                f"GPIO is enabled in config but RPi.GPIO failed to initialize: {e}"
-            ) from e
+            self._gpio = None
+            self._has_gpio = False
+            require_gpio = os.getenv("REQUIRE_GPIO", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if require_gpio:
+                raise RuntimeError(
+                    "GPIO is enabled in config but RPi.GPIO failed to "
+                    f"initialize: {e}"
+                ) from e
+            logger.warning(
+                "Continuing with mock GPIO; set REQUIRE_GPIO=true to fail hard"
+            )
 
     # ------------------------------------------------------------------
     # Alarm API
     # ------------------------------------------------------------------
 
-    def trigger_alarm(self) -> bool:
+    def trigger_alarm(self, alert_level: str = "UNKNOWN_ALERT") -> bool:
         with self._lock:
+            self._active_alert_level = alert_level or "UNKNOWN_ALERT"
             if self._alarm_active:
                 self._alarm_end_time = time.time() + (
                     self.alert_duration_ms / 1000.0
@@ -136,8 +167,10 @@ class GPIOController:
                 self.alert_duration_ms / 1000.0
             )
 
-        self._write_pin(self.alert_pin, True)
-        logger.warning("GPIO ALARM TRIGGERED (pin %d HIGH)", self.alert_pin)
+        logger.warning(
+            "GPIO %s TRIGGERED (pin %d)", self._active_alert_level, self.alert_pin
+        )
+        self._start_buzzer()
         # self._start_strobe()
         threading.Thread(target=self._auto_clear_loop, daemon=True).start()
         return True
@@ -201,6 +234,28 @@ class GPIOController:
             self._strobe_active = False
         self._write_pin(self.strobe_pin, False)
 
+    def _start_buzzer(self):
+        if self._buzzer_thread and self._buzzer_thread.is_alive():
+            return
+        self._buzzer_thread = threading.Thread(
+            target=self._buzzer_loop, daemon=True
+        )
+        self._buzzer_thread.start()
+
+    def _buzzer_loop(self):
+        while self._alarm_active and not self._stop_event.is_set():
+            with self._lock:
+                level = self._active_alert_level
+            pattern = self.buzzer_patterns.get(
+                level, self.buzzer_patterns["UNKNOWN_ALERT"]
+            )
+            on_s = max(0.02, float(pattern["on_ms"]) / 1000.0)
+            off_s = max(0.02, float(pattern["off_ms"]) / 1000.0)
+            self._write_pin(self.alert_pin, True)
+            time.sleep(on_s)
+            self._write_pin(self.alert_pin, False)
+            time.sleep(off_s)
+
     def _strobe_loop(self):
         interval = self.pulse_interval_ms / 1000.0
         while self._strobe_active and not self._stop_event.is_set():
@@ -230,9 +285,18 @@ class GPIOController:
                 self._gpio.output(pin, value)
                 logger.debug("GPIO pin %d → %s", pin, "HIGH" if state else "LOW")
             except Exception as e:
-                logger.error("GPIO write FAILED pin %d → %s: %s", pin, "HIGH" if state else "LOW", e)
+                logger.error(
+                    "GPIO write FAILED pin %d → %s: %s",
+                    pin,
+                    "HIGH" if state else "LOW",
+                    e,
+                )
         else:
-            logger.error("GPIO NOT INITIALIZED — cannot write pin %d → %s", pin, "HIGH" if state else "LOW")
+            logger.debug(
+                "GPIO mock write pin %d → %s",
+                pin,
+                "HIGH" if state else "LOW",
+            )
 
     def status(self) -> dict:
         return {
@@ -246,6 +310,7 @@ class GPIOController:
             "record_led_pin": self.record_led_pin,
             "record_button_pin": self.record_button_pin,
             "pause_button_pin": self.pause_button_pin,
+            "active_alert_level": self._active_alert_level,
         }
 
     def cleanup(self):

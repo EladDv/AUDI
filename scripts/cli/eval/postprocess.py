@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from audi.checkpoint import strip_compile_prefix, get_clip_seconds
+from audi.checkpoint import get_clip_seconds, strip_compile_prefix
 
 
 def run(noise_path: str | None, drone_path: str | None) -> None:
@@ -18,10 +18,10 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
 
     from audi.cli_utils import NUM_WORKERS
     from audi.config import (
-        AugmentationConfig,
         MelConfig,
         MixConfig,
         ModelConfig,
+        OptimizerConfig,
         parse_snr_bins,
     )
     from audi.training.dataset import make_dataset
@@ -294,10 +294,11 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
     if SWEEP_DIR is None:
         print("ERROR: No sweep directory provided.")
         print(
-            "Usage: uv run python scripts/evaluate.py postprocess <sweep_dir> [run_name]"
+            "Usage: uv run audi-eval postprocess <sweep_dir> [run_name]"
         )
         print(
-            "Example: uv run python scripts/evaluate.py postprocess checkpoints_v2/sweep12_20260506_200208"
+            "Example: uv run audi-eval postprocess "
+            "checkpoints_v2/sweep12_20260506_200208"
         )
         sys.exit(1)
     
@@ -377,7 +378,8 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
                 reverse=True,
             ):
                 print(
-                    f"{m['name']:<35} {m['epoch']:>5} {m['auc']:>7.4f} {m.get('tpr_at_precision_90', 0):>9.4f}"
+                    f"{m['name']:<35} {m['epoch']:>5} {m['auc']:>7.4f} "
+                    f"{m.get('tpr_at_precision_90', 0):>9.4f}"
                 )
     print("\nDone!")
     

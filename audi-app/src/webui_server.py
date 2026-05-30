@@ -7,16 +7,43 @@ alarm history.
 """
 
 import logging
+import math
 import threading
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 logger = logging.getLogger("audio_guard.webui")
 
 # Path to HTML template
 HERE = Path(__file__).parent
 TEMPLATE_PATH = HERE / ".." / "webui" / "index.html"
+VU_DB_FLOOR = -120.0
+VU_DB_CEILING = 0.0
+
+
+def rms_to_dbfs(rms: float, floor_db: float = VU_DB_FLOOR) -> float:
+    """Convert linear full-scale RMS to dBFS for the VU display."""
+    try:
+        value = float(rms)
+    except (TypeError, ValueError):
+        return floor_db
+    if value <= 0.0 or not math.isfinite(value):
+        return floor_db
+    value = min(value, 1.0)
+    return max(floor_db, 20.0 * math.log10(value))
+
+
+def dbfs_to_vu_percent(db: float) -> float:
+    """Map dBFS to a 0-100 VU bar where 0 dBFS is full scale."""
+    try:
+        value = float(db)
+    except (TypeError, ValueError):
+        value = VU_DB_FLOOR
+    if not math.isfinite(value):
+        value = VU_DB_FLOOR
+    value = max(VU_DB_FLOOR, min(VU_DB_CEILING, value))
+    return ((value - VU_DB_FLOOR) / (VU_DB_CEILING - VU_DB_FLOOR)) * 100.0
 
 
 class WebUI:
@@ -108,6 +135,37 @@ class WebUI:
             result = self.detector.force_inference()
             return jsonify({"result": result})
 
+        @app.route("/api/threshold_profile", methods=["POST"])
+        def api_threshold_profile():
+            """Switch the active detector threshold profile."""
+            if not self.detector:
+                return jsonify({"error": "Detector not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            profile = str(payload.get("profile", ""))
+            if not profile:
+                return jsonify({"error": "profile is required"}), 400
+            try:
+                status = self.detector.set_threshold_profile(profile)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            return jsonify({"status": "profile_updated", "detector": status})
+
+        @app.route("/api/alert_routing", methods=["POST"])
+        def api_alert_routing():
+            """Update which color classes are allowed to trigger alerts."""
+            if not self.detector:
+                return jsonify({"error": "Detector not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            status = self.detector.set_alert_routing(
+                alert_on_blue=payload.get("alert_on_blue")
+                if "alert_on_blue" in payload
+                else None,
+                alert_on_unknown=payload.get("alert_on_unknown")
+                if "alert_on_unknown" in payload
+                else None,
+            )
+            return jsonify({"status": "alert_routing_updated", "detector": status})
+
         @app.route("/api/clear_alarm", methods=["POST"])
         def api_clear_alarm():
             """Manually clear GPIO alarm from UI."""
@@ -133,14 +191,16 @@ class WebUI:
         def api_audio_level():
             """Live RMS audio level (0.0–1.0) for VU meter."""
             if not self.recorder:
-                return jsonify({"rms": 0.0, "peak": 0.0})
+                return jsonify({"rms": 0.0, "peak": 0.0, "db": -120.0})
             r = self.recorder.recorder
             rms = r.get_rms_level()
+            db = rms_to_dbfs(rms)
             return jsonify(
                 {
                     "rms": round(rms, 4),
                     "peak": min(1.0, rms * 3.0),
-                    "db": round(20 * (rms if rms > 0 else 1e-10) / 2.3026, 1),
+                    "db": round(db, 1),
+                    "vu_percent": round(dbfs_to_vu_percent(db), 1),
                 }
             )
 
@@ -202,14 +262,31 @@ class WebUI:
             """Trigger a test YES alert to verify the full alert chain."""
             import time
 
+            payload = request.get_json(silent=True) or {}
+            alert_level = str(payload.get("alert_level", "RED_ALERT")).upper()
+            allowed_levels = {"RED_ALERT", "BLUE_ALERT", "UNKNOWN_ALERT"}
+            if alert_level not in allowed_levels:
+                return jsonify({"error": "invalid alert_level"}), 400
+
+            color_by_level = {
+                "RED_ALERT": ("RED", 0.95, 0.05),
+                "BLUE_ALERT": ("BLUE", 0.05, 0.95),
+                "UNKNOWN_ALERT": ("UNKNOWN", None, None),
+            }
+            drone_color, red_confidence, blue_confidence = color_by_level[alert_level]
             result = {
                 "timestamp": time.time(),
+                "alert_id": f"test_{int(time.time())}",
                 "state": "YES",
+                "alert_level": alert_level,
                 "yes_confidence": 0.95,
                 "threshold_yes": self.detector.threshold_yes
                 if self.detector
                 else 0.70,
                 "test_alert": True,
+                "drone_color": drone_color,
+                "red_confidence": red_confidence,
+                "blue_confidence": blue_confidence,
             }
             if self.detector:
                 # Persist to alert history
@@ -223,9 +300,27 @@ class WebUI:
                     daemon=True,
                 ).start()
             if self.gpio:
-                self.gpio.trigger_alarm()
-            logger.warning("TEST ALERT TRIGGERED (simulated YES detection)")
+                self.gpio.trigger_alarm(result["alert_level"])
+            logger.warning("TEST %s TRIGGERED (simulated YES detection)", alert_level)
             return jsonify({"status": "alert_triggered", "result": result})
+
+        @app.route("/api/label_alert", methods=["POST"])
+        def api_label_alert():
+            """Attach an operator label to an alert history entry."""
+            if not self.detector:
+                return jsonify({"error": "Detector not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            alert_id = str(payload.get("alert_id", ""))
+            label = str(payload.get("label", ""))
+            if not alert_id or not label:
+                return jsonify({"error": "alert_id and label are required"}), 400
+            try:
+                updated = self.detector.alert_history.label_alert(alert_id, label)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            if updated is None:
+                return jsonify({"error": "alert not found"}), 404
+            return jsonify({"status": "labeled", "alert": updated})
 
         @app.route("/api/system")
         def api_system():
@@ -296,13 +391,17 @@ function update() {
     const gp = d.gpio || {};
     g.innerHTML = `
       <div class="status-card"><div class="label">Recording</div>
-        <div class="value" style="color:${rec.running?'#0a7':'#c33'}">${rec.running?'Active':'Stopped'}</div></div>
+        <div class="value" style="color:${rec.running?'#0a7':'#c33'}">
+          ${rec.running?'Active':'Stopped'}
+        </div></div>
       <div class="status-card"><div class="label">Storage</div>
         <div class="value">${st.used_gb||0} / ${st.max_size_gb||32} GB</div></div>
       <div class="status-card"><div class="label">Detections</div>
         <div class="value">${det.alarms_triggered||0}</div></div>
       <div class="status-card"><div class="label">GPIO Alarm</div>
-        <div class="value" style="color:${gp.alarming?'#f44':'#0a7'}">${gp.alarming?'ACTIVE':'Idle'}</div></div>
+        <div class="value" style="color:${gp.alarming?'#f44':'#0a7'}">
+          ${gp.alarming?'ACTIVE':'Idle'}
+        </div></div>
     `;
     const box = document.getElementById('alarmBox');
     box.className = 'alarm-box ' + (gp.alarming ? 'active' : 'inactive');
@@ -316,7 +415,9 @@ function update() {
     pb.innerHTML = entries.map(([l,p],i)=>`
       <div class="prob-bar">
         <div class="label">${l}</div>
-        <div class="track"><div class="fill" style="width:${(p*100).toFixed(0)}%;background:${colors[i%colors.length]}"></div></div>
+        <div class="track"><div class="fill"
+          style="width:${(p*100).toFixed(0)}%;background:${colors[i%colors.length]}">
+        </div></div>
         <span style="margin-left:8px;font-size:0.8rem;width:40px">${(p*100).toFixed(0)}%</span>
       </div>
     `).join('');

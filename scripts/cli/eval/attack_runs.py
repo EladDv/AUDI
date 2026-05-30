@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torchaudio
 
-from audi.checkpoint import strip_compile_prefix, get_clip_seconds
+from audi.checkpoint import get_clip_seconds, strip_compile_prefix
 from audi.config import MelConfig, ModelConfig, OptimizerConfig
 from audi.hysteresis import apply_hysteresis
 from audi.training.detector import DroneDetector
@@ -56,6 +56,13 @@ def run(
 ) -> None:
     # --- argparse (manual, since evaluate.py dispatches via sys.argv) ---
     rest = sys.argv[1:] if len(sys.argv) > 1 else []
+    if any(arg in {"-h", "--help"} for arg in rest):
+        print(
+            "usage: audi-eval attack-runs [--all] "
+            "[--skip-postprocess] [--skip-calibrate]"
+        )
+        return
+
     all_flag = _all
     skip_pp = _skip_postprocess
     skip_cal = _skip_calibrate
@@ -76,7 +83,23 @@ def run(
     PRECISION_LEVELS = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99]
     _INFER_BATCH_SIZE = 16  # lower batch to avoid OOM on large models
 
-    FIELD_NAMES = ["model", "sweep", "precision", "sigma", "cov_pct", "first_pct", "bg"]
+    FIELD_NAMES = [
+        "model",
+        "sweep",
+        "precision",
+        "sigma",
+        "cov_pct",
+        "first_pct",
+        "bg",
+        "bg_alerts",
+    ]
+
+    def _count_alerts(dets: np.ndarray) -> int:
+        """Count contiguous alert runs (0→1 transitions)."""
+        if len(dets) == 0:
+            return 0
+        padded = np.pad(dets.astype(np.int8), (1, 0), constant_values=0)
+        return int(np.sum((padded[1:] == 1) & (padded[:-1] == 0)))
 
     # ── incremental CSV helpers ─────────────────────────────────────────
     def _load_csv() -> list[dict]:
@@ -148,13 +171,22 @@ def run(
                             break
                 if not exp_dir:
                     continue
+                if not sweep_dir:
+                    continue
                 epoch = 0
                 if "epoch=" in ckpt_path.stem:
                     try:
                         epoch = int(ckpt_path.stem.split("epoch=")[1].split("-")[0])
                     except Exception:
                         pass
-                raw.append({"path": str(ckpt_path), "exp": exp_dir, "sweep": sweep_dir, "epoch": epoch})
+                raw.append(
+                    {
+                        "path": str(ckpt_path),
+                        "exp": exp_dir,
+                        "sweep": sweep_dir,
+                        "epoch": epoch,
+                    }
+                )
         best = {}
         for c in sorted(raw, key=lambda c: c["epoch"], reverse=True):
             if c["sweep"] + "__" + c["exp"] not in best:
@@ -181,7 +213,11 @@ def run(
                 compile=False,
             )
         else:
-            model_cfg = ModelConfig(arch=model_hp.arch, pretrained=model_hp.pretrained, compile=False)
+            model_cfg = ModelConfig(
+                arch=model_hp.arch,
+                pretrained=model_hp.pretrained,
+                compile=False,
+            )
         mel_hp = hp.get("mel", {})
         if isinstance(mel_hp, dict):
             mel_cfg = MelConfig(
@@ -342,7 +378,8 @@ def run(
             pred_file = find_predictions_file(ckpt["path"])
             if pred_file is None:
                 print("✗ no eval_data — skipping")
-                _cleanup(model); model = None
+                _cleanup(model)
+                model = None
                 continue
 
             pred_data = torch.load(pred_file, map_location="cpu", weights_only=False)
@@ -394,13 +431,15 @@ def run(
                     first_pct = 100.0 * det_idx[0] / len(dets) if len(det_idx) > 0 else 100.0
                     segment_coverages.append(coverage)
                     segment_first_pct.append(first_pct)
-                bg_count = int(apply_hysteresis(bg_scores, sigma).sum())
+                bg_dets = apply_hysteresis(bg_scores, sigma)
+                bg_alerts = _count_alerts(bg_dets)
                 checkpoint_rows.append({
                     "model": label, "sweep": sweep,
                     "precision": f"P{int(pt * 100)}", "sigma": round(sigma, 4),
                     "cov_pct": round(np.mean(segment_coverages), 1),
                     "first_pct": round(np.median(segment_first_pct), 1),
-                    "bg": bg_count,
+                    "bg": int(bg_dets.sum()),
+                    "bg_alerts": bg_alerts,
                 })
 
             # Flush incrementally
@@ -410,7 +449,8 @@ def run(
                     f"✓ best={best_row['precision']} σ={best_row['sigma']:.3f} "
                     f"cov={best_row['cov_pct']:.0f}% "
                     f"1st={best_row['first_pct']:.0f}% "
-                    f"bg={best_row['bg']}/{len(bg_scores)}"
+                    f"bg={best_row['bg']}/{len(bg_scores)} "
+                    f"alerts={best_row.get('bg_alerts', '?')}"
                 )
                 # Append to all_rows and flush
                 all_rows.extend(checkpoint_rows)
@@ -441,11 +481,15 @@ def run(
     print(f"\n{'=' * 90}")
     print("TOP MODELS at PRECISION=0.90")
     print(f"{'=' * 90}")
-    print(f"{'#':>3} {'model':<45} {'σ':>7} {'cov%':>6} {'1st%':>6} {'bg':>5} {'sweep'}")
+    print(
+        f"{'#':>3} {'model':<45} {'σ':>7} {'cov%':>6} {'1st%':>6} "
+        f"{'bg':>5} {'alerts':>7} {'sweep'}"
+    )
     print(f"{'-' * 90}")
     for i, r in enumerate(p90[:15]):
         print(
             f"{i + 1:>3} {r['model']:<45} {float(r['sigma']):>7.4f} "
             f"{float(r['cov_pct']):>6.1f} {float(r['first_pct']):>6.1f} "
-            f"{int(r['bg']):>5} {r.get('sweep', '')}"
+            f"{int(r.get('bg', 0)):>5} "
+            f"{str(r.get('bg_alerts', '-') or '-'):>7} {r.get('sweep', '')}"
         )

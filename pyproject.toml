@@ -20,12 +20,15 @@ dependencies = [
     "litert-torch>=0.9.0",
     "matplotlib>=3.10.8",
     "numpy>=2",
+    "pandas>=2.3.3",
     "plotly>=6.7.0",
     "polars>=1.40.1",
     "ruff>=0.15.10",
     "scikit-learn>=1.8.0",
     "scipy>=1.15",
+    "silero-vad>=6.2.1",
     "soundfile>=0.13.0",
+    "ssqueezepy>=0.6.6",
     "streamlit>=1.57.0",
     "tensorboard>=2.20.0",
     "tensorflow>=2.21.0",
@@ -59,13 +62,20 @@ app = [
     "rpi-lgpio>=0.4,<1.0",
 ]
 
+[dependency-groups]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "ruff>=0.15.10",
+]
+
 [project.scripts]
-audi-train = "scripts.train:main"
-audi-eval = "scripts.evaluate:main"
-audi-data = "scripts.build_data:main"
-audi-infer = "scripts.inference:main"
-audi-ensemble = "scripts.eval_ensemble:main"
-audi-export-tflite = "scripts.export_tflite:main"
+audi-train = "scripts.cli.train:main"
+audi-eval = "scripts.cli.evaluate:main"
+audi-data = "scripts.cli.build_data:main"
+audi-export-tflite = "scripts.cli.export.tflite:main"
+audi-train-blue-red = "scripts.cli.train_blue_red:main"
+audi-export-blue-red-tflite = "scripts.cli.export.blue_red_tflite:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audi", "scripts"]
@@ -79,3 +89,6 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: expensive optional tests that are skipped by default unless enabled",
+]

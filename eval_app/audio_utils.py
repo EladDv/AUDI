@@ -13,7 +13,7 @@ from audi.checkpoint import get_clip_seconds
 
 _SR = 16000
 # Default 2.56 — overridden when a checkpoint is loaded
-_CLIP_S = 2.56
+_CLIP_S = 5.12
 _CLIP_SAMPLES = int(_SR * _CLIP_S)
 
 def set_clip_seconds(clip_s: float) -> None:
@@ -27,7 +27,12 @@ _ATTACK_DIR = _Path(__file__).resolve().parent.parent / "data" / "attack_runs"
 
 def load_audio(filepath: str, target_sr: int = _SR) -> tuple[np.ndarray, int]:
     """Load wav, resample if needed, return float32 mono array."""
-    wav, sr = torchaudio.load(filepath)
+    try:
+        wav, sr = torchaudio.load(filepath)
+    except Exception:
+        import soundfile as sf
+        wav_np, sr = sf.read(filepath)
+        wav = torch.as_tensor(wav_np.T, dtype=torch.float32)
     if wav.shape[0] > 1:
         wav = wav.mean(dim=0, keepdim=True)
     if sr != target_sr:

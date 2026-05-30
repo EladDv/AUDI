@@ -29,6 +29,60 @@ from audi.training.validation_plots import (
 )
 
 
+class PCEN(torch.nn.Module):
+    """Per-Channel Energy Normalization (PyTorch).
+
+    Smooths each mel bin independently via exponential moving average,
+    then applies AGC + noise floor. Matches librosa.pcen with
+    ``gain=1.0, bias=0.0, power=0.0`` (root compression only).
+
+    Args:
+        s: Smoothing coefficient (EMA alpha). Lower = slower adaptation.
+        alpha: AGC exponent. <1 compresses dynamic range.
+        delta: Noise floor bias.
+        r: Root compression exponent.
+        eps: Numerical stability.
+    """
+
+    def __init__(
+        self,
+        s: float = 0.025,
+        alpha: float = 0.98,
+        delta: float = 2.0,
+        r: float = 0.5,
+        eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.s = s
+        self.alpha = alpha
+        self.delta = delta
+        self.r = r
+        self.eps = eps
+
+    def forward(self, mel_power: torch.Tensor) -> torch.Tensor:
+        """Apply PCEN to mel power spectrogram.
+
+        Args:
+            mel_power: ``[B, n_mels, T]`` mel power (NOT dB).
+
+        Returns:
+            ``[B, n_mels, T]`` normalized.
+        """
+        # EMA smooth along time axis
+        s = self.s
+        smooth = mel_power[:, :, :1]  # seed with first frame
+        frames = [smooth]
+        for t in range(1, mel_power.shape[-1]):
+            smooth = (1 - s) * smooth + s * mel_power[:, :, t:t + 1]
+            frames.append(smooth)
+        M_smooth = torch.cat(frames, dim=-1)
+
+        # PCEN: (M / (eps + M_smooth)^alpha + delta)^r - delta^r
+        denom = (self.eps + M_smooth) ** self.alpha
+        gain = mel_power / torch.clamp(denom, min=self.eps)
+        return (gain + self.delta) ** self.r - self.delta ** self.r
+
+
 class DroneDetector(L.LightningModule):
     """Binary drone-audio detector with mel-spectrogram frontend.
 
@@ -50,6 +104,8 @@ class DroneDetector(L.LightningModule):
         dropout: Dropout probability before classifier head.
         bn_momentum: BatchNorm momentum (higher = less drift).
         clip_seconds: Training clip length in seconds (for eval to match).
+        freeze_backbone_epochs: Keep backbone weights and batchnorm statistics
+            frozen for this many initial epochs.
     """
 
     def __init__(
@@ -68,6 +124,7 @@ class DroneDetector(L.LightningModule):
         dropout: float = 0.0,
         bn_momentum: float = 0.1,
         clip_seconds: float = 2.56,
+        freeze_backbone_epochs: int = 0,
     ) -> None:
         super().__init__()
 
@@ -75,16 +132,53 @@ class DroneDetector(L.LightningModule):
         mel_cfg = mel or MelConfig()
         opt_cfg = optimizer or OptimizerConfig()
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["teacher"])
 
-        # ── Mel frontend ─────────────────────────────────────────
-        self._mel_transform = T.MelSpectrogram(
-            sample_rate=mel_cfg.sample_rate,
-            n_fft=mel_cfg.n_fft,
-            hop_length=mel_cfg.hop_length,
-            n_mels=mel_cfg.n_mels,
-        )
-        self._to_db = T.AmplitudeToDB()
+        # ── Frontend ───────────────────────────────────────────────
+        self._frontend_type = mel_cfg.frontend_type
+        self._use_pcen = mel_cfg.use_pcen
+        self._frontend_channels = mel_cfg.n_mels  # default for mel-only
+
+        if mel_cfg.frontend_type != "mel":
+            from audi.frontend import build_frontend
+            fe, fe_channels, pcen_mod = build_frontend(
+                mel_cfg.frontend_type,
+                sample_rate=mel_cfg.sample_rate,
+                hop_length=mel_cfg.hop_length,
+                n_mels=mel_cfg.n_mels,
+                n_fft=mel_cfg.n_fft,
+                use_pcen=mel_cfg.use_pcen,
+                cqt_bins=mel_cfg.cqt_bins,
+                cqt_bpo=mel_cfg.cqt_bpo,
+                cwt_scales=mel_cfg.cwt_scales,
+            )
+            self._multi_frontend = fe
+            self._frontend_channels = fe_channels
+            self._input_bn = torch.nn.BatchNorm2d(3)
+            self._pcen = None
+            self._to_db = None
+        else:
+            self._multi_frontend = None
+            self._input_bn = None
+            self._mel_transform = T.MelSpectrogram(
+                sample_rate=mel_cfg.sample_rate,
+                n_fft=mel_cfg.n_fft,
+                hop_length=mel_cfg.hop_length,
+                n_mels=mel_cfg.n_mels,
+            )
+            self._use_pcen = mel_cfg.use_pcen
+            if mel_cfg.use_pcen:
+                self._pcen = PCEN(
+                    s=mel_cfg.pcen_s,
+                    alpha=mel_cfg.pcen_alpha,
+                    delta=mel_cfg.pcen_delta,
+                    r=mel_cfg.pcen_r,
+                    eps=mel_cfg.pcen_eps,
+                )
+                self._to_db = None
+            else:
+                self._pcen = None
+                self._to_db = T.AmplitudeToDB()
 
         # Scalar mel normalization
         if mel_cfg.mean_db is not None:
@@ -131,6 +225,7 @@ class DroneDetector(L.LightningModule):
         self._loss_type = loss_type
         self._label_smoothing = float(label_smoothing)
         self._clip_seconds = float(clip_seconds)
+        self._freeze_backbone_epochs = max(0, int(freeze_backbone_epochs))
         self._per_bin_weights = bool(per_bin_weights)
         self._mixup_alpha = float(mixup_alpha)
         self._cutmix_alpha = float(cutmix_alpha)
@@ -162,20 +257,58 @@ class DroneDetector(L.LightningModule):
         self._val_snr: list[torch.Tensor] = []
         self._val_mix: list[torch.Tensor] = []
 
+    def _set_backbone_frozen(self, frozen: bool) -> None:
+        """Freeze feature extractor params while leaving classifier trainable."""
+        model = getattr(self.backbone, "_orig_mod", self.backbone)
+        for p in model.parameters():
+            p.requires_grad = not frozen
+        if frozen:
+            trainable_head_found = False
+            for attr in ("classifier", "fc", "head", "heads"):
+                head = getattr(model, attr, None)
+                if isinstance(head, torch.nn.Module):
+                    head.train()
+                    for p in head.parameters():
+                        p.requires_grad = True
+                    trainable_head_found = True
+            if not trainable_head_found:
+                last_linear: torch.nn.Linear | None = None
+                for module in model.modules():
+                    if isinstance(module, torch.nn.Linear):
+                        last_linear = module
+                if last_linear is not None:
+                    last_linear.train()
+                    for p in last_linear.parameters():
+                        p.requires_grad = True
+
+            feature_extractor = getattr(model, "backbone", model)
+            feature_extractor.eval()
+        else:
+            model.train(self.training)
+
+    def on_train_epoch_start(self) -> None:
+        """Apply scheduled backbone freezing at epoch boundaries."""
+        if self._freeze_backbone_epochs <= 0:
+            return
+        self._set_backbone_frozen(self.current_epoch < self._freeze_backbone_epochs)
+
     # ── Featurization ────────────────────────────────────────────
 
     def _to_mel(self, wav: torch.Tensor) -> torch.Tensor:
-        """Convert waveform to normalized 3-channel mel spectrogram.
+        """Convert waveform to normalized 3-channel spectrogram."""
+        if self._multi_frontend is not None:
+            feats = self._multi_frontend(wav)   # (B, C, T)
+            spec = feats.unsqueeze(1).expand(-1, 3, -1, -1)  # (B, 3, C, T)
+            spec = self._input_bn(spec)
+            return spec
 
-        Args:
-            wav: Waveform tensor of shape ``[B, T]``.
-
-        Returns:
-            Spectrogram tensor of shape ``[B, 3, n_mels, T_frames]``.
-        """
-        mel = self._to_db(self._mel_transform(wav))
-        if self._mel_mean is not None and self._mel_std is not None:
-            mel = (mel - self._mel_mean) / self._mel_std
+        mel = self._mel_transform(wav)
+        if self._use_pcen:
+            mel = self._pcen(mel)
+        else:
+            mel = self._to_db(mel)
+            if self._mel_mean is not None and self._mel_std is not None:
+                mel = (mel - self._mel_mean) / self._mel_std
         spec = mel.unsqueeze(1).expand(-1, 3, -1, -1)
         if (
             self._freq_mask is not None
@@ -288,6 +421,11 @@ class DroneDetector(L.LightningModule):
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """Training step with optional MixUp/CutMix."""
+        if (
+            self._freeze_backbone_epochs > 0
+            and self.current_epoch < self._freeze_backbone_epochs
+        ):
+            self._set_backbone_frozen(True)
         if len(batch) == 3:
             wav, label, bin_idx = batch
         else:
@@ -298,7 +436,12 @@ class DroneDetector(L.LightningModule):
         spec, label, bin_idx = self._apply_mixup_cutmix(spec, label, bin_idx)
         logits = self.backbone(spec).squeeze(1)
         loss = self._compute_loss(logits, label, bin_idx)
-        self.log("train_loss", loss, prog_bar=True)
+        self.log_dict(
+            {
+                "train_loss": loss,
+            },
+            prog_bar=True,
+        )
         return loss
 
     # ── Validation step ──────────────────────────────────────────
@@ -447,8 +590,9 @@ class DroneDetector(L.LightningModule):
 
     def configure_optimizers(self) -> Any:
         """Configure AdamW with optional cosine schedule + warmup."""
+        trainable_params = [p for p in self.parameters() if p.requires_grad]
         opt = torch.optim.AdamW(
-            self.parameters(), lr=self._lr, weight_decay=self._weight_decay
+            trainable_params, lr=self._lr, weight_decay=self._weight_decay
         )
         if self._schedule == "constant":
             return opt

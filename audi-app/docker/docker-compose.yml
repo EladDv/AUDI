@@ -19,13 +19,12 @@ services:
       dockerfile: docker/Dockerfile
     image: audi:latest
     container_name: audi
+    platform: ${AUDI_DOCKER_PLATFORM:-linux/arm64}
     restart: unless-stopped
     network_mode: host  # Simplifies Pi GPIO + ALSA access
     volumes:
-      # Persistent audio storage (up to 32GB)
-      - audio_data:/data/recordings
-      # ALSA config (optional)
-      - /etc/asound.conf:/etc/asound.conf:ro
+      # Persistent local audio storage (recordings + alerts)
+      - ../data:/app/data
     devices:
       - /dev/snd:/dev/snd     # ALSA audio devices
     environment:
@@ -38,7 +37,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  audio_data:
-    driver: local

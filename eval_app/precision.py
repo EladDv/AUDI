@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -12,44 +13,28 @@ _PROJECT = Path(__file__).resolve().parents[1]
 
 
 @st.cache_data
-def load_precision_thresholds() -> dict[str, dict[str, float]]:
-    """Return {arch: {precision_level: sigmoid_threshold}} from Phase 3 CSV."""
-    import csv
-    import math
-    csv_path = _PROJECT / "checkpoints_v2" / "phase3_full_results_20260507_070404.csv"
+def load_precision_thresholds() -> dict[str, dict[str, dict]]:
+    """Return {sweep/model: {P_level: {sigma, cov, bg}}} from attack eval CSV."""
+    csv_path = _PROJECT / "checkpoints" / "attack_run_precision_eval.csv"
     if not csv_path.exists():
         return {}
-    thresholds = {}
+    thresholds: dict[str, dict[str, dict]] = {}
     with open(csv_path) as f:
         for row in csv.DictReader(f):
-            if row.get("status") != "ok":
-                continue
-            arch = row.get("model_arch", "")
-            pretrained = row.get("pretrained", "")
-            tag = row.get("ablation_tag", "")
-            if tag or pretrained != "True":
-                continue
-            if arch not in thresholds:
-                p_levels = {}
-                for pt in [80, 90, 95, 99]:
-                    th = row.get(f"val/threshold_at_precision_{pt}")
-                    tpr = row.get(f"val/tpr_at_precision_{pt}")
-                    if th and tpr:
-                        try:
-                            p_levels[f"p{pt}"] = {
-                                "sigmoid_threshold": 1.0 / (1.0 + math.exp(-float(th))),
-                                "tpr": float(tpr),
-                            }
-                        except (ValueError, OverflowError):
-                            pass
-                if p_levels:
-                    thresholds[arch] = p_levels
+            ref = f"{row.get('sweep','')}/{row['model']}"
+            if ref not in thresholds:
+                thresholds[ref] = {}
+            thresholds[ref][row["precision"]] = {
+                "sigma": float(row["sigma"]),
+                "cov_pct": float(row["cov_pct"]),
+                "first_pct": float(row["first_pct"]),
+                "bg": int(row["bg"]),
+                "bg_alerts": row.get("bg_alerts", "-") or "-",
+            }
     return thresholds
 
 
-def compute_precision_recall_curve(
-    pred_file: str,
-) -> dict:
+def compute_precision_recall_curve(pred_file: str) -> dict:
     """Compute precision/recall vs threshold from predictions file.
 
     Returns dict with thresholds, precisions, recalls, sig_thresholds,
@@ -73,9 +58,9 @@ def compute_precision_recall_curve(
     recalls = np.array(recalls)
 
     sig_thresholds = 1.0 / (1.0 + np.exp(-thresholds))
-    p90_idx = np.argmin(np.abs(precisions - 0.90))
-    p95_idx = np.argmin(np.abs(precisions - 0.95))
-    p99_idx = np.argmin(np.abs(precisions - 0.99))
+    p90_idx = int(np.argmin(np.abs(precisions - 0.90)))
+    p95_idx = int(np.argmin(np.abs(precisions - 0.95)))
+    p99_idx = int(np.argmin(np.abs(precisions - 0.99)))
 
     return {
         "thresholds": thresholds,

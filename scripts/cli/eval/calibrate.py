@@ -20,7 +20,7 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
     args = ap.parse_args()
     if args.run_dir is None:
         print(
-            "Usage: uv run python scripts/evaluate.py calibrate <run_dir> [--logit <value>]"
+            "Usage: uv run audi-eval calibrate <run_dir> [--logit <value>]"
         )
         sys.exit(1)
 
@@ -114,10 +114,3 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
             prob = 1 / (1 + np.exp(-logit))
             best, _ = estimator.classify(float(logit))
             print(f"{logit:>7.2f}  {prob:>6.3f}  {best}")
-    
-    
-    # ====================================================================
-    # fpr-thresholds — 10% FPR thresholds per-bin and cumulative
-    # ====================================================================
-    
-    

@@ -1,6 +1,5 @@
 """System health stats for web UI."""
 import os
-import time
 
 
 def _cpu_temp() -> float:

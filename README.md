@@ -27,7 +27,7 @@ A deep learning pipeline for real-time acoustic drone detection. Built on PyTorc
 uv sync
 
 # Train a single model
-uv run python scripts/train.py \
+uv run audi-train \
     --noise-path data/my_background \
     --drone-path data/my_drone \
     --arch resnet18 \
@@ -37,18 +37,18 @@ uv run python scripts/train.py \
     --patience 0 \
     --output-dir checkpoints/my_run
 
-# Run an architecture sweep
-uv run python sweeps/sweep.py sweeps/configs/arch.yaml
+# Run the current hard-negative sweep
+uv run python sweeps/sweep.py sweeps/configs/field_hard_negative_current.yaml
 
 # Postprocess + calibrate a sweep
-uv run python scripts/evaluate.py postprocess checkpoints/<sweep_dir>
-uv run python scripts/evaluate.py calibrate checkpoints/<sweep_dir>/<run_name>
+uv run audi-eval postprocess checkpoints/<sweep_dir>
+uv run audi-eval calibrate checkpoints/<sweep_dir>/<run_name>
 
 # Run attack evaluation on all checkpoints
-uv run python scripts/evaluate.py --noise-path data/my_background --drone-path data/my_drone attack-runs
+uv run audi-eval --noise-path data/my_background --drone-path data/my_drone attack-runs
 
 # Launch the eval dashboard
-uv run streamlit run scripts/eval_app.py --server.port 8501
+uv run audi-eval field
 
 # Run tests
 uv run pytest tests/ -v
@@ -95,12 +95,11 @@ src/audi/
     validation_plots.py    # TensorBoard visualization
 
 scripts/
-  train.py                 # Training CLI (detect/classify subcommands)
-  evaluate.py              # Postprocess, calibrate, attack-runs, thresholds, ensemble
-  inference.py             # Inference on audio files
-  build_data.py            # Dataset building utilities
-  export_tflite.py         # TFLite model export for edge deployment
-  eval_ensemble.py         # Ensemble prediction combination
+  cli/                     # Console entry points and maintained command modules
+    train.py               # audi-train detect/classify dispatcher
+    evaluate.py            # audi-eval postprocess, calibrate, attack-runs, field
+    build_data.py          # audi-data dataset building dispatcher
+    export/                # audi-export-tflite and blue/red export
 
 sweeps/
   sweep.py                 # YAML-driven sweep runner
@@ -117,10 +116,10 @@ audi-app/                  # Edge deployment (Raspberry Pi Docker service)
 
 ### Single Model Training
 
-Train a detection model with `train.py detect` (the default subcommand):
+Train a detection model with `audi-train detect` (the default subcommand):
 
 ```bash
-uv run python scripts/train.py \
+uv run audi-train \
     --noise-path data/HF_dataset_v2_background \
     --drone-path data/HF_dataset_v2_drone \
     --arch convnext_small \
@@ -171,7 +170,7 @@ Each sweep automatically:
 1. Runs configs **sequentially** with crash resilience — Ctrl+C kills only the current run, saves partial results
 2. Extracts validation metrics from TensorBoard event files after each run
 3. Writes incremental `results.csv` with TPR@P90, AUC, and ECE per config
-4. Runs `evaluate.py postprocess` + `evaluate.py calibrate` on completion
+4. Runs `audi-eval postprocess` + `audi-eval calibrate` on completion
 5. Creates a timestamped directory under `checkpoints/`
 
 The sweep runner also supports `--no-postprocess` and `--no-calibrate` flags to skip post-sweep evaluation.
@@ -180,22 +179,22 @@ The sweep runner also supports `--no-postprocess` and `--no-calibrate` flags to 
 
 | Config | What it tests |
 |--------|--------------|
-| `arch.yaml` | All architectures (cnn8/10/14, resnet18/34/50, convnext tiny/small/base, efficientnet b1/b3/b5, edgenet variants, mobilenet, mobilevit) |
-| `regularization.yaml` | Weight decay, dropout, cosine schedule variants |
-| `multinoise.yaml` | Multi-noise background (secondary noise dataset) across architectures |
-| `multires.yaml` | Clip lengths: 1.28s, 2.56s, 5.12s |
-| `finetune.yaml` | Finetuning from pretrained checkpoints |
-| `classify.yaml` | DADS classification pretraining sweeps |
-| `production.yaml` | Production sweep combining best hyperparams |
-| `bce_wd_sweep.yaml` | BCE loss with varying weight decay |
-| `bce_wd_warmup.yaml` | Weight decay × warmup combinations |
-| `bce_push.yaml` | BCE training with extended epochs |
-| `convnext_bfr.yaml` | ConvNeXt with focal loss, specaug, long clips |
-| `convnext_lr.yaml` | ConvNeXt learning rate sweep |
-| `convnext_reg.yaml` | ConvNeXt regularization (focal, mixup, dropout, weight decay) |
-| `prod_focal.yaml` | Production focal loss sweep |
-| `prod_focal_long.yaml` | Production focal loss with 30 epochs |
-| `prod_escape.yaml` | Production escape (longer training, no early stopping) |
+| `field_hard_negative_current.yaml` | Current V4 field hard-negative finetune across MN/DyMN sizes |
+| `blue_red_classify.yaml` | Combined detector plus blue/red classification workflow |
+| `convnext_current.yaml` | Restored compact ConvNeXt Small/Base baseline sweep |
+| `classify_mn.yaml` | MN classification pretraining for detector finetuning |
+| `efficientat*.yaml` | EfficientAT/MN size and noise coverage |
+| `mn_sweep_v6.yaml` | Current MN architecture research sweep on v6 backgrounds |
+| `dsp_sweep.yaml`, `dsp_v3v4_sweep.yaml`, `dsp_validation.yaml` | DSP feature research |
+| `mel_sweep.yaml` | Mel geometry and PCEN research |
+| `frontend_sweep.yaml`, `frontend_sweep_mn.yaml` | CQT/CWT frontend research |
+
+Blue/red training and export are maintained commands:
+
+```bash
+uv run audi-train-blue-red --help
+uv run audi-export-blue-red-tflite --help
+```
 
 ---
 
@@ -268,7 +267,7 @@ The sweep runner also supports `--no-postprocess` and `--no-calibrate` flags to 
 Pretrain a backbone on raw drone-vs-non-drone audio (no background mixing):
 
 ```bash
-uv run python scripts/train.py classify \
+uv run audi-train classify \
     --drone-path data/my_drone_classify \
     --model-arch resnet18 \
     --lr 1e-4 \
@@ -325,19 +324,19 @@ The attack-run evaluator scores every trained checkpoint on real drone flyover r
 
 ```bash
 # Full auto: postprocess, calibrate, and evaluate all new checkpoints
-uv run python scripts/evaluate.py \
+uv run audi-eval \
     --noise-path data/HF_dataset_v2_background \
     --drone-path data/HF_dataset_v2_drone \
     attack-runs
 
 # Skip auto-postprocess/calibrate (already done)
-uv run python scripts/evaluate.py \
+uv run audi-eval \
     --noise-path data/HF_dataset_v2_background \
     --drone-path data/HF_dataset_v2_drone \
     attack-runs --skip-postprocess --skip-calibrate
 
 # Force re-evaluation of everything
-uv run python scripts/evaluate.py \
+uv run audi-eval \
     --noise-path data/HF_dataset_v2_background \
     --drone-path data/HF_dataset_v2_drone \
     attack-runs --all
@@ -374,27 +373,24 @@ TOP MODELS at PRECISION=0.90
   ...
 ```
 
-### Other Evaluation Commands
+### Field Evaluation
 
 ```bash
-# Per-bin thresholds at 10% FPR
-uv run python scripts/evaluate.py fpr-thresholds
+# Regenerate field alert TP/FP/FN table from attack-run thresholds
+uv run audi-eval field
 
-# Thresholds at multiple FPR targets (1%–50%)
-uv run python scripts/evaluate.py fpr-multi
-
-# Operational metrics: detections vs FPs at deployment thresholds
-uv run python scripts/evaluate.py operational
-
-# Ensemble two models by averaging logits
-uv run python scripts/evaluate.py ensemble
+# Limit to the current hard-negative sweep
+uv run audi-eval field \
+    --sweep field_hard_negative_finetune_v4_sizes_20260530_130027
 ```
+
+Results are saved to `checkpoints/field_eval_all.csv`.
 
 ---
 
 ## Data Pipeline
 
-The `build_data.py` script handles all data preprocessing. Run subcommands to build datasets from scratch:
+The `audi-data` command handles all data preprocessing. Run subcommands to build datasets from scratch:
 
 ### Dataset Building Subcommands
 
@@ -404,7 +400,7 @@ The `build_data.py` script handles all data preprocessing. Run subcommands to bu
 Build an expanded background noise dataset from 8 public audio sources (ESC-50, UrbanSound8K, TUT, MUSAN, DEMAND, etc.):
 
 ```bash
-uv run python scripts/build_data.py urban-esc \
+uv run audi-data urban-esc \
     --output-path data/hf_background_urban \
     --chunk-min 5 --chunk-max 30 \
     --max-clips-per-category 0
@@ -424,7 +420,7 @@ Convert raw audio directories into train/val/test HF dataset splits:
 
 ```bash
 # Build filtered dataset
-uv run python scripts/build_data.py filtered-hf \
+uv run audi-data filtered-hf \
     --input-dir data/dataset_v2 \
     --output-path data/HF_dataset_v2 \
     --chunk-sec 30
@@ -436,7 +432,7 @@ uv run python scripts/build_data.py filtered-hf \
 | `--output-path` | (required) | Output HF dataset path |
 | `--target-sr` | 16000 | Target sample rate |
 | `--label` | (auto) | Label for classification (`drone` / `noise`) |
-| `--separate-background` | `True` | Split BG subfolder into `_background` dataset |
+| `--split-background` | `True` | Split BG subfolder into `_background` dataset |
 | `--chunk-sec` | 30 | Chunk audio into fixed-length segments |
 | `--val-ratio` | 0.1 | Validation split ratio |
 | `--test-ratio` | 0.1 | Test split ratio |
@@ -446,7 +442,7 @@ uv run python scripts/build_data.py filtered-hf \
 Chunk audio files and render mel spectrograms for visualization:
 
 ```bash
-uv run python scripts/build_data.py chunk-spectro \
+uv run audi-data chunk-spectro \
     --dataset-v2-dir data/dataset_v2 \
     --output-dir artifacts/chunked_15s \
     --chunk-sec 15 --n-mels 128
@@ -457,7 +453,7 @@ uv run python scripts/build_data.py chunk-spectro \
 Build ERB-band hearability templates from background noise. These templates characterize the noise floor in each frequency band and are used for SNR-based training bin assignment.
 
 ```bash
-uv run python scripts/build_data.py hearability-templates \
+uv run audi-data hearability-templates \
     --dataset-path data/HF_dataset_v2_background \
     --output-path artifacts/hearability_templates \
     --erb-bands 28 --template-percentile 50
@@ -475,7 +471,7 @@ uv run python scripts/build_data.py hearability-templates \
 Download and preprocess the geronimobasso drone audio detection dataset from HuggingFace for classification pretraining:
 
 ```bash
-uv run python scripts/build_data.py pretrain-drones
+uv run audi-data pretrain-drones
 ```
 
 #### `dads-classify`
@@ -483,7 +479,7 @@ uv run python scripts/build_data.py pretrain-drones
 Preprocess the DADS (Drone Audio Detection Signals) dataset for classification pretraining:
 
 ```bash
-uv run python scripts/build_data.py dads-classify
+uv run audi-data dads-classify
 ```
 
 #### `analyze-snr`
@@ -491,7 +487,7 @@ uv run python scripts/build_data.py dads-classify
 Analyze per-band signal-to-noise ratio between drone and noise recordings:
 
 ```bash
-uv run python scripts/build_data.py analyze-snr \
+uv run audi-data analyze-snr \
     --drone-path data/drone \
     --noise-path data/noise \
     --output-dir artifacts/snr_analysis
@@ -509,7 +505,16 @@ uv run python scripts/build_data.py analyze-snr \
 Compute mel-spectrogram mean and standard deviation for model normalization:
 
 ```bash
-uv run python scripts/build_data.py mel-stats
+uv run audi-data mel-stats
+```
+
+#### Current Field Utilities
+
+```bash
+uv run audi-data field-bg
+uv run audi-data merge-audioset-fp
+uv run audi-data blue-red-recordings
+uv run audi-data mine-field-hard-negatives --checkpoint checkpoints/my_run/best.ckpt
 ```
 
 ### Data Directory Layout
@@ -539,9 +544,9 @@ After training, the standard evaluation pipeline:
 Generates predictions and ROC curves for every checkpoint in a sweep:
 
 ```bash
-uv run python scripts/evaluate.py postprocess checkpoints/<sweep_dir>
+uv run audi-eval postprocess checkpoints/<sweep_dir>
 # Or for a specific run:
-uv run python scripts/evaluate.py postprocess checkpoints/<sweep_dir> <run_name>
+uv run audi-eval postprocess checkpoints/<sweep_dir> <run_name>
 ```
 
 Saves to `eval_data/` inside each run directory:
@@ -553,18 +558,18 @@ Saves to `eval_data/` inside each run directory:
 Fits a Bayesian SNR-bin estimator on positive-sample logits:
 
 ```bash
-uv run python scripts/evaluate.py calibrate checkpoints/<sweep_dir>/<run_name>
+uv run audi-eval calibrate checkpoints/<sweep_dir>/<run_name>
 ```
 
 Saves `eval_data/hearability_calib.npz` — per-bin Gaussian means, stds, priors, and decision boundaries.
 
-### 3. Eval Dashboard
+### 3. Field Table
 
 ```bash
-uv run streamlit run scripts/eval_app.py --server.port 8501
+uv run audi-eval field
 ```
 
-Interactive web UI for exploring model predictions, per-bin ROC curves, and attack-run diagnosis.
+Writes the compact field alert table to `checkpoints/field_eval_all.csv`.
 
 ---
 
@@ -585,7 +590,7 @@ See `audi-app/README.md` for full setup instructions.
 
 ```bash
 # Export a trained model to TFLite for edge deployment
-uv run python scripts/export_tflite.py \
+uv run audi-export-tflite \
     --ckpt checkpoints/my_run/best.ckpt \
     --noise-path data/my_background \
     --drone-path data/my_drone

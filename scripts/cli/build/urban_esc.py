@@ -8,9 +8,9 @@ per-category HF DatasetDicts (each with train/val/test splits).
 Categories: people, environment, wind, cars, urban, mechanical, indoor, bioacoustic
 
 Usage:
-  uv run python scripts/cli/build/urban_esc.py
-  uv run python scripts/cli/build/urban_esc.py --datasets esc50 urbansound ambient
-  HF_TOKEN=... uv run python scripts/cli/build/urban_esc.py
+  uv run audi-data urban-esc
+  uv run audi-data urban-esc --datasets esc50 urbansound ambient
+  HF_TOKEN=... uv run audi-data urban-esc
 """
 
 from __future__ import annotations
@@ -23,10 +23,8 @@ def run() -> None:
     import random
     import shutil
     import tempfile
-    import traceback
     import warnings
     from pathlib import Path
-    from typing import Any
 
     import numpy as np
     import requests
@@ -367,7 +365,10 @@ def run() -> None:
         for i in range(len(ds)):
             row = ds[i]
             ps_key = str(row.get("primarySound", "")).strip().lower().replace(" ", "_")
-            cat = AMBIENT_MAP.get(ps_key, AMBIENT_MAP.get(row.get("primarySound", "").strip(), "environment"))
+            cat = AMBIENT_MAP.get(
+                ps_key,
+                AMBIENT_MAP.get(row.get("primarySound", "").strip(), "environment"),
+            )
             audio_file = row.get("audioFile", "")
             if audio_file in file_map:
                 dl_url = f"https://huggingface.co/datasets/maxF6YsK/ambient_sounds/resolve/main/{file_map[audio_file]}"
@@ -510,8 +511,16 @@ def run() -> None:
     ap.add_argument("--test-ratio", type=float, default=0.15)
     ap.add_argument("--val-ratio", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--max-clips-per-category", type=int, default=0,
-        help="Max clips per category after merging. 0 = per-category weighted limits (wind/environment 1000, cars/urban 900, mechanical 800, people/indoor 700).")
+    ap.add_argument(
+        "--max-clips-per-category",
+        type=int,
+        default=0,
+        help=(
+            "Max clips per category after merging. 0 = weighted limits "
+            "(wind/environment 1000, cars/urban 900, mechanical 800, "
+            "people/indoor 700)."
+        ),
+    )
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument(
         "--datasets", type=str, nargs="*", default=None,

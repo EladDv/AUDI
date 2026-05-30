@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import warnings
+from dataclasses import replace
 from pathlib import Path
 
 import lightning as L
@@ -13,6 +14,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 
+from audi.checkpoint import strip_compile_prefix
 from audi.config import (
     AugmentationConfig,
     MelConfig,
@@ -34,8 +36,28 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--noise-path", type=Path, required=True)
     ap.add_argument("--drone-path", type=Path, required=True)
     ap.add_argument(
+        "--hard-noise",
+        type=Path,
+        default=None,
+        help="Hard-negative background dataset sampled as base noise",
+    )
+    ap.add_argument(
+        "--hard-noise-prob",
+        type=float,
+        default=0.0,
+        help="Probability of sampling base noise from --hard-noise",
+    )
+    ap.add_argument(
         "--noise2", type=Path, default=None, help="Secondary noise dataset"
     )
+    ap.add_argument("--noise2-prob", type=float, default=0.25,
+                    help="Probability of mixing noise2 into a sample (0-1)")
+    ap.add_argument("--noise2-multi-prob", type=float, default=0.5,
+                    help="When noise2 is used, probability of mixing multiple noise2 clips")
+    ap.add_argument("--noise2-count", type=int, default=3,
+                    help="Max number of extra noise2 layers")
+    ap.add_argument("--noise2-max-attenuation", type=float, default=-40.0,
+                    help="Minimum dB of noise2 relative to base noise (more negative = quieter)")
     ap.add_argument(
         "--snr-bin",
         action="append",
@@ -62,17 +84,106 @@ def run(argv: list[str] | None = None) -> int:
         "--mel-preset",
         type=str,
         default="default",
-        choices=["default", "vit_224"],
-        help="Mel spectrogram preset. vit_224: n_mels=224, hop_length=179 "
-        "(224×224, divisible by 7, required by FasterViT)",
+        choices=["default", "vit_224", "custom"],
+        help="Mel spectrogram preset. vit_224: n_mels=224, hop_length=179. "
+        "custom: use --n-mels/--n-fft/--hop-length below.",
+    )
+    ap.add_argument(
+        "--n-mels",
+        type=int,
+        default=None,
+        help="Override n_mels (requires --mel-preset custom)",
+    )
+    ap.add_argument(
+        "--n-fft",
+        type=int,
+        default=None,
+        help="Override n_fft (requires --mel-preset custom)",
+    )
+    ap.add_argument(
+        "--hop-length",
+        type=int,
+        default=None,
+        help="Override hop_length (requires --mel-preset custom)",
+    )
+    ap.add_argument(
+        "--use-pcen",
+        action="store_true",
+        help="Research mode: use PCEN instead of dB conversion + scalar normalization",
+    )
+    ap.add_argument("--pcen-s", type=float, default=0.025)
+    ap.add_argument("--pcen-alpha", type=float, default=0.98)
+    ap.add_argument("--pcen-delta", type=float, default=2.0)
+    ap.add_argument("--pcen-r", type=float, default=0.5)
+    ap.add_argument(
+        "--frontend-type",
+        default="mel",
+        help=(
+            "Research mode frontend: mel, cqt, cwt, or comma-separated "
+            "like mel,cqt"
+        ),
+    )
+    ap.add_argument("--cqt-bins", type=int, default=84)
+    ap.add_argument("--cqt-bpo", type=int, default=12)
+    ap.add_argument("--cwt-scales", type=int, default=64)
+    ap.add_argument(
+        "--use-dsp-features",
+        action="store_true",
+        help="Research mode: use DSP feature channels in mel input (DSPDroneDetector)",
+    )
+    ap.add_argument(
+        "--use-dsp-branch",
+        action="store_true",
+        help=(
+            "Research mode: use DSP features as separate branch fused with backbone embedding "
+            "(MNBranchDSPDetector)"
+        ),
+    )
+    ap.add_argument(
+        "--dsp-feature-sets",
+        type=str,
+        default="v3,v4,v5",
+        help="Comma-separated DSP feature sets: v3,v4,v5",
+    )
+    ap.add_argument(
+        "--dsp-hop-length",
+        type=int,
+        default=256,
+        help="Hop length for DSP mel transform",
+    )
+    ap.add_argument(
+        "--dsp-projector-hidden",
+        type=int,
+        default=64,
+        help="Hidden dim for DSP→mel projector MLP (DSPDroneDetector)",
+    )
+    ap.add_argument(
+        "--dsp-emb-dim",
+        type=int,
+        default=256,
+        help="DSP branch encoder output dim (MNBranchDSPDetector)",
+    )
+    ap.add_argument(
+        "--fusion-hidden",
+        type=int,
+        default=512,
+        help="Fusion MLP hidden dim (MNBranchDSPDetector)",
     )
     # ── Optimizer ──
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument(
-        "--lr-schedule", choices=["constant", "cosine", "linear"], default="constant"
+        "--lr-schedule",
+        choices=["constant", "cosine", "linear"],
+        default="constant",
     )
     ap.add_argument("--warmup-epochs", type=int, default=0)
+    ap.add_argument(
+        "--freeze-backbone-epochs",
+        type=int,
+        default=0,
+        help="Freeze backbone params and BN stats for the first N epochs",
+    )
     # ── Training ──
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=32)
@@ -95,8 +206,21 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--augment", action="store_true", help="Enable audio augmentations"
     )
-    ap.add_argument("--doppler-prob", type=float, default=0.2,
-                    help="Probability of Doppler shift on drone (0-1)")
+    ap.add_argument(
+        "--doppler-prob",
+        type=float,
+        default=0.2,
+        help="Probability of Doppler shift on drone (0-1)",
+    )
+    ap.add_argument("--pitch-prob", type=float, default=0.25)
+    ap.add_argument("--stretch-prob", type=float, default=0.25)
+    ap.add_argument("--reverb-prob", type=float, default=0.25)
+    ap.add_argument("--eq-prob", type=float, default=0.25)
+    ap.add_argument("--noise-inject-prob", type=float, default=0.25)
+    ap.add_argument("--noise-inject-db", type=float, default=-40.0)
+    ap.add_argument("--time-mask-prob", type=float, default=0.25)
+    ap.add_argument("--lowpass-prob", type=float, default=0.25)
+    ap.add_argument("--atmospheric-prob", type=float, default=0.25)
     # ── Finetuning ──
     ap.add_argument("--finetune-from", type=Path, default=None)
     ap.add_argument("--pretrained-checkpoint", type=Path, default=None)
@@ -122,14 +246,32 @@ def run(argv: list[str] | None = None) -> int:
         warmup_epochs=args.warmup_epochs,
         max_epochs=args.epochs,
     )
-    aug_cfg = AugmentationConfig(
-        enable=True, doppler_prob=args.doppler_prob
-    ) if args.augment else None
+    aug_cfg = None
+    if args.augment:
+        aug_cfg = AugmentationConfig(
+            enable=True,
+            doppler_prob=args.doppler_prob,
+            pitch_prob=args.pitch_prob,
+            stretch_prob=args.stretch_prob,
+            reverb_prob=args.reverb_prob,
+            eq_prob=args.eq_prob,
+            noise_inject_prob=args.noise_inject_prob,
+            noise_inject_db=args.noise_inject_db,
+            time_mask_prob=args.time_mask_prob,
+            lowpass_prob=args.lowpass_prob,
+            atmospheric_prob=args.atmospheric_prob,
+        )
 
     mix_cfg = MixConfig(
         noise_path=args.noise_path,
         drone_path=args.drone_path,
+        hard_noise_path=args.hard_noise,
+        hard_noise_prob=args.hard_noise_prob,
         noise2_path=args.noise2,
+        noise2_prob=args.noise2_prob,
+        noise2_multi_noise_prob=args.noise2_multi_prob,
+        noise2_count=args.noise2_count,
+        noise2_max_attenuation_db=args.noise2_max_attenuation,
         snr_bins=snr_bins,
         target_length_samples=clip_samples,
         positive_probability=args.positive_probability,
@@ -145,6 +287,8 @@ def run(argv: list[str] | None = None) -> int:
     val_mix_cfg = MixConfig(
         noise_path=args.noise_path,
         drone_path=args.drone_path,
+        hard_noise_path=args.hard_noise,
+        hard_noise_prob=args.hard_noise_prob,
         snr_bins=snr_bins,
         target_length_samples=clip_samples,
         positive_probability=0.5,
@@ -168,12 +312,71 @@ def run(argv: list[str] | None = None) -> int:
     bin_names = [b.name for b in snr_bins]
     if args.mel_preset == "vit_224" or args.arch.startswith("fastervit"):
         mel_cfg = MelConfig.vit_224()
+    elif args.mel_preset == "custom":
+        kwargs = {}
+        if args.n_mels is not None:
+            kwargs["n_mels"] = args.n_mels
+        if args.n_fft is not None:
+            kwargs["n_fft"] = args.n_fft
+        if args.hop_length is not None:
+            kwargs["hop_length"] = args.hop_length
+        mel_cfg = MelConfig(**kwargs)
     else:
         mel_cfg = MelConfig()
-    detector = DroneDetector(
+    # PCEN override (works with any preset)
+    if args.use_pcen:
+        mel_cfg = replace(
+            mel_cfg,
+            use_pcen=True,
+            pcen_s=args.pcen_s,
+            pcen_alpha=args.pcen_alpha,
+            pcen_delta=args.pcen_delta,
+            pcen_r=args.pcen_r,
+        )
+    # Frontend override
+    if args.frontend_type != "mel":
+        mel_cfg = replace(
+            mel_cfg,
+            frontend_type=args.frontend_type,
+            cqt_bins=args.cqt_bins,
+            cqt_bpo=args.cqt_bpo,
+            cwt_scales=args.cwt_scales,
+        )
+    detector_cls = DroneDetector
+    detector_kwargs: dict = {}
+    if args.use_dsp_features and args.use_dsp_branch:
+        raise SystemExit(
+            "--use-dsp-features and --use-dsp-branch are mutually exclusive. "
+            "Choose one DSP integration strategy."
+        )
+    if args.use_dsp_features:
+        from audi.training.dsp_detector import DSPDroneDetector
+
+        detector_cls = DSPDroneDetector
+        detector_kwargs.update(
+            dsp_feature_sets=[
+                s.strip() for s in args.dsp_feature_sets.split(",") if s.strip()
+            ],
+            dsp_hop_length=args.dsp_hop_length,
+            dsp_projector_hidden=args.dsp_projector_hidden,
+        )
+    elif args.use_dsp_branch:
+        from audi.training.mn_dsp_branch_detector import MNBranchDSPDetector
+
+        detector_cls = MNBranchDSPDetector
+        detector_kwargs.update(
+            dsp_feature_sets=[
+                s.strip() for s in args.dsp_feature_sets.split(",") if s.strip()
+            ],
+            dsp_hop_length=args.dsp_hop_length,
+            dsp_emb_dim=args.dsp_emb_dim,
+            fusion_hidden=args.fusion_hidden,
+        )
+    detector = detector_cls(
         model=model_cfg,
         mel=mel_cfg,
         optimizer=opt_cfg,
+        **detector_kwargs,
         bin_names=bin_names,
         loss_type=args.loss,
         label_smoothing=args.label_smoothing,
@@ -184,6 +387,7 @@ def run(argv: list[str] | None = None) -> int:
         dropout=args.dropout,
         bn_momentum=args.bn_momentum,
         clip_seconds=args.clip_seconds,
+        freeze_backbone_epochs=args.freeze_backbone_epochs,
     )
 
     if args.pretrained_checkpoint is not None:
@@ -197,7 +401,9 @@ def run(argv: list[str] | None = None) -> int:
         ckpt = torch.load(
             str(args.finetune_from), map_location="cpu", weights_only=False
         )
-        detector.load_state_dict(ckpt["state_dict"], strict=False)
+        detector.load_state_dict(
+            strip_compile_prefix(ckpt["state_dict"]), strict=False
+        )
 
     # ── Trainer ──
     callbacks = [

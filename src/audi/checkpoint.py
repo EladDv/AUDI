@@ -53,6 +53,11 @@ def _resolve_mel_config(hp: dict) -> MelConfig:
             hop_length=mel_hp.get("hop_length", hp.get("hop_length", 160)),
             mean_db=mel_hp.get("mean_db", hp.get("mel_mean")),
             std_db=mel_hp.get("std_db", hp.get("mel_std")),
+            frontend_type=mel_hp.get("frontend_type", hp.get("frontend_type", "mel")),
+            cqt_bins=mel_hp.get("cqt_bins", hp.get("cqt_bins", 84)),
+            cqt_bpo=mel_hp.get("cqt_bpo", hp.get("cqt_bpo", 12)),
+            cwt_scales=mel_hp.get("cwt_scales", hp.get("cwt_scales", 64)),
+            use_pcen=mel_hp.get("use_pcen", hp.get("use_pcen", False)),
         )
     # Config object stored in checkpoint
     return MelConfig(
@@ -61,6 +66,11 @@ def _resolve_mel_config(hp: dict) -> MelConfig:
         hop_length=getattr(mel_hp, "hop_length", hp.get("hop_length", 160)),
         mean_db=getattr(mel_hp, "mean_db", hp.get("mel_mean")),
         std_db=getattr(mel_hp, "std_db", hp.get("mel_std")),
+        frontend_type=getattr(mel_hp, "frontend_type", hp.get("frontend_type", "mel")),
+        cqt_bins=getattr(mel_hp, "cqt_bins", hp.get("cqt_bins", 84)),
+        cqt_bpo=getattr(mel_hp, "cqt_bpo", hp.get("cqt_bpo", 12)),
+        cwt_scales=getattr(mel_hp, "cwt_scales", hp.get("cwt_scales", 64)),
+        use_pcen=getattr(mel_hp, "use_pcen", hp.get("use_pcen", False)),
     )
 
 

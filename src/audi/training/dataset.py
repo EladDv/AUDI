@@ -14,8 +14,8 @@ from typing import Any
 
 import numpy as np
 import torch
-from datasets import load_from_disk
 from datasets import Dataset as HFDataset
+from datasets import load_from_disk
 from torch.utils.data import Dataset
 
 from audi.augment import (
@@ -113,6 +113,8 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
         return_bin: bool = False,
         return_components: bool = False,
         aug: AugmentationConfig | None = None,
+        hard_noise_ds: Any = None,
+        hard_noise_prob: float = 0.0,
         # Multi-noise training
         noise2_ds: Any = None,
         noise2_prob: float = 0.25,
@@ -126,6 +128,8 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
             raise ValueError("snr_bins must not be empty")
         self.noise_ds = noise_ds
         self.drone_ds = drone_ds
+        self.hard_noise_ds = hard_noise_ds
+        self.hard_noise_prob = float(hard_noise_prob)
         self.noise2_ds = noise2_ds
         self.noise2_count = max(1, min(noise2_count, 5))
         self.noise2_max_att = float(noise2_max_attenuation_db)
@@ -195,20 +199,16 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
 
         If ``noise2_ds`` is set, layers 0–3 additional noise sources on top.
         """
-        idx = random.randint(0, len(self.noise_ds) - 1)
-        bg = np.asarray(self.noise_ds[idx]["audio"]["array"], dtype=np.float32)
-        bg = _fit_length(bg, L)
-        if self.highpass_hz > 0.0:
-            bg = highpass(
-                bg, cutoff_hz=self.highpass_hz, sample_rate=self.sample_rate
-            )
-        bg = np.resize(bg, L).astype(np.float32)
-        r = _rms(bg)
-        if r > 1e-8:
-            bg = bg / r
+        base_ds = self.noise_ds
+        if (
+            self.hard_noise_ds is not None
+            and random.random() < self.hard_noise_prob
+        ):
+            base_ds = self.hard_noise_ds
+        bg = self._load_raw_segment(base_ds, L)
 
         # ── Multi-noise: layer extra backgrounds ────────────────
-        if self.noise2_ds is not None:
+        if self.noise2_ds is not None and random.random() < self.noise2_prob:
             n_extra = self._pick_extra_count()
             for _ in range(n_extra):
                 extra = self._load_raw_segment(self.noise2_ds, L)
@@ -423,6 +423,10 @@ def make_dataset(
     if cfg.noise2_path:
         noise2_ds = _load_split(cfg.noise2_path, split)
 
+    hard_noise_ds = None
+    if cfg.hard_noise_path:
+        hard_noise_ds = _load_split(cfg.hard_noise_path, split)
+
     return MixedDataset(
         noise_ds=noise_ds,
         drone_ds=drone_ds,
@@ -435,7 +439,11 @@ def make_dataset(
         return_bin=return_bin,
         return_components=return_components,
         aug=cfg.aug,
+        hard_noise_ds=hard_noise_ds,
+        hard_noise_prob=cfg.hard_noise_prob,
         noise2_ds=noise2_ds,
+        noise2_prob=cfg.noise2_prob,
+        noise2_multi_noise_prob=cfg.noise2_multi_noise_prob,
         noise2_count=cfg.noise2_count,
         noise2_max_attenuation_db=cfg.noise2_max_attenuation_db,
     )

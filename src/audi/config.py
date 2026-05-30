@@ -49,6 +49,18 @@ class MelConfig:
     hop_length: int = 160
     mean_db: float | None = 10.430418
     std_db: float | None = 5.288271
+    # PCEN (disabled by default — when True, replaces dB conversion + scalar norm)
+    use_pcen: bool = False
+    pcen_s: float = 0.025
+    pcen_alpha: float = 0.98
+    pcen_delta: float = 2.0
+    pcen_r: float = 0.5
+    pcen_eps: float = 1e-6
+    # Multi-frontend: "mel" (default), or "cqt", "cwt", "mel,cqt", "mel,cwt", "mel,cqt,cwt"
+    frontend_type: str = "mel"
+    cqt_bins: int = 84
+    cqt_bpo: int = 12
+    cwt_scales: int = 64
 
     @classmethod
     def vit_224(cls) -> MelConfig:
@@ -151,6 +163,9 @@ class MixConfig:
     Attributes:
         noise_path: Path to background noise HF dataset.
         drone_path: Path to drone audio HF dataset.
+        hard_noise_path: Optional hard-negative background dataset.
+        hard_noise_prob: Probability of drawing the base background from
+            ``hard_noise_path`` instead of ``noise_path``.
         noise2_path: Optional secondary background dataset for multi-noise mixing.
         noise2_count: Maximum number of extra noise layers (1-5).
         noise2_max_attenuation_db: Minimum level of extra noise layers relative to base.
@@ -170,7 +185,11 @@ class MixConfig:
     positive_probability: float = 0.5
     highpass_hz: float = 125.0
     sample_rate: int = 16000
+    hard_noise_path: Path | None = None
+    hard_noise_prob: float = 0.0
     noise2_path: Path | None = None
+    noise2_prob: float = 0.25
+    noise2_multi_noise_prob: float = 0.5
     noise2_count: int = 2
     noise2_max_attenuation_db: float = -50.0
     dataset_length: int | None = None
@@ -180,6 +199,10 @@ class MixConfig:
         if not 0.0 <= self.positive_probability <= 1.0:
             raise ValueError(
                 f"positive_probability must be in [0, 1], got {self.positive_probability}"
+            )
+        if not 0.0 <= self.hard_noise_prob <= 1.0:
+            raise ValueError(
+                f"hard_noise_prob must be in [0, 1], got {self.hard_noise_prob}"
             )
 
 
