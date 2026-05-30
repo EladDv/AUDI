@@ -578,11 +578,19 @@ class DetectionEngine:
         ring_buffer,
         on_alarm: Callable[[dict], None] | None = None,
     ):
-        det_cfg = dict(config.get("detection", {}))
-        self.threshold_profile = det_cfg.get("active_threshold_profile")
-        profiles = det_cfg.get("threshold_profiles", {})
-        if self.threshold_profile and self.threshold_profile in profiles:
-            profile_cfg = profiles[self.threshold_profile] or {}
+        self._base_detection_config = dict(config.get("detection", {}))
+        self.threshold_profile = self._base_detection_config.get(
+            "active_threshold_profile"
+        )
+        self.threshold_profiles = self._base_detection_config.get(
+            "threshold_profiles", {}
+        )
+        det_cfg = dict(self._base_detection_config)
+        if (
+            self.threshold_profile
+            and self.threshold_profile in self.threshold_profiles
+        ):
+            profile_cfg = self.threshold_profiles[self.threshold_profile] or {}
             det_cfg.update(profile_cfg)
 
         # Model config
@@ -684,7 +692,7 @@ class DetectionEngine:
         self._blue_count = 0
         self._last_alarm_time = 0.0
         self.alarm_cooldown_s = det_cfg.get("alarm_cooldown_s", 0)
-        self._last_timing: dict = {}  # {preprocess_ms, inference_ms, total_ms, n_windows}
+        self._last_timing: dict = {}
 
         # Rolling timing stats (last 128 cycles)
         self._timing_window: list[float] = []
@@ -695,6 +703,62 @@ class DetectionEngine:
         self._score_history_max = 200
         self._color_trace: list[dict] = []
         self._color_trace_max = 200
+
+    def _profiled_detection_config(self, profile: str | None) -> dict:
+        det_cfg = dict(self._base_detection_config)
+        if profile:
+            profile_cfg = self.threshold_profiles.get(profile)
+            if profile_cfg is None:
+                raise ValueError(f"Unknown threshold profile: {profile}")
+            det_cfg.update(profile_cfg or {})
+        return det_cfg
+
+    def set_threshold_profile(self, profile: str) -> dict:
+        """Apply a configured threshold profile without restarting the app."""
+        det_cfg = self._profiled_detection_config(profile)
+        self.threshold_profile = profile
+        self.threshold_yes = det_cfg.get("confidence_threshold_high", 0.70)
+        self.threshold_blue = det_cfg.get(
+            "confidence_threshold_low", self.threshold_yes
+        )
+        self.inference_interval = det_cfg.get(
+            "inference_interval", self.inference_interval
+        )
+        self.blue_red_threshold = det_cfg.get("blue_red_threshold", 0.5)
+        self.blue_red_min_detection_score = det_cfg.get(
+            "blue_red_min_detection_score", self.threshold_blue
+        )
+        self.red_alert_threshold = det_cfg.get(
+            "red_alert_threshold", self.blue_red_threshold
+        )
+        self.blue_alert_threshold = det_cfg.get("blue_alert_threshold", 0.5)
+        self.blue_to_red_threshold = det_cfg.get("blue_to_red_threshold", 0.45)
+        self.red_to_blue_threshold = det_cfg.get("red_to_blue_threshold", 0.35)
+        self.alert_on_red = det_cfg.get("alert_on_red", True)
+        self.alert_on_blue = det_cfg.get("alert_on_blue", True)
+        self.alert_on_unknown = det_cfg.get("alert_on_unknown", True)
+        self.save_color_trace = det_cfg.get("save_color_trace", True)
+        self.alarm_cooldown_s = det_cfg.get(
+            "alarm_cooldown_s", self.alarm_cooldown_s
+        )
+        self.hysteresis = HysteresisState(
+            threshold=self.threshold_yes,
+            window=det_cfg.get("hysteresis_window", 5),
+            ratio=det_cfg.get("hysteresis_ratio", 0.6),
+            margin=det_cfg.get("hysteresis_margin", 0.05),
+        )
+        self.color_hysteresis = ColorHysteresisState(
+            enter_red_threshold=self.blue_to_red_threshold,
+            exit_red_threshold=self.red_to_blue_threshold,
+            window=det_cfg.get(
+                "color_hysteresis_window", det_cfg.get("hysteresis_window", 5)
+            ),
+            ratio=det_cfg.get(
+                "color_hysteresis_ratio", det_cfg.get("hysteresis_ratio", 0.6)
+            ),
+        )
+        logger.info("Threshold profile switched to %s", profile)
+        return self.status
 
     @property
     def recorder(self):
@@ -1039,6 +1103,7 @@ class DetectionEngine:
             "stride": self.stride,
             "model_sample_rate": self.model_sample_rate,
             "threshold_profile": self.threshold_profile,
+            "threshold_profiles": sorted(self.threshold_profiles.keys()),
             "blue_red_model_loaded": bool(
                 self.has_blue_red_model
                 or last.get("blue_red_enabled", False)

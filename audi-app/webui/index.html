@@ -108,6 +108,14 @@
       color: #eee;
     }
 
+    body:not(.dark-mode) .value.white {
+      color: #111827;
+    }
+
+    body.dark-mode .value.white {
+      color: #f5f7fa;
+    }
+
     .value.blue {
       color: #08f;
     }
@@ -624,6 +632,24 @@
       display: flex;
     }
 
+    .profile-select {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid #ccd6df;
+      border-radius: 8px;
+      background: #fff;
+      color: #111827;
+      font-size: 1rem;
+      font-weight: 800;
+      padding: 4px 8px;
+    }
+
+    body.dark-mode .profile-select {
+      background: #151522;
+      border-color: #333;
+      color: #f5f7fa;
+    }
+
     .advanced-panel label {
       min-height: 36px;
       display: flex;
@@ -851,6 +877,30 @@
       return (level || 'NO').toLowerCase().replaceAll('_', '-');
     }
 
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function profileControl(det) {
+      const profiles = det.threshold_profiles || [];
+      const active = det.threshold_profile || 'manual';
+      if (!profiles.length) {
+        return `<div class="value white">${escapeHtml(active)}</div>`;
+      }
+      return `<select class="profile-select" id="profileSelect" onchange="setThresholdProfile(this.value)">
+        ${profiles.map(profile => `
+          <option value="${escapeHtml(profile)}" ${profile === active ? 'selected' : ''}>
+            ${escapeHtml(profile)}
+          </option>
+        `).join('')}
+      </select>`;
+    }
+
     function update() {
       // --- Status poll ---
       fetch('/api/status').then(r => r.json()).then(d => {
@@ -899,7 +949,7 @@
       </div>
       <div class="status-card">
         <div class="label">Profile</div>
-        <div class="value white">${det.threshold_profile || 'manual'}</div>
+        ${profileControl(det)}
       </div>
     `;
 
@@ -1055,6 +1105,14 @@
     function clearAlarm()     { apiPost('/api/clear_alarm');     }
     function pauseRecording() { apiPost('/api/pause_recording'); }
     function testAlert()      { apiPost('/api/test_alert');      }
+
+    function setThresholdProfile(profile) {
+      fetch('/api/threshold_profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile })
+      }).then(() => update()).catch(() => {});
+    }
 
     function labelAlert(alertId, label) {
       fetch('/api/label_alert', {

@@ -108,6 +108,21 @@ class WebUI:
             result = self.detector.force_inference()
             return jsonify({"result": result})
 
+        @app.route("/api/threshold_profile", methods=["POST"])
+        def api_threshold_profile():
+            """Switch the active detector threshold profile."""
+            if not self.detector:
+                return jsonify({"error": "Detector not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            profile = str(payload.get("profile", ""))
+            if not profile:
+                return jsonify({"error": "profile is required"}), 400
+            try:
+                status = self.detector.set_threshold_profile(profile)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            return jsonify({"status": "profile_updated", "detector": status})
+
         @app.route("/api/clear_alarm", methods=["POST"])
         def api_clear_alarm():
             """Manually clear GPIO alarm from UI."""

@@ -144,6 +144,42 @@ class TestAudiApp:
         assert engine.blue_to_red_threshold == 0.42
         assert engine.red_to_blue_threshold == 0.30
 
+    def test_detection_threshold_profile_can_switch_at_runtime(self, tmp_path):
+        detector = _import_from_audi_app("detector")
+
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "active_threshold_profile": "balanced",
+                    "threshold_profiles": {
+                        "balanced": {
+                            "confidence_threshold_high": 0.80,
+                            "blue_to_red_threshold": 0.45,
+                            "red_to_blue_threshold": 0.35,
+                        },
+                        "sensitive": {
+                            "confidence_threshold_high": 0.72,
+                            "blue_to_red_threshold": 0.42,
+                            "red_to_blue_threshold": 0.30,
+                        },
+                    },
+                },
+                "audio": {"sample_rate": 16000},
+                "storage": {"alerts_dir": str(tmp_path)},
+            },
+            ring_buffer=None,
+        )
+
+        status = engine.set_threshold_profile("sensitive")
+
+        assert status["threshold_profile"] == "sensitive"
+        assert status["threshold_profiles"] == ["balanced", "sensitive"]
+        assert engine.threshold_yes == 0.72
+        assert engine.blue_to_red_threshold == 0.42
+        assert engine.red_to_blue_threshold == 0.30
+
     def test_load_config_reads_external_threshold_profiles(self, tmp_path):
         main = _import_from_audi_app("main")
         profiles = tmp_path / "thresholds.yaml"
@@ -186,3 +222,22 @@ detection:
         assert updated is not None
         assert updated["operator_label"] == "drone_red"
         assert history.read_recent(1)[0]["operator_label"] == "drone_red"
+
+    def test_webui_threshold_profile_endpoint(self):
+        webui_server = _import_from_audi_app("webui_server")
+
+        class Detector:
+            def set_threshold_profile(self, profile):
+                assert profile == "quiet"
+                return {"threshold_profile": profile}
+
+        webui = webui_server.WebUI({"web": {"port": 0}})
+        webui.detector = Detector()
+
+        response = webui._app.test_client().post(
+            "/api/threshold_profile",
+            json={"profile": "quiet"},
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["detector"]["threshold_profile"] == "quiet"
