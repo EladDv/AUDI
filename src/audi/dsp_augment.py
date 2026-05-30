@@ -12,8 +12,7 @@ from __future__ import annotations
 import random
 
 import numpy as np
-from scipy.signal import butter, sosfilt, resample
-
+from scipy.signal import resample
 
 # ═══════════════════════════════════════════════════════════════
 # Rotor-physics audio modifications
