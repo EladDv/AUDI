@@ -17,6 +17,8 @@ import logging.handlers
 import signal
 import sys
 import time
+from importlib import import_module
+from importlib.util import find_spec
 from pathlib import Path
 
 # Ensure src is importable
@@ -478,24 +480,19 @@ def main():
         except FileNotFoundError:
             logger.warning("  flac: NOT FOUND (install flac)")
         try:
-            import RPi.GPIO
-
+            import_module("RPi.GPIO")
             logger.info("  RPi.GPIO: available")
         except (ImportError, RuntimeError) as exc:
-            logger.warning(
-                "  RPi.GPIO: not usable on this host (%s)", exc
-            )
+            logger.warning("  RPi.GPIO: not usable on this host (%s)", exc)
         try:
             from ai_edge_litert.interpreter import Interpreter  # noqa: F401
 
             logger.info("  ai_edge_litert: available")
         except ImportError:
             logger.warning("  ai_edge_litert: not installed (using mock)")
-        try:
-            import flask
-
+        if find_spec("flask") is not None:
             logger.info("  flask: available")
-        except ImportError:
+        else:
             logger.warning("  flask: NOT FOUND")
         logger.info("Storage: %s", config["storage"]["data_dir"])
         Path(config["storage"]["data_dir"]).mkdir(parents=True, exist_ok=True)

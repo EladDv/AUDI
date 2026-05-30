@@ -62,6 +62,13 @@ app = [
     "rpi-lgpio>=0.4,<1.0",
 ]
 
+[dependency-groups]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "ruff>=0.15.10",
+]
+
 [project.scripts]
 audi-train = "scripts.train:main"
 audi-eval = "scripts.evaluate:main"

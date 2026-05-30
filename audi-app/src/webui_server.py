@@ -391,13 +391,17 @@ function update() {
     const gp = d.gpio || {};
     g.innerHTML = `
       <div class="status-card"><div class="label">Recording</div>
-        <div class="value" style="color:${rec.running?'#0a7':'#c33'}">${rec.running?'Active':'Stopped'}</div></div>
+        <div class="value" style="color:${rec.running?'#0a7':'#c33'}">
+          ${rec.running?'Active':'Stopped'}
+        </div></div>
       <div class="status-card"><div class="label">Storage</div>
         <div class="value">${st.used_gb||0} / ${st.max_size_gb||32} GB</div></div>
       <div class="status-card"><div class="label">Detections</div>
         <div class="value">${det.alarms_triggered||0}</div></div>
       <div class="status-card"><div class="label">GPIO Alarm</div>
-        <div class="value" style="color:${gp.alarming?'#f44':'#0a7'}">${gp.alarming?'ACTIVE':'Idle'}</div></div>
+        <div class="value" style="color:${gp.alarming?'#f44':'#0a7'}">
+          ${gp.alarming?'ACTIVE':'Idle'}
+        </div></div>
     `;
     const box = document.getElementById('alarmBox');
     box.className = 'alarm-box ' + (gp.alarming ? 'active' : 'inactive');
@@ -411,7 +415,9 @@ function update() {
     pb.innerHTML = entries.map(([l,p],i)=>`
       <div class="prob-bar">
         <div class="label">${l}</div>
-        <div class="track"><div class="fill" style="width:${(p*100).toFixed(0)}%;background:${colors[i%colors.length]}"></div></div>
+        <div class="track"><div class="fill"
+          style="width:${(p*100).toFixed(0)}%;background:${colors[i%colors.length]}">
+        </div></div>
         <span style="margin-left:8px;font-size:0.8rem;width:40px">${(p*100).toFixed(0)}%</span>
       </div>
     `).join('');

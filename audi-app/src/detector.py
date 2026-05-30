@@ -1127,7 +1127,8 @@ class DetectionEngine:
             should_trigger_alarm = self._should_trigger_alarm(alert_level)
             if in_cooldown:
                 logger.info(
-                    "%s suppressed (cooldown: %.1fs remaining): conf=%.2f (raw=%.2f, color=%s, red=%s)",
+                    "%s suppressed (cooldown: %.1fs remaining): "
+                    "conf=%.2f (raw=%.2f, color=%s, red=%s)",
                     alert_level,
                     self.alarm_cooldown_s - (now - self._last_alarm_time),
                     self.hysteresis.confidence,

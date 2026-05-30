@@ -285,7 +285,12 @@ class GPIOController:
                 self._gpio.output(pin, value)
                 logger.debug("GPIO pin %d → %s", pin, "HIGH" if state else "LOW")
             except Exception as e:
-                logger.error("GPIO write FAILED pin %d → %s: %s", pin, "HIGH" if state else "LOW", e)
+                logger.error(
+                    "GPIO write FAILED pin %d → %s: %s",
+                    pin,
+                    "HIGH" if state else "LOW",
+                    e,
+                )
         else:
             logger.debug(
                 "GPIO mock write pin %d → %s",
