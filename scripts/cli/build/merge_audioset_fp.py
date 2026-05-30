@@ -5,7 +5,7 @@ Produces: data/hf_dataset_sharded_expanded_merged/
          = sharded_expanded + audioset_fp (category-mapped, feature-harmonized)
 
 Usage:
-    uv run python scripts/merge_audioset_fp.py [--overwrite]
+    uv run audi-data merge-audioset-fp [--overwrite]
 """
 
 import argparse

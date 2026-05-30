@@ -294,10 +294,10 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
     if SWEEP_DIR is None:
         print("ERROR: No sweep directory provided.")
         print(
-            "Usage: uv run python scripts/evaluate.py postprocess <sweep_dir> [run_name]"
+            "Usage: uv run audi-eval postprocess <sweep_dir> [run_name]"
         )
         print(
-            "Example: uv run python scripts/evaluate.py postprocess "
+            "Example: uv run audi-eval postprocess "
             "checkpoints_v2/sweep12_20260506_200208"
         )
         sys.exit(1)

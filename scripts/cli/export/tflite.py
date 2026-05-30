@@ -2,11 +2,11 @@
 """Export model to TFLite (fp32 + int8) via litert-torch, evaluate on validation.
 
 Usage:
-    uv run python scripts/export_tflite.py \
-        --ckpt checkpoints/multinoise_20260510_223154/07_convnext_small_spec/checkpoints/epoch=22-step=5750.ckpt \
+    uv run audi-export-tflite \
+        --ckpt checkpoints/my_run/checkpoints/best.ckpt \
         --noise-path data/HF_dataset_v2_background \
         --drone-path data/HF_dataset_v2_drone \
-        --output-dir artifacts/tflite/07_convnext_small_spec
+        --output-dir artifacts/tflite/my_run
 """
 
 from __future__ import annotations
@@ -270,13 +270,17 @@ def main() -> int:
     print(f"\n  {'':<15} {'AUC':>7} {'AP':>7} {'TPR@P90':>9}")
     print(f"  {'PyTorch':<15} {auc_pt:>7.4f} {ap_pt:>7.4f} {tpr_p90_pt:>9.4f}")
     print(
-        f"  {'TFLite fp32':<15} {m_fp32['auc']:>7.4f} {m_fp32['ap']:>7.4f} {m_fp32['tpr_at_p90']:>9.4f}"
+        f"  {'TFLite fp32':<15} {m_fp32['auc']:>7.4f} "
+        f"{m_fp32['ap']:>7.4f} {m_fp32['tpr_at_p90']:>9.4f}"
     )
     print(
-        f"  {'TFLite int8':<15} {m_int8['auc']:>7.4f} {m_int8['ap']:>7.4f} {m_int8['tpr_at_p90']:>9.4f}"
+        f"  {'TFLite int8':<15} {m_int8['auc']:>7.4f} "
+        f"{m_int8['ap']:>7.4f} {m_int8['tpr_at_p90']:>9.4f}"
     )
     print(
-        f"  {'int8 vs PT':<15} {m_int8['auc'] - auc_pt:>+7.4f} {m_int8['ap'] - ap_pt:>+7.4f} {m_int8['tpr_at_p90'] - tpr_p90_pt:>+9.4f}"
+        f"  {'int8 vs PT':<15} {m_int8['auc'] - auc_pt:>+7.4f} "
+        f"{m_int8['ap'] - ap_pt:>+7.4f} "
+        f"{m_int8['tpr_at_p90'] - tpr_p90_pt:>+9.4f}"
     )
 
     return 0

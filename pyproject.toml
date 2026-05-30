@@ -70,14 +70,12 @@ dev = [
 ]
 
 [project.scripts]
-audi-train = "scripts.train:main"
-audi-eval = "scripts.evaluate:main"
-audi-data = "scripts.build_data:main"
-audi-infer = "scripts.inference:main"
-audi-ensemble = "scripts.eval_ensemble:main"
-audi-export-tflite = "scripts.export_tflite:main"
-audi-train-blue-red = "scripts.train_blue_red:main"
-audi-export-blue-red-tflite = "scripts.export_blue_red_tflite:main"
+audi-train = "scripts.cli.train:main"
+audi-eval = "scripts.cli.evaluate:main"
+audi-data = "scripts.cli.build_data:main"
+audi-export-tflite = "scripts.cli.export.tflite:main"
+audi-train-blue-red = "scripts.cli.train_blue_red:main"
+audi-export-blue-red-tflite = "scripts.cli.export.blue_red_tflite:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audi", "scripts"]

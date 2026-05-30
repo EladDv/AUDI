@@ -5,7 +5,7 @@ hop_length) and projects features to the backbone mel dimension. When T_dsp ≠ 
 linear interpolation aligns the time axes.
 
 Usage:
-    python scripts/train.py --arch convnext_small --use-dsp-features
+    uv run audi-train --arch convnext_small --use-dsp-features
 """
 
 from __future__ import annotations

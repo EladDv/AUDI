@@ -20,7 +20,7 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
     args = ap.parse_args()
     if args.run_dir is None:
         print(
-            "Usage: uv run python scripts/evaluate.py calibrate <run_dir> [--logit <value>]"
+            "Usage: uv run audi-eval calibrate <run_dir> [--logit <value>]"
         )
         sys.exit(1)
 

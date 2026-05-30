@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from scripts.export_blue_red_tflite import (
+from scripts.cli.export.blue_red_tflite import (
     CombinedDetectorBlueRed,
     _dynamic_conv_export_forward,
 )

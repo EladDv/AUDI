@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import os
 import random
 import shutil
 from pathlib import Path
@@ -103,7 +102,10 @@ def main():
     for wf in wav_files:
         info = sf.info(str(wf))
         total_dur += info.duration
-        n_windows = max(0, int((info.duration - args.clip_seconds) / args.stride_seconds) + 1)
+        n_windows = max(
+            0,
+            int((info.duration - args.clip_seconds) / args.stride_seconds) + 1,
+        )
         if n_windows > 0:
             file_windows[str(wf)] = n_windows
 
@@ -112,7 +114,10 @@ def main():
     n_train = total_windows - n_val
 
     print(f"Total source audio: {total_dur / 60:.1f} min")
-    print(f"Total windows: {total_windows} ({args.clip_seconds}s each, stride={args.stride_seconds}s)")
+    print(
+        f"Total windows: {total_windows} "
+        f"({args.clip_seconds}s each, stride={args.stride_seconds}s)"
+    )
     print(f"Train: {n_train} ({n_train * args.clip_seconds / 3600:.1f} hours)")
     print(f"Val:   {n_val} ({n_val * args.clip_seconds / 3600:.1f} hours)")
 
@@ -217,7 +222,8 @@ def main():
     print(f"Done! {len(ds_dict['train'])} train + {len(ds_dict['validation'])} val clips")
     print(
         f"Total: {len(ds_dict['train']) + len(ds_dict['validation'])} clips "
-        f"({(len(ds_dict['train']) + len(ds_dict['validation'])) * args.clip_seconds / 3600:.1f} hours)"
+        f"({(len(ds_dict['train']) + len(ds_dict['validation'])) * args.clip_seconds / 3600:.1f} "
+        "hours)"
     )
 
 

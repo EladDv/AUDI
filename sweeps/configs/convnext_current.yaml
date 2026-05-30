@@ -1,0 +1,22 @@
+name: convnext_current
+noise_path: data/HF_dataset_v2_background
+drone_path: data/HF_dataset_v2_drone
+description: >
+  Maintained ConvNeXt baseline sweep. Restores ConvNeXt as a first-class
+  training option without resurrecting stale BCE/ConvNeXt checkpoint bulk.
+base_flags: >-
+  --arch convnext_small --clip-seconds 5.12 --lr 1e-4 --epochs 25
+  --patience 0 --augment --loss bce --weight-decay 0.03
+configs:
+  - name: "01_small_current"
+    flags: ""
+    note: Current ConvNeXt Small baseline for attack-coverage comparison.
+  - name: "02_small_mixup"
+    flags: --mixup-alpha 0.2
+    note: ConvNeXt Small with MixUp regularization.
+  - name: "03_small_focal_smooth"
+    flags: --loss focal --label-smoothing 0.1
+    note: Compact version of the old focal/smoothing ConvNeXt experiment.
+  - name: "04_base_reference"
+    flags: --arch convnext_base --batch-size 16 --loss focal --label-smoothing 0.1
+    note: Larger ConvNeXt reference kept explicit because it needs more VRAM.

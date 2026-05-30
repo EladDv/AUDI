@@ -2,7 +2,6 @@
 """Evaluation CLI for AUDI.
 
 Usage:
-    uv run python scripts/evaluate.py [global flags] <subcommand> [args]
     uv run audi-eval [global flags] <subcommand> [args]
 
 Subcommands:
@@ -36,7 +35,7 @@ def main() -> int:
     noise_path, drone_path, rest = parse_global_dataset_args(sys.argv[1:])
     if not rest or rest[0] not in _SUBCMDS:
         print(
-            "Usage: uv run python scripts/evaluate.py "
+            "Usage: uv run audi-eval "
             "[--noise-path <path>] [--drone-path <path>] <subcommand> [args]"
         )
         print(f"Subcommands: {', '.join(_SUBCMDS)}")

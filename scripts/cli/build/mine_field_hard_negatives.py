@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Mine model false positives from raw field recordings.
 
+Usage:
+  uv run audi-data mine-field-hard-negatives --checkpoint <path>
+
 Default input is limited to ``data/field_recordings_20260514/recordings``.
 The script writes:
   - WAV clips under ``<output>/clips``

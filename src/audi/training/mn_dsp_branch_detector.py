@@ -15,7 +15,7 @@ representations, and a separate branch processes them more effectively than
 channel injection.
 
 Usage:
-    python scripts/train.py --arch mn10_as --use-dsp-branch --dsp-feature-sets v3,v4,v5
+    uv run audi-train --arch mn10_as --use-dsp-branch --dsp-feature-sets v3,v4,v5
 """
 
 from __future__ import annotations

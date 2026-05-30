@@ -44,7 +44,7 @@ class CombinedDetectorBlueRed(nn.Module):
 
 
 def _load_blue_red_model(ckpt_path: Path) -> nn.Module:
-    from scripts.train_blue_red import BlueRedDetector
+    from scripts.cli.train_blue_red import BlueRedDetector
 
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     state = ckpt.get("state_dict", {})
