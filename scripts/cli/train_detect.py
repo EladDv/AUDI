@@ -224,6 +224,30 @@ def run(argv: list[str] | None = None) -> int:
     # ── Finetuning ──
     ap.add_argument("--finetune-from", type=Path, default=None)
     ap.add_argument("--pretrained-checkpoint", type=Path, default=None)
+    ap.add_argument(
+        "--distill-from",
+        type=Path,
+        default=None,
+        help="Teacher detector checkpoint used for logit distillation",
+    )
+    ap.add_argument(
+        "--distill-arch",
+        type=str,
+        default="dymn10_as",
+        help="Teacher architecture for --distill-from",
+    )
+    ap.add_argument(
+        "--distill-alpha",
+        type=float,
+        default=0.5,
+        help="Blend weight for teacher loss: 0=hard labels, 1=teacher only",
+    )
+    ap.add_argument(
+        "--distill-temperature",
+        type=float,
+        default=2.0,
+        help="Temperature for binary logit distillation",
+    )
     args = ap.parse_args(argv)
 
     L.seed_everything(args.seed)
@@ -372,6 +396,28 @@ def run(argv: list[str] | None = None) -> int:
             dsp_emb_dim=args.dsp_emb_dim,
             fusion_hidden=args.fusion_hidden,
         )
+    distill_teacher = None
+    if args.distill_from is not None:
+        teacher_cfg = ModelConfig(
+            arch=args.distill_arch,
+            pretrained=False,
+            compile=False,
+        )
+        teacher_detector = DroneDetector(
+            model=teacher_cfg,
+            mel=mel_cfg,
+            optimizer=opt_cfg,
+            bin_names=bin_names,
+            clip_seconds=args.clip_seconds,
+        )
+        teacher_ckpt = torch.load(
+            str(args.distill_from), map_location="cpu", weights_only=False
+        )
+        teacher_detector.load_state_dict(
+            strip_compile_prefix(teacher_ckpt["state_dict"]), strict=False
+        )
+        distill_teacher = teacher_detector.backbone
+
     detector = detector_cls(
         model=model_cfg,
         mel=mel_cfg,
@@ -388,6 +434,9 @@ def run(argv: list[str] | None = None) -> int:
         bn_momentum=args.bn_momentum,
         clip_seconds=args.clip_seconds,
         freeze_backbone_epochs=args.freeze_backbone_epochs,
+        distill_teacher=distill_teacher,
+        distill_alpha=args.distill_alpha if distill_teacher is not None else 0.0,
+        distill_temperature=args.distill_temperature,
     )
 
     if args.pretrained_checkpoint is not None:

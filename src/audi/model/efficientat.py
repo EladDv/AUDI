@@ -21,6 +21,8 @@ from torch import nn
 
 # From the README "Pre-Trained Models" table (AudioSet checkpoints only)
 MN_AS_MODELS: tuple[str, ...] = (
+    "mn01_as",
+    "mn02_as",
     "mn04_as",
     "mn05_as",
     "mn10_as",
@@ -45,18 +47,38 @@ DYMN_AS_MODELS: tuple[str, ...] = (
     "dymn20_as",
 )
 
-# All EfficientAT pre-trained model names usable via --arch
-EFFICIENTAT_MODELS: tuple[str, ...] = MN_AS_MODELS + DYMN_AS_MODELS
+MN_SCRATCH_MODELS: tuple[str, ...] = (
+    "mn06",
+    "mn08",
+)
+
+DYMN_SCRATCH_MODELS: tuple[str, ...] = (
+    "dymn05",
+    "dymn06",
+    "dymn08_rt",
+)
+
+# EfficientAT MobileNet-family model names usable via --arch
+EFFICIENTAT_MODELS: tuple[str, ...] = (
+    MN_AS_MODELS + DYMN_AS_MODELS + MN_SCRATCH_MODELS + DYMN_SCRATCH_MODELS
+)
 
 # Map pretrained name → width_mult
 _NAME_TO_WIDTH: dict[str, float] = {
+    "mn01": 0.1,
+    "mn02": 0.2,
     "mn04": 0.4,
     "mn05": 0.5,
+    "mn06": 0.6,
+    "mn08": 0.8,
     "mn10": 1.0,
     "mn20": 2.0,
     "mn30": 3.0,
     "mn40": 4.0,
     "dymn04": 0.4,
+    "dymn05": 0.5,
+    "dymn06": 0.6,
+    "dymn08": 0.8,
     "dymn10": 1.0,
     "dymn20": 2.0,
 }
@@ -72,7 +94,11 @@ def _parse_width(name: str) -> float:
 
 
 def _is_mn(name: str) -> bool:
-    return any(name.startswith(p) for p in ("mn04_", "mn05_", "mn10_", "mn20_", "mn30_", "mn40_"))
+    return name.startswith("mn") and name[:4] in _NAME_TO_WIDTH
+
+
+def _is_dymn(name: str) -> bool:
+    return name.startswith("dymn") and name[:6] in _NAME_TO_WIDTH
 
 
 def _quiet_get_model(get_model, *args, **kwargs):
@@ -111,6 +137,8 @@ class _EfficientATWrapper(nn.Module):
         x = x[:, :1]  # [B, 3, H, W] → [B, 1, H, W] — take mel channel only
         # EfficientAT backbones return (logits, features) tuple — we want features
         _, features = self.backbone(x)
+        if features.dim() == 1:
+            features = features.unsqueeze(0)
         return self.classifier(features)
 
 
@@ -151,6 +179,9 @@ def _build_mn(
     # where lastconv_input_channels = inverted_residual_setting[-1].out_channels
     # For mn10 (width=1.0): lastconv_output_channels = 6 * 160 = 960
     feature_dim = model.classifier[2].in_features  # Linear: lastconv_output_channels → last_channel
+    # The wrapper consumes backbone features only; drop the original AudioSet
+    # classifier so small distilled students stay small at checkpoint/export time.
+    model.classifier = nn.Identity()
     # Discard the original classifier
     wrapper = _EfficientATWrapper(model, feature_dim, num_classes=num_classes)
     return wrapper
@@ -166,14 +197,19 @@ def _build_dymn(
     from models.dymn.model import get_model
 
     width = _parse_width(pretrained_name)
+    reduced_tail = pretrained_name.endswith("_rt")
     model = _quiet_get_model(
         get_model,
         num_classes=527,
         pretrained_name=pretrained_name if pretrained else None,
         width_mult=width,
+        reduced_tail=reduced_tail,
     )
     # DyMN classifier[2] is the first Linear (lastconv_output_channels → last_channel)
     feature_dim = model.classifier[2].in_features
+    # The wrapper consumes backbone features only; drop the original AudioSet
+    # classifier so small distilled students stay small at checkpoint/export time.
+    model.classifier = nn.Identity()
     wrapper = _EfficientATWrapper(model, feature_dim, num_classes=num_classes)
     return wrapper
 
@@ -206,13 +242,19 @@ def build_efficientat(
         _mn.model_dir = cache_dir
         _dymn.model_dir = cache_dir
 
+    if pretrained and pretrained_name in MN_SCRATCH_MODELS + DYMN_SCRATCH_MODELS:
+        raise ValueError(
+            f"{pretrained_name!r} has no EfficientAT pretrained checkpoint. "
+            "Use pretrained=False or pass --no-pretrained."
+        )
+
     if _is_mn(pretrained_name):
         return _build_mn(
             pretrained_name,
             num_classes=num_classes,
             pretrained=pretrained,
         )
-    elif any(pretrained_name.startswith(p) for p in ("dymn04_", "dymn10_", "dymn20_")):
+    elif _is_dymn(pretrained_name):
         return _build_dymn(
             pretrained_name,
             num_classes=num_classes,

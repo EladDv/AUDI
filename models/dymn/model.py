@@ -289,6 +289,7 @@ def dymn(pretrained_name: str = None, **kwargs: Any):
 def get_model(num_classes: int = 527,
               pretrained_name: str = None,
               width_mult: float = 1.0,
+              reduced_tail: bool = False,
               strides: Tuple[int, int, int, int] = (2, 2, 2, 2),
               # Context
               context_ratio: int = 4,
@@ -315,6 +316,7 @@ def get_model(num_classes: int = 527,
         num_classes (int): Specifies number of classes to predict
         pretrained_name (str): Specifies name of pre-trained model to load
         width_mult (float): Scales width of network
+        reduced_tail (bool): Scales down the final stage
         strides (Tuple): Strides that are set to '2' in original implementation;
             might be changed to modify the size of receptive field and the downsampling factor in
             time and frequency dimension
@@ -345,6 +347,7 @@ def get_model(num_classes: int = 527,
              pretrained_name=pretrained_name,
              block=block,
              width_mult=width_mult,
+             reduced_tail=reduced_tail,
              strides=strides,
              context_ratio=context_ratio,
              max_context_size=max_context_size,

@@ -125,6 +125,9 @@ class DroneDetector(L.LightningModule):
         bn_momentum: float = 0.1,
         clip_seconds: float = 2.56,
         freeze_backbone_epochs: int = 0,
+        distill_teacher: torch.nn.Module | None = None,
+        distill_alpha: float = 0.0,
+        distill_temperature: float = 2.0,
     ) -> None:
         super().__init__()
 
@@ -132,7 +135,17 @@ class DroneDetector(L.LightningModule):
         mel_cfg = mel or MelConfig()
         opt_cfg = optimizer or OptimizerConfig()
 
-        self.save_hyperparameters(ignore=["teacher"])
+        if not 0.0 <= distill_alpha <= 1.0:
+            raise ValueError(
+                f"distill_alpha must be in [0, 1], got {distill_alpha}"
+            )
+        if distill_temperature <= 0:
+            raise ValueError(
+                "distill_temperature must be > 0, "
+                f"got {distill_temperature}"
+            )
+
+        self.save_hyperparameters(ignore=["distill_teacher"])
 
         # ── Frontend ───────────────────────────────────────────────
         self._frontend_type = mel_cfg.frontend_type
@@ -226,6 +239,12 @@ class DroneDetector(L.LightningModule):
         self._label_smoothing = float(label_smoothing)
         self._clip_seconds = float(clip_seconds)
         self._freeze_backbone_epochs = max(0, int(freeze_backbone_epochs))
+        # Keep the teacher out of Lightning checkpoints while still using it
+        # for no-grad forward passes.
+        object.__setattr__(self, "_distill_teacher", distill_teacher)
+        self._distill_alpha = float(distill_alpha)
+        self._distill_temperature = float(distill_temperature)
+        self._freeze_distill_teacher()
         self._per_bin_weights = bool(per_bin_weights)
         self._mixup_alpha = float(mixup_alpha)
         self._cutmix_alpha = float(cutmix_alpha)
@@ -286,8 +305,17 @@ class DroneDetector(L.LightningModule):
         else:
             model.train(self.training)
 
+    def _freeze_distill_teacher(self) -> None:
+        teacher = self._distill_teacher
+        if teacher is None:
+            return
+        teacher.eval()
+        for param in teacher.parameters():
+            param.requires_grad = False
+
     def on_train_epoch_start(self) -> None:
         """Apply scheduled backbone freezing at epoch boundaries."""
+        self._freeze_distill_teacher()
         if self._freeze_backbone_epochs <= 0:
             return
         self._set_backbone_frozen(self.current_epoch < self._freeze_backbone_epochs)
@@ -417,6 +445,37 @@ class DroneDetector(L.LightningModule):
 
         return loss
 
+    def _compute_distillation_loss(
+        self,
+        student_logits: torch.Tensor,
+        spec: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._distill_teacher is None:
+            raise RuntimeError("distillation loss requested without a teacher")
+
+        temperature = self._distill_temperature
+        teacher = self._distill_teacher
+        teacher.eval()
+        try:
+            teacher_param = next(teacher.parameters())
+        except StopIteration:
+            teacher_param = None
+        if teacher_param is not None and teacher_param.device != spec.device:
+            teacher.to(spec.device)
+        with torch.no_grad():
+            teacher_logits = teacher(spec)
+            teacher_logits = teacher_logits.reshape_as(student_logits)
+            teacher_targets = torch.sigmoid(teacher_logits / temperature)
+
+        return (
+            F.binary_cross_entropy_with_logits(
+                student_logits / temperature,
+                teacher_targets,
+            )
+            * temperature
+            * temperature
+        )
+
     # ── Training step ────────────────────────────────────────────
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
@@ -435,13 +494,21 @@ class DroneDetector(L.LightningModule):
         spec = self._to_mel(wav)
         spec, label, bin_idx = self._apply_mixup_cutmix(spec, label, bin_idx)
         logits = self.backbone(spec).squeeze(1)
-        loss = self._compute_loss(logits, label, bin_idx)
-        self.log_dict(
-            {
+        hard_loss = self._compute_loss(logits, label, bin_idx)
+        loss = hard_loss
+        log_values = {"train_loss": loss}
+        if self._distill_teacher is not None and self._distill_alpha > 0:
+            distill_loss = self._compute_distillation_loss(logits, spec)
+            loss = (
+                (1.0 - self._distill_alpha) * hard_loss
+                + self._distill_alpha * distill_loss
+            )
+            log_values = {
                 "train_loss": loss,
-            },
-            prog_bar=True,
-        )
+                "train/hard_loss": hard_loss,
+                "train/distill_loss": distill_loss,
+            }
+        self.log_dict(log_values, prog_bar=True)
         return loss
 
     # ── Validation step ──────────────────────────────────────────

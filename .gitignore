@@ -20,3 +20,6 @@ uv.lock
 .history
 *.tflite
 resources/
+*.log
+plans/
+docs/
