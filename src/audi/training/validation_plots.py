@@ -380,6 +380,7 @@ def _log_mel_spec(
     sr: int = 16000,
     n_mels: int = 128,
     n_fft: int = 1024,
+    win_length: int | None = None,
     hop_length: int = 160,
 ) -> np.ndarray:
     """Compute log-mel spectrogram from a ``[T]`` or ``[1, T]`` waveform."""
@@ -388,7 +389,11 @@ def _log_mel_spec(
     if waveform.dim() == 1:
         waveform = waveform.unsqueeze(0)
     mel_t = MelSpectrogram(
-        sample_rate=sr, n_mels=n_mels, n_fft=n_fft, hop_length=hop_length
+        sample_rate=sr,
+        n_mels=n_mels,
+        n_fft=n_fft,
+        win_length=win_length,
+        hop_length=hop_length,
     )
     to_db = AmplitudeToDB()
     with torch.no_grad():

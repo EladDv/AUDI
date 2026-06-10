@@ -11,6 +11,7 @@ from torch.utils.data import Dataset
 
 from audi.augment import _rms, peak_limit
 from audi.config import SNRBin
+from audi.training.dataset import _resample_if_needed
 from audi.training.hearability import scale_to_db
 
 SOURCE_NAMES = ("field_mix", "field_background", "field_hard_negative")
@@ -53,6 +54,7 @@ class FieldMixDataset(Dataset[tuple[torch.Tensor, ...]]):
         hard_negative_ds: Any | None = None,
         hard_negatives: int = 192,
         seed: int = 42,
+        sample_rate: int = 16000,
     ) -> None:
         if len(background_ds) <= 0:
             raise ValueError("background_ds must be non-empty")
@@ -66,6 +68,7 @@ class FieldMixDataset(Dataset[tuple[torch.Tensor, ...]]):
         self.hard_negative_ds = hard_negative_ds
         self.snr_bins = list(snr_bins)
         self.target_length_samples = int(target_length_samples)
+        self.sample_rate = int(sample_rate)
         self.source_to_idx = {name: i for i, name in enumerate(SOURCE_NAMES)}
         self.color_to_idx = {name: i for i, name in enumerate(COLOR_NAMES)}
         self.bin_to_idx = {b.name: i for i, b in enumerate(self.snr_bins)}
@@ -206,8 +209,24 @@ class FieldMixDataset(Dataset[tuple[torch.Tensor, ...]]):
         return indices
 
     def _load_audio(self, ds: Any, idx: int, rng: np.random.Generator) -> np.ndarray:
-        audio = np.asarray(ds[idx]["audio"]["array"], dtype=np.float32).reshape(-1)
+        row = ds[idx]
+        audio_data = row["audio"]
+        audio = np.asarray(audio_data["array"], dtype=np.float32).reshape(-1)
+        source_sr = self._audio_sample_rate(ds, audio_data)
+        audio = _resample_if_needed(audio, source_sr, self.sample_rate)
         return self._fit_length(audio, self.target_length_samples, rng)
+
+    @staticmethod
+    def _audio_sample_rate(ds: Any, audio: Any) -> int:
+        if isinstance(audio, dict) and audio.get("sampling_rate") is not None:
+            return int(audio["sampling_rate"])
+        features = getattr(ds, "features", None)
+        if features is not None:
+            audio_feature = features.get("audio") if hasattr(features, "get") else None
+            sample_rate = getattr(audio_feature, "sampling_rate", None)
+            if sample_rate is not None:
+                return int(sample_rate)
+        return 16000
 
     @staticmethod
     def _fit_length(

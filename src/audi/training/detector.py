@@ -144,6 +144,16 @@ class DroneDetector(L.LightningModule):
                 "distill_temperature must be > 0, "
                 f"got {distill_temperature}"
             )
+        if (
+            distill_teacher is not None
+            and hasattr(distill_teacher, "_to_mel")
+            and (mixup_alpha > 0 or cutmix_alpha > 0)
+        ):
+            raise ValueError(
+                "Full-detector distillation uses waveform teacher logits and "
+                "does not support spectrogram MixUp/CutMix. Disable mixup/cutmix "
+                "or pass a teacher backbone that consumes student spectrograms."
+            )
 
         self.save_hyperparameters(ignore=["distill_teacher"])
 
@@ -160,14 +170,24 @@ class DroneDetector(L.LightningModule):
                 hop_length=mel_cfg.hop_length,
                 n_mels=mel_cfg.n_mels,
                 n_fft=mel_cfg.n_fft,
+                win_length=mel_cfg.win_length,
                 use_pcen=mel_cfg.use_pcen,
                 cqt_bins=mel_cfg.cqt_bins,
                 cqt_bpo=mel_cfg.cqt_bpo,
                 cwt_scales=mel_cfg.cwt_scales,
+                stft_bands_hz=mel_cfg.stft_bands_hz,
             )
             self._multi_frontend = fe
             self._frontend_channels = fe_channels
-            self._input_bn = torch.nn.BatchNorm2d(3)
+            frontend_tokens = {
+                part.strip() for part in mel_cfg.frontend_type.split(",")
+            }
+            stft_like_tokens = {"stft", "stft_bands"}
+            self._input_bn = (
+                torch.nn.Identity()
+                if frontend_tokens and frontend_tokens <= stft_like_tokens
+                else torch.nn.BatchNorm2d(3)
+            )
             self._pcen = None
             self._to_db = None
         else:
@@ -176,6 +196,7 @@ class DroneDetector(L.LightningModule):
             self._mel_transform = T.MelSpectrogram(
                 sample_rate=mel_cfg.sample_rate,
                 n_fft=mel_cfg.n_fft,
+                win_length=mel_cfg.win_length,
                 hop_length=mel_cfg.hop_length,
                 n_mels=mel_cfg.n_mels,
             )
@@ -326,9 +347,12 @@ class DroneDetector(L.LightningModule):
         """Convert waveform to normalized 3-channel spectrogram."""
         if self._multi_frontend is not None:
             feats = self._multi_frontend(wav)   # (B, C, T)
-            spec = feats.unsqueeze(1).expand(-1, 3, -1, -1)  # (B, 3, C, T)
+            if feats.ndim == 4:
+                spec = feats  # (B, 3, F, T)
+            else:
+                spec = feats.unsqueeze(1).expand(-1, 3, -1, -1)  # (B, 3, C, T)
             spec = self._input_bn(spec)
-            return spec
+            return torch.nan_to_num(spec, nan=0.0, posinf=0.0, neginf=0.0)
 
         mel = self._mel_transform(wav)
         if self._use_pcen:
@@ -449,6 +473,7 @@ class DroneDetector(L.LightningModule):
         self,
         student_logits: torch.Tensor,
         spec: torch.Tensor,
+        wav: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self._distill_teacher is None:
             raise RuntimeError("distillation loss requested without a teacher")
@@ -463,7 +488,10 @@ class DroneDetector(L.LightningModule):
         if teacher_param is not None and teacher_param.device != spec.device:
             teacher.to(spec.device)
         with torch.no_grad():
-            teacher_logits = teacher(spec)
+            if wav is not None and hasattr(teacher, "_to_mel"):
+                teacher_logits = teacher(wav.to(spec.device))
+            else:
+                teacher_logits = teacher(spec)
             teacher_logits = teacher_logits.reshape_as(student_logits)
             teacher_targets = torch.sigmoid(teacher_logits / temperature)
 
@@ -498,7 +526,7 @@ class DroneDetector(L.LightningModule):
         loss = hard_loss
         log_values = {"train_loss": loss}
         if self._distill_teacher is not None and self._distill_alpha > 0:
-            distill_loss = self._compute_distillation_loss(logits, spec)
+            distill_loss = self._compute_distillation_loss(logits, spec, wav)
             loss = (
                 (1.0 - self._distill_alpha) * hard_loss
                 + self._distill_alpha * distill_loss

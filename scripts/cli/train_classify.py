@@ -58,6 +58,7 @@ class DroneClassifier(L.LightningModule):
         pretrained=True,
         n_mels=128,
         n_fft=1024,
+        win_length=None,
         hop_length=160,
         dropout=0.0,
     ):
@@ -67,6 +68,7 @@ class DroneClassifier(L.LightningModule):
         self.mel = T.MelSpectrogram(
             sample_rate=_SR,
             n_fft=n_fft,
+            win_length=win_length,
             hop_length=hop_length,
             n_mels=n_mels,
         )

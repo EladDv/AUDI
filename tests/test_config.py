@@ -3,6 +3,7 @@
 import pytest
 
 from audi.config import (
+    MelConfig,
     MixConfig,
     ModelConfig,
     SNRBin,
@@ -34,6 +35,22 @@ class TestModelConfig:
     def test_zero_num_classes_raises(self):
         with pytest.raises(ValueError, match="num_classes"):
             ModelConfig(num_classes=0)
+
+
+class TestMelConfig:
+    def test_default_win_length_matches_n_fft(self):
+        cfg = MelConfig()
+
+        assert cfg.win_length == cfg.n_fft
+
+    def test_custom_win_length_is_exposed(self):
+        cfg = MelConfig(n_fft=1024, win_length=512)
+
+        assert cfg.win_length == 512
+
+    def test_win_length_must_not_exceed_n_fft(self):
+        with pytest.raises(ValueError, match="win_length"):
+            MelConfig(n_fft=512, win_length=1024)
 
 
 class TestMixConfig:

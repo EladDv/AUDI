@@ -41,6 +41,7 @@ def main():
         num_threads=det_cfg.get("num_threads", 2),
         n_mels=det_cfg["n_mels"],
         n_fft=det_cfg["n_fft"],
+        win_length=det_cfg.get("win_length", det_cfg["n_fft"]),
         hop_length=det_cfg["hop_length"],
         model_sample_rate=det_cfg["model_sample_rate"],
         window_samples=det_cfg["window_samples"],

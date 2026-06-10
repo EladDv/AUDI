@@ -6,9 +6,12 @@ from audi.config import SNRBin
 from audi.training.dataset import MixedDataset
 
 
-def _rows(value: float, count: int = 2):
+def _rows(value: float, count: int = 2, sample_rate: int | None = None):
+    audio = {"array": np.full(32, value, dtype=np.float32)}
+    if sample_rate is not None:
+        audio["sampling_rate"] = sample_rate
     return [
-        {"audio": {"array": np.full(32, value, dtype=np.float32)}}
+        {"audio": dict(audio)}
         for _ in range(count)
     ]
 
@@ -64,3 +67,31 @@ def test_hard_noise_prob_one_uses_hard_noise_as_base(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0] is ds.hard_noise_ds
+
+
+def test_load_raw_segment_resamples_to_target_sample_rate():
+    ds = MixedDataset(
+        noise_ds=_rows(1.0, sample_rate=16000),
+        hard_noise_ds=None,
+        drone_ds=_rows(0.5, sample_rate=16000),
+        noise2_ds=None,
+        snr_bins=[SNRBin("test", -10.0, -10.0, 1.0)],
+        target_length_samples=16,
+        positive_probability=0.0,
+        highpass_hz=0.0,
+        sample_rate=8000,
+    )
+
+    segment = ds._load_raw_segment(ds.noise_ds, 16)
+
+    assert segment.shape == (16,)
+
+
+def test_dataset_sanitizes_non_finite_augmented_waveforms():
+    ds = _dataset(noise2_ds=None)
+    ds.augment_mix = lambda mix: np.full_like(mix, np.nan)
+
+    wav, _label = ds[0]
+
+    assert np.isfinite(wav.numpy()).all()
+    assert np.all(wav.numpy() == 0.0)

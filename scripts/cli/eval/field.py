@@ -31,7 +31,6 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
 
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     PROJECT = Path(__file__).resolve().parents[3]
-    SR = 16000
     STRIDE = 0.125
     FIELD_DIR = PROJECT / "data" / "field_recordings_20260514"
     CSV_PATH = PROJECT / "checkpoints" / "attack_run_precision_eval.csv"
@@ -115,8 +114,8 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
     print(f"Field audio: {len(alert_file_paths)} alert recordings")
 
     # ── Helpers ─────────────────────────────────────────────────────────
-    def split_into_windows(audio, clip_s):
-        win = int(SR * clip_s)
+    def split_into_windows(audio, sample_rate, clip_s):
+        win = int(sample_rate * clip_s)
         step = int(win * STRIDE)
         if len(audio) < win:
             return []
@@ -223,9 +222,21 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
             mel_hp = hp.get("mel", {})
             if isinstance(mel_hp, dict):
                 mel_cfg = MelConfig(
-                    n_mels=mel_hp.get("n_mels", 128),
-                    n_fft=mel_hp.get("n_fft", 1024),
-                    hop_length=mel_hp.get("hop_length", 160),
+                    sample_rate=mel_hp.get("sample_rate", hp.get("sample_rate", 16000)),
+                    n_mels=mel_hp.get("n_mels", hp.get("n_mels", 128)),
+                    n_fft=mel_hp.get("n_fft", hp.get("n_fft", 1024)),
+                    win_length=mel_hp.get("win_length", hp.get("win_length")),
+                    hop_length=mel_hp.get("hop_length", hp.get("hop_length", 160)),
+                    mean_db=mel_hp.get("mean_db", hp.get("mel_mean")),
+                    std_db=mel_hp.get("std_db", hp.get("mel_std")),
+                    frontend_type=mel_hp.get("frontend_type", hp.get("frontend_type", "mel")),
+                    stft_bands_hz=mel_hp.get(
+                        "stft_bands_hz", hp.get("stft_bands_hz")
+                    ),
+                    cqt_bins=mel_hp.get("cqt_bins", hp.get("cqt_bins", 84)),
+                    cqt_bpo=mel_hp.get("cqt_bpo", hp.get("cqt_bpo", 12)),
+                    cwt_scales=mel_hp.get("cwt_scales", hp.get("cwt_scales", 64)),
+                    use_pcen=mel_hp.get("use_pcen", hp.get("use_pcen", False)),
                 )
             else:
                 mel_cfg = mel_hp
@@ -238,6 +249,7 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
             model.load_state_dict(strip_compile_prefix(ckpt["state_dict"]), strict=False)
             model = model.to(device).eval()
             clip_s = get_clip_seconds(hp)
+            model_sample_rate = int(mel_cfg.sample_rate)
             del ckpt
             torch.cuda.empty_cache()
         except Exception as e:
@@ -251,8 +263,12 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
                 audio, sr = torchaudio.load(str(wav_path))
             except Exception:
                 continue
+            if int(sr) != model_sample_rate:
+                audio = torchaudio.functional.resample(
+                    audio, int(sr), model_sample_rate
+                )
             audio = audio.mean(dim=0).numpy().astype(np.float32)
-            wins = split_into_windows(audio, clip_s)
+            wins = split_into_windows(audio, model_sample_rate, clip_s)
             if wins:
                 scores = predict(model, np.stack(wins))
                 alert_scores_per_file.append((dir_name, scores, label))

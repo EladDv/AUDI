@@ -1,0 +1,95 @@
+name: audio_resample_frontend_sweep
+noise_path: data/HF_dataset_v7_background
+drone_path: data/HF_dataset_v2_drone
+description: >
+  Compare lower-rate audio resampling frontends: 8 kHz log-mel at 128 bins
+  against 4 kHz linear-frequency STFT without any mel projection.
+base_flags: >-
+  --clip-seconds 5.12 --patience 0
+  --noise2 data/hf_dataset_sharded_expanded_merged --noise2-prob 0.5
+  --noise2-multi-prob 0.5 --noise2-count 5 --noise2-max-attenuation -30
+  --batch-size 24 --loss bce --label-smoothing 0.1 --augment --lr 1e-4
+  --lr-schedule linear --warmup-epochs 8 --weight-decay 0.03 --epochs 25
+configs:
+  - name: "00_all_baseline"
+    flags: --dsp-feature-sets v3,v4,v5 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
+    note: All features — V3+V4+V5 (11 feats).
+  - name: "01_small_8khz_128mel"
+    flags: >-
+      --sample-rate 8000 --mel-preset custom --n-mels 128 --n-fft 512 --win-length 512 --arch convnext_small
+      --dsp-feature-sets v3,v4,v5
+      --hop-length 80
+    note: 8 kHz resampled audio with 128-bin log-mel frontend and 10 ms hop.
+  - name: "02_small_4khz_linear_stft128"
+    flags: >-
+      --sample-rate 4000 --frontend-type stft,stft,stft --mel-preset custom --arch convnext_small
+      --dsp-feature-sets v3,v4,v5 
+      --n-mels 128 --n-fft 256 --win-length 256 --hop-length 40
+    note: 4 kHz resampled audio with three linear-STFT channels and no mel frontend.
+
+
+  - name: "03_all_tiny"
+    flags: --dsp-feature-sets v3,v4,v5 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_tiny
+    note: All features — V3+V4+V5 (11 feats).
+  - name: "04_tiny_8khz_128mel"
+    flags: >-
+      --sample-rate 8000 --mel-preset custom --n-mels 128 --n-fft 512 --win-length 512 --arch convnext_tiny
+      --dsp-feature-sets v3,v4,v5
+      --hop-length 80
+    note: 8 kHz resampled audio with 128-bin log-mel frontend and 10 ms hop.
+  - name: "05_tiny_4khz_linear_stft128"
+    flags: >-
+      --sample-rate 4000 --frontend-type stft,stft,stft --mel-preset custom --arch convnext_tiny
+      --dsp-feature-sets v3,v4,v5
+      --n-mels 128 --n-fft 256 --win-length 256 --hop-length 40
+    note: 4 kHz resampled audio with three linear-STFT channels and no mel frontend.
+
+
+  # ── MobileNets (MN) — core variants ───────────────────────────────
+  - name: "06_dymn10_as"
+    flags: --arch dymn10_as
+    note: DyMN width=1.0, 10M params, AudioSet mAP 48.4
+
+  - name: "07_dymn04_as_8khz"
+    flags: >-
+      --sample-rate 8000 --mel-preset custom --n-mels 128 --n-fft 512 --win-length 512
+      --hop-length 80
+      --arch dymn04_as
+    note: DyMN width=0.4, 0.98M params, AudioSet mAP 43.2
+  - name: "08_dymn10_as_8khz"
+    flags: >-
+      --sample-rate 8000 --mel-preset custom --n-mels 128 --n-fft 512 --win-length 512
+      --hop-length 80
+      --arch dymn10_as
+    note: DyMN width=1.0, 4.88M params, AudioSet mAP 47.1
+
+  - name: "09_dymn04_as_4khz"
+    flags: >-
+      --sample-rate 4000 --frontend-type stft,stft,stft --mel-preset custom
+      --n-mels 128 --n-fft 256 --win-length 256 --hop-length 40
+      --arch dymn04_as
+    note: DyMN width=0.4, 0.98M params, AudioSet mAP 43.2
+  - name: "10_dymn10_as_4khz"
+    flags: >-
+      --sample-rate 4000 --frontend-type stft,stft,stft --mel-preset custom
+      --n-mels 128 --n-fft 256 --win-length 256 --hop-length 40
+      --arch dymn10_as
+    note: DyMN width=1.0, 4.88M params, AudioSet mAP 47.1
+
+  - name: "11_dymn10_as_16khz_banded_stft4096"
+    flags: >-
+      --sample-rate 16000
+      --frontend-type stft_bands,stft_bands,stft_bands
+      --mel-preset custom --n-mels 128 --n-fft 4096 --win-length 4096 --hop-length 160
+      --stft-bands-hz 100-500,800-1000,1200-1600
+      --arch dymn10_as
+    note: 16 kHz, 4096-point STFT selecting 100-500/800-1000/1200-1600 Hz bands, resized to exactly 128 frequency rows.
+
+  - name: "12_dymn10_as_16khz_banded_stft2048"
+    flags: >-
+      --sample-rate 16000
+      --frontend-type stft_bands,stft_bands,stft_bands
+      --mel-preset custom --n-mels 128 --n-fft 2048 --win-length 2048 --hop-length 160
+      --stft-bands-hz 100-500,800-1000,1200-2000
+      --arch dymn10_as
+    note: 16 kHz, 2048-point STFT selecting 100-500/800-1000/1200-2000 Hz bands, resized to exactly 128 frequency rows.

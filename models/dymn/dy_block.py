@@ -274,6 +274,7 @@ class DY_Block(nn.Module):
             raise ValueError("illegal stride value")
 
         self.use_res_connect = cnf.stride == 1 and cnf.input_channels == cnf.out_channels
+        self.uses_context = not (no_dyconv and no_dyrelu and no_ca)
         # context_dim is denoted as 'H' in the paper
         self.context_dim = np.clip(make_divisible(cnf.expanded_channels // context_ratio, 8),
                                    make_divisible(min_context_size * cnf.width_mult, 8),
@@ -384,14 +385,20 @@ class DY_Block(nn.Module):
         self.proj_norm = norm_layer(cnf.out_channels)
 
         context_norm_layer = norm_layer
-        self.context_gen = ContextGen(self.context_dim, cnf.input_channels, cnf.expanded_channels,
-                                      norm_layer=context_norm_layer, stride=stride)
+        self.context_gen = ContextGen(
+            self.context_dim,
+            cnf.input_channels,
+            cnf.expanded_channels,
+            norm_layer=context_norm_layer,
+            stride=stride,
+        ) if self.uses_context else nn.Identity()
 
     def forward(self, x, g=None):
         # x: CNN feature map (C x F x T)
         inp = x
 
-        g = self.context_gen(x, g)
+        if self.uses_context:
+            g = self.context_gen(x, g)
         x = self.exp_conv(x, g)
         x = self.exp_norm(x)
         x = self.exp_act(x, g)

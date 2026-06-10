@@ -1,0 +1,50 @@
+name: mel_preprocessing_sweep
+noise_path: data/HF_dataset_v7_background
+drone_path: data/HF_dataset_v2_drone
+description: >
+  Compare different mel preprocessing strategies.
+
+base_flags: >-
+  --clip-seconds 5.12 --patience 0
+  --noise2 data/hf_dataset_sharded_expanded_merged --noise2-prob 0.5
+  --noise2-multi-prob 0.5 --noise2-count 5 --noise2-max-attenuation -30
+  --batch-size 24 --loss bce --label-smoothing 0.1 --augment --lr 1e-4
+  --lr-schedule linear --warmup-epochs 8 --weight-decay 0.03 --epochs 25
+configs:
+  # ── MobileNets (MN) — core variants ───────────────────────────────
+  - name: "00_dymn10_as"
+    flags: --arch dymn10_as
+    note: DyMN width=1.0, 10M params, AudioSet mAP 48.4
+
+  - name: "01_mn04_as"
+    flags: --arch dymn04_as 
+    note: DyMN width=0.4, 4M params, AudioSet mAP 46.2
+
+  - name: "02_dymn20_as"
+    flags: --arch dymn20_as 
+    note: DyMN width=2.0, 40M params, AudioSet mAP 49.4
+
+  - name: "03_dymn10_as_25ms_win"
+    flags: --arch dymn10_as --win-length 400
+    note: DyMN width=1.0, 10M params, AudioSet mAP 48.4
+
+  - name: "04_dymn04_as_25ms_win"
+    flags: --arch dymn04_as --win-length 400
+    note: DyMN width=0.4, 4M params, AudioSet mAP 46.2
+
+  - name: "05_dymn20_as_25ms_win"
+    flags: --arch dymn20_as --win-length 400
+    note: DyMN width=2.0, 40M params, AudioSet mAP 49.4
+
+
+  - name: "06_mn10_as"
+    flags: --arch mn10_as 
+    note: DyMN width=1.0, 4.9M params, AudioSet mAP 47.9
+
+  - name: "07_mn10_as_25ms_win"
+    flags: --arch mn10_as --win-length 400
+    note: DyMN width=1.0, 4.9M params, AudioSet mAP 47.9
+
+
+  
+

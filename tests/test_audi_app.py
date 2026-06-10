@@ -37,6 +37,7 @@ class TestAudiApp:
             16000,
             n_mels=128,
             n_fft=1024,
+            win_length=1024,
             hop_length=160,
         )[..., :512]
 
@@ -45,6 +46,7 @@ class TestAudiApp:
             torchaudio_transforms.MelSpectrogram(
                 sample_rate=16000,
                 n_fft=1024,
+                win_length=1024,
                 hop_length=160,
                 n_mels=128,
             )(wav)
@@ -65,6 +67,7 @@ class TestAudiApp:
             model_path=str(Path("/missing/model.tflite")),
             n_mels=128,
             n_fft=1024,
+            win_length=1024,
             hop_length=160,
             model_sample_rate=16000,
             window_samples=81920,
@@ -84,6 +87,7 @@ class TestAudiApp:
             torchaudio_transforms.MelSpectrogram(
                 sample_rate=16000,
                 n_fft=1024,
+                win_length=1024,
                 hop_length=160,
                 n_mels=128,
             )(wav)
@@ -98,6 +102,36 @@ class TestAudiApp:
             rtol=3e-5,
             atol=1e-3,
         )
+
+    def test_app_mel_preprocessing_matches_training_custom_win_length(self):
+        """Pi mel frontend must match torchaudio when win_length < n_fft."""
+        torch = pytest.importorskip("torch")
+        torchaudio_transforms = pytest.importorskip("torchaudio.transforms")
+        detector = _import_from_audi_app("detector")
+
+        rng = np.random.default_rng(7)
+        audio = rng.normal(0.0, 0.25, 40960).astype(np.float32)
+        app_mel = detector.compute_mel_spectrogram(
+            audio,
+            16000,
+            n_mels=128,
+            n_fft=1024,
+            win_length=512,
+            hop_length=160,
+        )
+
+        wav = torch.from_numpy(audio).unsqueeze(0)
+        train_mel = torchaudio_transforms.AmplitudeToDB()(
+            torchaudio_transforms.MelSpectrogram(
+                sample_rate=16000,
+                n_fft=1024,
+                win_length=512,
+                hop_length=160,
+                n_mels=128,
+            )(wav)
+        )[0].numpy()
+
+        np.testing.assert_allclose(app_mel, train_mel, rtol=2e-5, atol=7e-4)
 
     def test_recorder_imports(self):
         """recorder.py imports without error."""

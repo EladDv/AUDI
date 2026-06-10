@@ -1,0 +1,164 @@
+{
+  "backbone": "mel3_cnn",
+  "feature": "mel3",
+  "mode": "fused",
+  "use_scd": true,
+  "use_stats": true,
+  "extra_fpv": false,
+  "n_clips": 3875,
+  "n_flights": 26,
+  "clip_acc": 0.7372903225806452,
+  "file_acc": 0.9230769230769231,
+  "confusion_evo_fpv": [
+    [
+      23,
+      1
+    ],
+    [
+      1,
+      1
+    ]
+  ],
+  "per_flight": [
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_100m_20260604_161646.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_100m_20260604_161900.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260603_135453.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260604_151157.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260604_151240.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260604_151323.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260604_151550.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260604_155128.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260604_155704.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_10m_20260604_155759.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_150m_20260604_162228.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_150m_20260604_162338.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_150m_20260604_162514.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_200m_20260604_162028.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_20m_20260604_160056.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_30m_20260604_160423.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_50m_20260604_160759.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\drone_evo__evo_50m_20260604_160919.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\EVO__EVO_10-10m_20260528T131009.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\EVO__evo_10-25m_20260528T143740.wav",
+      "true": "evo",
+      "pred": "fpv"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\EVO__evo_100-100m_20260528T132156.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\EVO__evo_20-20m_20260528T131513.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\EVO__evo_50-50m_20260528T131821.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\evo_array\\EVO__evo_500-500m_20260528T132750.wav",
+      "true": "evo",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\fpv_10in_array\\fpv__fpv_10__10-10m_20260528T134649.wav",
+      "true": "fpv",
+      "pred": "evo"
+    },
+    {
+      "file": "C:\\Users\\Nir\\Desktop\\drone_nir\\06_model_v1\\data\\corpus\\mine\\fpv_10in_array\\fpv__fpv_20-20m_20260528T142410.wav",
+      "true": "fpv",
+      "pred": "fpv"
+    }
+  ],
+  "probe": {
+    "10inchP": {
+      "files": 0,
+      "votes": {}
+    },
+    "13inchP": {
+      "files": 0,
+      "votes": {}
+    }
+  }
+}

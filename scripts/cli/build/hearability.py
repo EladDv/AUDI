@@ -21,6 +21,7 @@ def run() -> None:
     class HearabilityConfig:
         sample_rate: int = 16000
         n_fft: int = 2048
+        win_length: int = 2048
         hop_length: int = 512
         erb_bands: int = 48
         min_freq_hz: float = 80.0
@@ -79,6 +80,7 @@ def run() -> None:
     )
     ap.add_argument("--sample-rate", type=int, default=16000)
     ap.add_argument("--n-fft", type=int, default=2048)
+    ap.add_argument("--win-length", type=int, default=None)
     ap.add_argument("--hop-length", type=int, default=512)
     ap.add_argument("--erb-bands", type=int, default=48)
     ap.add_argument("--min-freq", type=float, default=80.0)
@@ -99,6 +101,7 @@ def run() -> None:
     cfg = HearabilityConfig(
         sample_rate=args.sample_rate,
         n_fft=args.n_fft,
+        win_length=args.n_fft if args.win_length is None else args.win_length,
         hop_length=args.hop_length,
         erb_bands=args.erb_bands,
         min_freq_hz=args.min_freq,
@@ -108,6 +111,10 @@ def run() -> None:
         masking_offset_db=args.masking_offset_db,
         target_margin_db=args.target_margin_db,
     )
+    if cfg.win_length <= 0 or cfg.win_length > cfg.n_fft:
+        raise SystemExit(
+            f"--win-length must be in [1, --n-fft], got {cfg.win_length}"
+        )
     
     def erb_point(f_hz: float) -> float:
         return 21.4 * math.log10(1.0 + 0.00437 * f_hz)
@@ -137,9 +144,13 @@ def run() -> None:
         )
     
     def power_spectrum(
-        y: np.ndarray, n_fft: int, hop_length: int, sr: int
+        y: np.ndarray, n_fft: int, win_length: int, hop_length: int, sr: int
     ) -> np.ndarray:
-        window = np.hanning(n_fft).astype(np.float64)
+        window = np.hanning(win_length).astype(np.float64)
+        if win_length < n_fft:
+            left = (n_fft - win_length) // 2
+            right = n_fft - win_length - left
+            window = np.pad(window, (left, right), mode="constant")
         n_samples = len(y)
         frames = np.lib.stride_tricks.sliding_window_view(
             np.pad(
@@ -212,7 +223,7 @@ def run() -> None:
             continue
         total_duration += dur
         power_spec = power_spectrum(
-            audio, cfg.n_fft, cfg.hop_length, cfg.sample_rate
+            audio, cfg.n_fft, cfg.win_length, cfg.hop_length, cfg.sample_rate
         )
         erb_spec = erb_spectrum(power_spec, filters)
         erb_db = amplitude_to_db(erb_spec)
@@ -249,6 +260,7 @@ def run() -> None:
         masked_template=masked_template.astype(np.float32),
         sample_rate=cfg.sample_rate,
         n_fft=cfg.n_fft,
+        win_length=cfg.win_length,
         hop_length=cfg.hop_length,
         erb_bands=cfg.erb_bands,
         total_frames=all_frames.shape[0],

@@ -85,6 +85,7 @@ class DetectionEngine:
         self.model_sample_rate = det_cfg.get("model_sample_rate", 16000)
         self.n_mels = det_cfg.get("n_mels", 128)
         self.n_fft = det_cfg.get("n_fft", 1024)
+        self.win_length = det_cfg.get("win_length", self.n_fft)
         self.hop_length = det_cfg.get("hop_length", 160)
         self.window_samples = det_cfg.get(
             "window_samples", 40960
@@ -131,6 +132,7 @@ class DetectionEngine:
             num_threads=self.num_threads,
             n_mels=self.n_mels,
             n_fft=self.n_fft,
+            win_length=self.win_length,
             hop_length=self.hop_length,
             model_sample_rate=self.model_sample_rate,
             window_samples=self.window_samples,

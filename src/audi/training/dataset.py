@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from math import gcd
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,39 @@ class BatchItem:
         if return_bin:
             return (self.mix, self.label, self.bin_idx)
         return (self.mix, self.label)
+
+
+def _resample_if_needed(
+    audio: np.ndarray, source_sample_rate: int, target_sample_rate: int
+) -> np.ndarray:
+    audio = _finite_audio(audio)
+    if int(source_sample_rate) == int(target_sample_rate):
+        return audio.astype(np.float32, copy=False)
+    if audio.size == 0:
+        return audio.astype(np.float32, copy=False)
+    from scipy.signal import resample_poly
+
+    common = gcd(int(source_sample_rate), int(target_sample_rate))
+    up = int(target_sample_rate) // common
+    down = int(source_sample_rate) // common
+    return _finite_audio(resample_poly(audio.astype(np.float64), up, down))
+
+
+def _finite_audio(audio: np.ndarray) -> np.ndarray:
+    return np.nan_to_num(
+        np.asarray(audio, dtype=np.float32).reshape(-1),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).astype(np.float32, copy=False)
+
+
+def _rms_normalize(audio: np.ndarray) -> np.ndarray:
+    audio = _finite_audio(audio)
+    rms = _rms(audio)
+    if not np.isfinite(rms) or rms <= 1e-8:
+        return np.zeros_like(audio, dtype=np.float32)
+    return _finite_audio(audio / rms)
 
 
 class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
@@ -157,13 +191,12 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
         L = self.target_length_samples
         bg = self._load_background(L)
-        bg = bg / _rms(bg)
-        bg = peak_limit(bg)
+        bg = peak_limit(_rms_normalize(bg))
         label = random.random() >= self.positive_probability
         if not label:
             # ── Negative sample: background only ────────────────
             mix = self.augment_mix(bg)
-            mix = peak_limit(mix / _rms(mix))  # remove energy cue
+            mix = peak_limit(_rms_normalize(mix))  # remove energy cue
             snr_db = torch.tensor(-99.9)
             bin_idx = torch.tensor(-1, dtype=torch.long)
             drone = torch.zeros(mix.shape)
@@ -181,7 +214,9 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
         mix = self.augment_mix(mix)
 
         # ── Post-processing ──────────────────────────────
-        mix = peak_limit(mix / _rms(mix))  # remove energy cue
+        mix = peak_limit(_rms_normalize(mix))  # remove energy cue
+        bg = _finite_audio(bg)
+        drone = _finite_audio(drone)
 
         return BatchItem(
             mix=torch.as_tensor(mix, dtype=torch.float32),
@@ -212,13 +247,11 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
             n_extra = self._pick_extra_count()
             for _ in range(n_extra):
                 extra = self._load_raw_segment(self.noise2_ds, L)
-                r = _rms(extra)
-                if r > 1e-8:
-                    extra = extra / r
+                extra = _rms_normalize(extra)
                 att_db = random.uniform(self.noise2_max_att, 0.0)
                 scale = 10.0 ** (att_db / 20.0)
                 bg = bg + extra * scale
-            bg = peak_limit(bg)
+            bg = peak_limit(_finite_audio(bg))
 
         return bg
 
@@ -272,7 +305,7 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
                     mix = gain_jitter(mix, aug.gain_jitter_db)
                 except Exception:
                     pass
-        return mix
+        return _finite_audio(mix)
 
     def _load_drone(
         self, L: int, target_snr: float | None = None
@@ -285,18 +318,14 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
                         based on SNR (lower SNR = more filtering).
         """
         idx = random.randint(0, len(self.drone_ds) - 1)
-        drone = np.asarray(
-            self.drone_ds[idx]["audio"]["array"], dtype=np.float32
-        )
+        drone = self._load_audio_array(self.drone_ds, idx)
         drone = _fit_length(drone, L)
         if self.highpass_hz > 0.0:
             drone = highpass(
                 drone, cutoff_hz=self.highpass_hz, sample_rate=self.sample_rate
             )
         drone = np.resize(drone, L).astype(np.float32)
-        r = _rms(drone)
-        if r > 1e-8:
-            drone = drone / r
+        drone = _rms_normalize(drone)
 
         aug = self.aug
         if aug.enable:
@@ -334,7 +363,7 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
                     max_speed_mps=aug.doppler_max_speed_mps,
                     target_length=L,
                 )
-        return drone
+        return _finite_audio(drone)
 
     def _load_raw_segment(self, ds: Any, L: int) -> np.ndarray:
         """
@@ -342,17 +371,33 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
         fit to length, highpass, RMS-normalize
         """
         idx = random.randint(0, len(ds) - 1)
-        raw = np.asarray(ds[idx]["audio"]["array"], dtype=np.float32)
+        raw = self._load_audio_array(ds, idx)
         seg = _fit_length(raw, L)
         if self.highpass_hz > 0.0:
             seg = highpass(
                 seg, cutoff_hz=self.highpass_hz, sample_rate=self.sample_rate
             )
         seg = np.resize(seg, L).astype(np.float32)
-        r = _rms(seg)
-        if r > 1e-8:
-            seg = seg / r
-        return seg
+        return _rms_normalize(seg)
+
+    def _load_audio_array(self, ds: Any, idx: int) -> np.ndarray:
+        row = ds[idx]
+        audio = row["audio"]
+        raw = np.asarray(audio["array"], dtype=np.float32).reshape(-1)
+        source_sr = self._audio_sample_rate(ds, audio)
+        return _resample_if_needed(raw, source_sr, self.sample_rate)
+
+    @staticmethod
+    def _audio_sample_rate(ds: Any, audio: Any) -> int:
+        if isinstance(audio, dict) and audio.get("sampling_rate") is not None:
+            return int(audio["sampling_rate"])
+        features = getattr(ds, "features", None)
+        if features is not None:
+            audio_feature = features.get("audio") if hasattr(features, "get") else None
+            sample_rate = getattr(audio_feature, "sampling_rate", None)
+            if sample_rate is not None:
+                return int(sample_rate)
+        return 16000
 
     def _pick_snr(self) -> tuple[SNRBin, float]:
         """Randomly select an SNR bin and value."""
@@ -417,8 +462,6 @@ def make_dataset(
     if split not in drone_dd:
         raise SystemExit(f"Split {split!r} not found in drone dataset")
     drone_ds = drone_dd[split]
-    sr = int(noise_ds.features["audio"].sampling_rate)
-
     noise2_ds = None
     if cfg.noise2_path:
         noise2_ds = _load_split(cfg.noise2_path, split)
@@ -434,7 +477,7 @@ def make_dataset(
         target_length_samples=cfg.target_length_samples,
         positive_probability=cfg.positive_probability,
         highpass_hz=cfg.highpass_hz,
-        sample_rate=sr,
+        sample_rate=cfg.sample_rate,
         length=cfg.dataset_length,
         return_bin=return_bin,
         return_components=return_components,

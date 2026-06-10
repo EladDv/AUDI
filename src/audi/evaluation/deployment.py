@@ -72,40 +72,12 @@ def detection_precision_curve_points(
 
 def deployment_score(
     *,
-    classic_auc: float | None = None,
-    field_mix_auc: float | None = None,
-    field_mix_recall: float,
-    field_mix_red_recall: float,
-    field_mix_blue_recall: float,
-    field_mix_hard_fp_rate: float,
-    attack_coverage_pct: float,
-    attack_first_pct: float,
-    attack_bg_alerts: int,
+    classic_auc: float,
+    field_mix_auc: float,
 ) -> float:
-    """Single model-selection score for deployment-like validation.
+    """AUC-weighted selector for choosing the best checkpoint in a run."""
 
-    The score intentionally rewards balanced blue/red recall and attack-run
-    coverage, while penalising late detection, hard-negative false positives,
-    and continuous-background alert runs.
-    """
-
-    if classic_auc is not None and field_mix_auc is not None:
-        return float(
-            100.0 * (0.6 * classic_auc + 0.4 * field_mix_auc)
-            + 0.5 * attack_coverage_pct
-            - 2.0 * float(attack_bg_alerts)
-        )
-
-    balanced_color_recall = min(field_mix_red_recall, field_mix_blue_recall)
-    return float(
-        0.35 * attack_coverage_pct
-        + 25.0 * balanced_color_recall
-        + 15.0 * field_mix_recall
-        - 0.15 * attack_first_pct
-        - 30.0 * field_mix_hard_fp_rate
-        - 4.0 * float(attack_bg_alerts)
-    )
-
+    return float(100.0 * (0.6 * classic_auc + 0.4 * field_mix_auc))
 
 def mix_config_from_run(
     run_dir: Path,
@@ -187,6 +159,7 @@ def _mix_config_from_mapping(
     batch_size = int(_first(flags, "batch_size", 16))
     val_steps = int(_first(flags, "val_steps_per_epoch", 200))
     seconds = float(_first(flags, "clip_seconds", clip_seconds or 2.56))
+    sample_rate = int(_first(flags, "sample_rate", 16000))
 
     # Match train_detect.py validation semantics: hard-noise is included, but
     # multi-noise and augmentation are deliberately disabled for validation.
@@ -198,9 +171,10 @@ def _mix_config_from_mapping(
         noise2_path=None,
         noise2_prob=0.0,
         snr_bins=snr_bins,
-        target_length_samples=int(16000 * seconds),
+        target_length_samples=int(sample_rate * seconds),
         positive_probability=0.5,
         highpass_hz=float(_first(flags, "highpass_hz", 125.0)),
+        sample_rate=sample_rate,
         dataset_length=batch_size * val_steps,
         aug=None,
     )

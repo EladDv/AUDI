@@ -14,7 +14,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 
-from audi.checkpoint import strip_compile_prefix
+from audi.checkpoint import load_model_from_checkpoint, strip_compile_prefix
 from audi.config import (
     AugmentationConfig,
     MelConfig,
@@ -23,6 +23,7 @@ from audi.config import (
     OptimizerConfig,
     parse_snr_bins,
 )
+from audi.frontend import parse_frequency_bands_hz
 from audi.training.dataset import make_dataset
 from audi.training.detector import DroneDetector
 
@@ -70,6 +71,12 @@ def run(argv: list[str] | None = None) -> int:
         ],
     )
     ap.add_argument("--clip-seconds", type=float, default=2.56)
+    ap.add_argument(
+        "--sample-rate",
+        type=int,
+        default=MelConfig().sample_rate,
+        help="Target audio sample rate for dataset resampling and frontend construction",
+    )
     ap.add_argument("--highpass-hz", type=float, default=125.0)
     ap.add_argument("--positive-probability", type=float, default=0.5)
     # ── Model ──
@@ -86,7 +93,8 @@ def run(argv: list[str] | None = None) -> int:
         default="default",
         choices=["default", "vit_224", "custom"],
         help="Mel spectrogram preset. vit_224: n_mels=224, hop_length=179. "
-        "custom: use --n-mels/--n-fft/--hop-length below.",
+        "custom: use --n-mels/--n-fft/--hop-length below. "
+        "--win-length can override any preset.",
     )
     ap.add_argument(
         "--n-mels",
@@ -99,6 +107,12 @@ def run(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="Override n_fft (requires --mel-preset custom)",
+    )
+    ap.add_argument(
+        "--win-length",
+        type=int,
+        default=None,
+        help="Override frontend win_length",
     )
     ap.add_argument(
         "--hop-length",
@@ -119,8 +133,18 @@ def run(argv: list[str] | None = None) -> int:
         "--frontend-type",
         default="mel",
         help=(
-            "Research mode frontend: mel, cqt, cwt, or comma-separated "
-            "like mel,cqt"
+            "Research mode frontend: mel, stft, stft_bands, cqt, cwt, or "
+            "comma-separated like mel,cqt or stft_bands,stft_bands,stft_bands"
+        ),
+    )
+    ap.add_argument(
+        "--stft-bands-hz",
+        "--stft-buckets-hz",
+        dest="stft_bands_hz",
+        default=None,
+        help=(
+            "Comma-separated frequency buckets for stft_bands, e.g. "
+            "100-500,800-1000,1200-1600"
         ),
     )
     ap.add_argument("--cqt-bins", type=int, default=84)
@@ -234,7 +258,10 @@ def run(argv: list[str] | None = None) -> int:
         "--distill-arch",
         type=str,
         default="dymn10_as",
-        help="Teacher architecture for --distill-from",
+        help=(
+            "Legacy teacher architecture hint. Full checkpoints loaded via "
+            "--distill-from carry their own architecture."
+        ),
     )
     ap.add_argument(
         "--distill-alpha",
@@ -249,6 +276,10 @@ def run(argv: list[str] | None = None) -> int:
         help="Temperature for binary logit distillation",
     )
     args = ap.parse_args(argv)
+    try:
+        stft_bands_hz = parse_frequency_bands_hz(args.stft_bands_hz)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     L.seed_everything(args.seed)
 
@@ -256,7 +287,7 @@ def run(argv: list[str] | None = None) -> int:
     if args.mel_preset == "vit_224" or args.arch.startswith("fastervit"):
         clip_samples = 36704  # 2.294 s → 224 frames at hop_length=160
     else:
-        clip_samples = int(MelConfig().sample_rate * args.clip_seconds)
+        clip_samples = int(args.sample_rate * args.clip_seconds)
 
     model_cfg = ModelConfig(
         arch=args.arch,
@@ -300,6 +331,7 @@ def run(argv: list[str] | None = None) -> int:
         target_length_samples=clip_samples,
         positive_probability=args.positive_probability,
         highpass_hz=args.highpass_hz,
+        sample_rate=args.sample_rate,
         aug=aug_cfg,
     )
 
@@ -317,6 +349,7 @@ def run(argv: list[str] | None = None) -> int:
         target_length_samples=clip_samples,
         positive_probability=0.5,
         highpass_hz=args.highpass_hz,
+        sample_rate=args.sample_rate,
         aug=None,  # NEVER augment validation
     )
     val_ds = make_dataset(
@@ -335,18 +368,22 @@ def run(argv: list[str] | None = None) -> int:
     # ── Model ──
     bin_names = [b.name for b in snr_bins]
     if args.mel_preset == "vit_224" or args.arch.startswith("fastervit"):
-        mel_cfg = MelConfig.vit_224()
+        mel_cfg = replace(MelConfig.vit_224(), sample_rate=args.sample_rate)
     elif args.mel_preset == "custom":
-        kwargs = {}
+        kwargs = {"sample_rate": args.sample_rate}
         if args.n_mels is not None:
             kwargs["n_mels"] = args.n_mels
         if args.n_fft is not None:
             kwargs["n_fft"] = args.n_fft
+        if args.win_length is not None:
+            kwargs["win_length"] = args.win_length
         if args.hop_length is not None:
             kwargs["hop_length"] = args.hop_length
         mel_cfg = MelConfig(**kwargs)
     else:
-        mel_cfg = MelConfig()
+        mel_cfg = MelConfig(sample_rate=args.sample_rate)
+    if args.win_length is not None and args.mel_preset != "custom":
+        mel_cfg = replace(mel_cfg, win_length=args.win_length)
     # PCEN override (works with any preset)
     if args.use_pcen:
         mel_cfg = replace(
@@ -362,6 +399,7 @@ def run(argv: list[str] | None = None) -> int:
         mel_cfg = replace(
             mel_cfg,
             frontend_type=args.frontend_type,
+            stft_bands_hz=stft_bands_hz,
             cqt_bins=args.cqt_bins,
             cqt_bpo=args.cqt_bpo,
             cwt_scales=args.cwt_scales,
@@ -398,25 +436,12 @@ def run(argv: list[str] | None = None) -> int:
         )
     distill_teacher = None
     if args.distill_from is not None:
-        teacher_cfg = ModelConfig(
-            arch=args.distill_arch,
-            pretrained=False,
-            compile=False,
+        teacher_detector = load_model_from_checkpoint(
+            args.distill_from,
+            device="cpu",
+            quiet=True,
         )
-        teacher_detector = DroneDetector(
-            model=teacher_cfg,
-            mel=mel_cfg,
-            optimizer=opt_cfg,
-            bin_names=bin_names,
-            clip_seconds=args.clip_seconds,
-        )
-        teacher_ckpt = torch.load(
-            str(args.distill_from), map_location="cpu", weights_only=False
-        )
-        teacher_detector.load_state_dict(
-            strip_compile_prefix(teacher_ckpt["state_dict"]), strict=False
-        )
-        distill_teacher = teacher_detector.backbone
+        distill_teacher = teacher_detector
 
     detector = detector_cls(
         model=model_cfg,

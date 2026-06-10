@@ -116,7 +116,11 @@ def compute_mel_for_mn(wav: torch.Tensor) -> torch.Tensor:
     """Compute 128-bin mel spectrogram shaped for MN backbone: [1, 1, 128, T_mel]."""
     import torchaudio.transforms as T
     mel_transform = T.MelSpectrogram(
-        sample_rate=SR, n_fft=1024, hop_length=160, n_mels=128,
+        sample_rate=SR,
+        n_fft=1024,
+        win_length=1024,
+        hop_length=160,
+        n_mels=128,
     )
     to_db = T.AmplitudeToDB()
     mel = to_db(mel_transform(wav))  # (1, 128, T_mel)

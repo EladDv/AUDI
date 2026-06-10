@@ -33,6 +33,7 @@ detection:
   model_sample_rate: 16000       # Hz — model expects 16kHz audio
   n_mels: 128                    # Mel filterbank bins
   n_fft: 1024                    # FFT window size
+  win_length: 1024               # STFT analysis window length
   hop_length: 160                # Hop length in samples
   window_samples: 81920          # 16000 Hz × 5.12s → 512 frames (librosa center=True)
   stride: 0.0625                 # Sliding window stride (0.0625 = 6.25% step size)

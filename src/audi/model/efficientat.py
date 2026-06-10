@@ -58,9 +58,28 @@ DYMN_SCRATCH_MODELS: tuple[str, ...] = (
     "dymn08_rt",
 )
 
+STATIC_DYMN_MODELS: tuple[str, ...] = (
+    "sdymn04",
+    "sdymn05",
+    "sdymn10",
+    "sdymn20",
+    "sdymn30",
+    "sdymn40",
+    "sdymn04_ca",
+    "sdymn05_ca",
+    "sdymn10_ca",
+    "sdymn20_ca",
+    "sdymn30_ca",
+    "sdymn40_ca",
+)
+
 # EfficientAT MobileNet-family model names usable via --arch
 EFFICIENTAT_MODELS: tuple[str, ...] = (
-    MN_AS_MODELS + DYMN_AS_MODELS + MN_SCRATCH_MODELS + DYMN_SCRATCH_MODELS
+    MN_AS_MODELS
+    + DYMN_AS_MODELS
+    + MN_SCRATCH_MODELS
+    + DYMN_SCRATCH_MODELS
+    + STATIC_DYMN_MODELS
 )
 
 # Map pretrained name → width_mult
@@ -81,12 +100,18 @@ _NAME_TO_WIDTH: dict[str, float] = {
     "dymn08": 0.8,
     "dymn10": 1.0,
     "dymn20": 2.0,
+    "sdymn04": 0.4,
+    "sdymn05": 0.5,
+    "sdymn10": 1.0,
+    "sdymn20": 2.0,
+    "sdymn30": 3.0,
+    "sdymn40": 4.0,
 }
 
 
 def _parse_width(name: str) -> float:
     """Extract width_mult from a pretrained model name."""
-    for prefix in ("dymn", "mn"):
+    for prefix in ("sdymn", "dymn", "mn"):
         if name.startswith(prefix):
             key = name[: len(prefix) + 2]  # e.g. "mn10", "dymn04"
             return _NAME_TO_WIDTH.get(key, 1.0)
@@ -99,6 +124,11 @@ def _is_mn(name: str) -> bool:
 
 def _is_dymn(name: str) -> bool:
     return name.startswith("dymn") and name[:6] in _NAME_TO_WIDTH
+
+
+def _is_static_dymn(name: str) -> bool:
+    base = name.removesuffix("_ca")
+    return base.startswith("sdymn") and base[:7] in _NAME_TO_WIDTH
 
 
 def _quiet_get_model(get_model, *args, **kwargs):
@@ -214,6 +244,38 @@ def _build_dymn(
     return wrapper
 
 
+def _build_static_dymn(
+    arch_name: str,
+    num_classes: int = 1,
+) -> _EfficientATWrapper:
+    """Build a static DyMN-derived student.
+
+    ``sdymn*`` keeps the DyMN width/channel topology but removes the dynamic
+    convolution, dynamic ReLU, and coordinate attention branches. ``sdymn*_ca``
+    keeps coordinate attention as the higher-capacity static-derived variant.
+    These students are trained from scratch/distillation rather than loaded
+    from EfficientAT pretrained checkpoints.
+    """
+    from models.dymn.model import get_model
+
+    keep_ca = arch_name.endswith("_ca")
+    base_name = arch_name.removesuffix("_ca")
+    width = _parse_width(base_name)
+    model = _quiet_get_model(
+        get_model,
+        num_classes=527,
+        pretrained_name=None,
+        width_mult=width,
+        reduced_tail=False,
+        no_dyconv=True,
+        no_dyrelu=True,
+        no_ca=not keep_ca,
+    )
+    feature_dim = model.classifier[2].in_features
+    model.classifier = nn.Identity()
+    return _EfficientATWrapper(model, feature_dim, num_classes=num_classes)
+
+
 def build_efficientat(
     pretrained_name: str,
     num_classes: int = 1,
@@ -242,7 +304,9 @@ def build_efficientat(
         _mn.model_dir = cache_dir
         _dymn.model_dir = cache_dir
 
-    if pretrained and pretrained_name in MN_SCRATCH_MODELS + DYMN_SCRATCH_MODELS:
+    if pretrained and pretrained_name in (
+        MN_SCRATCH_MODELS + DYMN_SCRATCH_MODELS + STATIC_DYMN_MODELS
+    ):
         raise ValueError(
             f"{pretrained_name!r} has no EfficientAT pretrained checkpoint. "
             "Use pretrained=False or pass --no-pretrained."
@@ -259,6 +323,11 @@ def build_efficientat(
             pretrained_name,
             num_classes=num_classes,
             pretrained=pretrained,
+        )
+    elif _is_static_dymn(pretrained_name):
+        return _build_static_dymn(
+            pretrained_name,
+            num_classes=num_classes,
         )
     else:
         supported = ", ".join(EFFICIENTAT_MODELS)

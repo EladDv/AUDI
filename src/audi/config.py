@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+LINEAR_STFT_MEAN_DB = -7.860577
+LINEAR_STFT_STD_DB = 21.280184
+
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -38,6 +41,7 @@ class MelConfig:
         sample_rate: Audio sample rate in Hz.
         n_mels: Number of mel filterbank bins.
         n_fft: FFT window size.
+        win_length: Window length in samples. Defaults to ``n_fft``.
         hop_length: Hop length in samples.
         mean_db: Pre-computed scalar mean for normalization (None to skip).
         std_db: Pre-computed scalar std for normalization (None to skip).
@@ -46,6 +50,7 @@ class MelConfig:
     sample_rate: int = 16000
     n_mels: int = 128
     n_fft: int = 1024
+    win_length: int | None = None
     hop_length: int = 160
     mean_db: float | None = 10.430418
     std_db: float | None = 5.288271
@@ -56,11 +61,31 @@ class MelConfig:
     pcen_delta: float = 2.0
     pcen_r: float = 0.5
     pcen_eps: float = 1e-6
-    # Multi-frontend: "mel" (default), or "cqt", "cwt", "mel,cqt", "mel,cwt", "mel,cqt,cwt"
+    # Multi-frontend: "mel" (default), "stft", "stft_bands", "cqt", "cwt",
+    # or comma-separated combinations.
     frontend_type: str = "mel"
+    stft_bands_hz: tuple[tuple[float, float], ...] | None = None
     cqt_bins: int = 84
     cqt_bpo: int = 12
     cwt_scales: int = 64
+
+    def __post_init__(self) -> None:
+        win_length = self.n_fft if self.win_length is None else self.win_length
+        if self.sample_rate <= 0:
+            raise ValueError(f"sample_rate must be > 0, got {self.sample_rate}")
+        if self.n_mels <= 0:
+            raise ValueError(f"n_mels must be > 0, got {self.n_mels}")
+        if self.n_fft <= 0:
+            raise ValueError(f"n_fft must be > 0, got {self.n_fft}")
+        if win_length <= 0:
+            raise ValueError(f"win_length must be > 0, got {win_length}")
+        if win_length > self.n_fft:
+            raise ValueError(
+                f"win_length must be <= n_fft, got {win_length} > {self.n_fft}"
+            )
+        if self.hop_length <= 0:
+            raise ValueError(f"hop_length must be > 0, got {self.hop_length}")
+        object.__setattr__(self, "win_length", win_length)
 
     @classmethod
     def vit_224(cls) -> MelConfig:

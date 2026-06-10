@@ -264,6 +264,7 @@ class BlueRedDetector(L.LightningModule):
         dropout: float = 0.2,
         n_mels: int = 128,
         n_fft: int = 1024,
+        win_length: int | None = None,
         hop_length: int = 160,
         cls_loss_weight: float = 1.0,
         det_loss_weight: float = 1.0,
@@ -283,7 +284,11 @@ class BlueRedDetector(L.LightningModule):
         # ── Frontend ──
         if detector_checkpoint is None:
             self.mel_transform = T.MelSpectrogram(
-                sample_rate=SR, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels,
+                sample_rate=SR,
+                n_fft=n_fft,
+                win_length=win_length,
+                hop_length=hop_length,
+                n_mels=n_mels,
             )
             self.to_db = T.AmplitudeToDB()
         else:

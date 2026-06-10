@@ -101,6 +101,7 @@ class DSPDroneDetector(DroneDetector):
         self._dsp_mel = T.MelSpectrogram(
             sample_rate=mel_cfg.sample_rate,
             n_fft=mel_cfg.n_fft,
+            win_length=mel_cfg.win_length,
             hop_length=dsp_hop_length,
             n_mels=mel_cfg.n_mels,
         )

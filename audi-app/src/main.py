@@ -118,6 +118,7 @@ def load_config(config_path: str = None) -> dict:
             "model_sample_rate": 16000,
             "n_mels": 128,
             "n_fft": 1024,
+            "win_length": 1024,
             "hop_length": 160,
             "window_samples": 40960,
             "stride": 0.125,

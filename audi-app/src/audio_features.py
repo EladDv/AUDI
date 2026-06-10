@@ -49,6 +49,7 @@ def compute_mel_spectrogram(
     sample_rate: int,
     n_mels: int = 128,
     n_fft: int = 1024,
+    win_length: int | None = None,
     hop_length: int = 160,
     f_min: float = 0.0,
     f_max: float | None = None,
@@ -67,6 +68,12 @@ def compute_mel_spectrogram(
         f_max = sample_rate / 2.0
     if power != 2.0:
         raise ValueError("Only power=2.0 matches the trained detector frontend")
+    if win_length is None:
+        win_length = n_fft
+    if win_length <= 0 or win_length > n_fft:
+        raise ValueError(
+            f"win_length must be in [1, n_fft], got {win_length} for n_fft={n_fft}"
+        )
 
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
 
@@ -80,7 +87,7 @@ def compute_mel_spectrogram(
     from numpy.lib.stride_tricks import sliding_window_view
 
     frames = sliding_window_view(padded, n_fft)[::hop_length]
-    window = _periodic_hann_window(n_fft)
+    window = _stft_window(n_fft, win_length)
     spec = np.fft.rfft(frames * window[np.newaxis, :], n=n_fft, axis=1)
     power_spec = (spec.real * spec.real + spec.imag * spec.imag).T
 
@@ -100,6 +107,16 @@ def compute_mel_spectrogram(
 @lru_cache(maxsize=16)
 def _periodic_hann_window(n_fft: int) -> np.ndarray:
     return np.hanning(n_fft + 1)[:-1].astype(np.float32)
+
+
+@lru_cache(maxsize=16)
+def _stft_window(n_fft: int, win_length: int) -> np.ndarray:
+    window = _periodic_hann_window(win_length)
+    if win_length == n_fft:
+        return window
+    left = (n_fft - win_length) // 2
+    right = n_fft - win_length - left
+    return np.pad(window, (left, right), mode="constant").astype(np.float32)
 
 
 @lru_cache(maxsize=16)
@@ -150,6 +167,7 @@ class TFLiteClassifier:
         num_threads: int = 2,
         n_mels: int = 128,
         n_fft: int = 1024,
+        win_length: int | None = None,
         hop_length: int = 160,
         model_sample_rate: int = 16000,
         window_samples: int = 40960,
@@ -159,6 +177,7 @@ class TFLiteClassifier:
         self.model_path = model_path
         self.n_mels = n_mels
         self.n_fft = n_fft
+        self.win_length = n_fft if win_length is None else win_length
         self.hop_length = hop_length
         self.model_sample_rate = model_sample_rate
         self.window_samples = window_samples
@@ -247,6 +266,7 @@ class TFLiteClassifier:
             self.model_sample_rate,
             n_mels=self.n_mels,
             n_fft=self.n_fft,
+            win_length=self.win_length,
             hop_length=self.hop_length,
         )
         target_frames = self.expected_frames or (self.window_samples // self.hop_length)

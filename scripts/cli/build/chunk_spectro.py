@@ -19,6 +19,7 @@ def run() -> None:
     _DEFAULT_CHUNK_SEC = 15.0
     _DEFAULT_TARGET_SR = 16000
     _DEFAULT_N_MELS = 128
+    _DEFAULT_N_FFT = 1024
     _DEFAULT_FMAX = 8000
     
     def iter_audio_files(dir_path: Path) -> list[Path]:
@@ -42,9 +43,18 @@ def run() -> None:
     ap.add_argument("--chunk-sec", type=float, default=_DEFAULT_CHUNK_SEC)
     ap.add_argument("--target-sr", type=int, default=_DEFAULT_TARGET_SR)
     ap.add_argument("--n-mels", type=int, default=_DEFAULT_N_MELS)
+    ap.add_argument("--n-fft", type=int, default=_DEFAULT_N_FFT)
+    ap.add_argument("--win-length", type=int, default=None)
+    ap.add_argument("--hop-length", type=int, default=None)
     ap.add_argument("--fmax", type=int, default=_DEFAULT_FMAX)
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
+    win_length = args.n_fft if args.win_length is None else args.win_length
+    hop_length = args.n_fft // 4 if args.hop_length is None else args.hop_length
+    if win_length <= 0 or win_length > args.n_fft:
+        raise SystemExit(
+            f"--win-length must be in [1, --n-fft], got {win_length}"
+        )
     
     args.output_dir.mkdir(parents=True, exist_ok=True)
     audio_files = iter_audio_files(args.dataset_v2_dir)
@@ -70,7 +80,13 @@ def run() -> None:
     
             sf.write(str(out_wav), chunk, args.target_sr)
             mel_spec = librosa.feature.melspectrogram(
-                y=chunk, sr=args.target_sr, n_mels=args.n_mels, fmax=args.fmax
+                y=chunk,
+                sr=args.target_sr,
+                n_fft=args.n_fft,
+                win_length=win_length,
+                hop_length=hop_length,
+                n_mels=args.n_mels,
+                fmax=args.fmax,
             )
             mel_db = librosa.power_to_db(mel_spec, ref=np.max)
             fig, ax = plt.subplots(figsize=(12, 4))

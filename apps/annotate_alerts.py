@@ -108,7 +108,13 @@ def load_spec(wav_path_str: str, hop_s: float) -> tuple[np.ndarray, float]:
     if rms > 0:
         audio = audio / rms
     S = librosa.feature.melspectrogram(
-        y=audio, sr=SR, n_fft=1024, hop_length=160, n_mels=128, power=2.0
+        y=audio,
+        sr=SR,
+        n_fft=1024,
+        win_length=1024,
+        hop_length=160,
+        n_mels=128,
+        power=2.0,
     )
     S_db = librosa.power_to_db(S, ref=np.max, top_db=80.0)
     spec_fs = 160 / SR

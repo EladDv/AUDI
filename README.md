@@ -188,6 +188,7 @@ The sweep runner also supports `--no-postprocess` and `--no-calibrate` flags to 
 | `dsp_sweep.yaml`, `dsp_v3v4_sweep.yaml`, `dsp_validation.yaml` | DSP feature research |
 | `mel_sweep.yaml` | Mel geometry and PCEN research |
 | `frontend_sweep.yaml`, `frontend_sweep_mn.yaml` | CQT/CWT frontend research |
+| `audio_resample_frontend_sweep.yaml` | 8 kHz 128-mel and 4 kHz linear-STFT frontend research |
 
 Blue/red training and export are maintained commands:
 
@@ -222,6 +223,9 @@ uv run audi-export-blue-red-tflite --help
 | `--dropout` | `0.0` | Dropout rate (0.2 recommended for calibration) |
 | `--bn-momentum` | `0.1` | Batch norm momentum |
 | `--mel-preset` | `default` | Mel spectrogram preset: `default` (128 mels) or `vit_224` (224×224) |
+| `--n-fft` | preset | FFT size when `--mel-preset custom` is used |
+| `--win-length` | `n_fft` | STFT analysis window length when `--mel-preset custom` is used |
+| `--hop-length` | preset | Hop length when `--mel-preset custom` is used |
 
 **Optimizer:**
 | Flag | Default | Description |

@@ -59,22 +59,30 @@ def run(
     if any(arg in {"-h", "--help"} for arg in rest):
         print(
             "usage: audi-eval attack-runs [--all] "
-            "[--skip-postprocess] [--skip-calibrate]"
+            "[--skip-postprocess] [--skip-calibrate] [--sweep <name>]"
         )
         return
 
     all_flag = _all
     skip_pp = _skip_postprocess
     skip_cal = _skip_calibrate
-    for a in rest:
+    sweep_filter = None
+    i = 0
+    while i < len(rest):
+        a = rest[i]
         if a == "--all":
             all_flag = True
         elif a == "--skip-postprocess":
             skip_pp = True
         elif a == "--skip-calibrate":
             skip_cal = True
+        elif a == "--sweep":
+            if i + 1 >= len(rest):
+                raise SystemExit("--sweep requires a sweep name")
+            sweep_filter = rest[i + 1]
+            i += 1
+        i += 1
 
-    _SR = MelConfig().sample_rate
     _STRIDE = 0.125
     _PROJECT = Path(__file__).resolve().parents[3]  # project root
     _ATTACK_DIR = _PROJECT / "data" / "attack_runs"
@@ -221,19 +229,39 @@ def run(
         mel_hp = hp.get("mel", {})
         if isinstance(mel_hp, dict):
             mel_cfg = MelConfig(
+                sample_rate=mel_hp.get("sample_rate", hp.get("sample_rate", 16000)),
                 n_mels=mel_hp.get("n_mels", hp.get("n_mels", 128)),
                 n_fft=mel_hp.get("n_fft", hp.get("n_fft", 1024)),
+                win_length=mel_hp.get("win_length", hp.get("win_length")),
                 hop_length=mel_hp.get("hop_length", hp.get("hop_length", 160)),
                 mean_db=mel_hp.get("mean_db", hp.get("mel_mean")),
                 std_db=mel_hp.get("std_db", hp.get("mel_std")),
+                frontend_type=mel_hp.get("frontend_type", hp.get("frontend_type", "mel")),
+                stft_bands_hz=mel_hp.get(
+                    "stft_bands_hz", hp.get("stft_bands_hz")
+                ),
+                cqt_bins=mel_hp.get("cqt_bins", hp.get("cqt_bins", 84)),
+                cqt_bpo=mel_hp.get("cqt_bpo", hp.get("cqt_bpo", 12)),
+                cwt_scales=mel_hp.get("cwt_scales", hp.get("cwt_scales", 64)),
+                use_pcen=mel_hp.get("use_pcen", hp.get("use_pcen", False)),
             )
         else:
             mel_cfg = MelConfig(
+                sample_rate=getattr(mel_hp, "sample_rate", hp.get("sample_rate", 16000)),
                 n_mels=getattr(mel_hp, "n_mels", hp.get("n_mels", 128)),
                 n_fft=getattr(mel_hp, "n_fft", hp.get("n_fft", 1024)),
+                win_length=getattr(mel_hp, "win_length", hp.get("win_length")),
                 hop_length=getattr(mel_hp, "hop_length", hp.get("hop_length", 160)),
                 mean_db=getattr(mel_hp, "mean_db", hp.get("mel_mean")),
                 std_db=getattr(mel_hp, "std_db", hp.get("mel_std")),
+                frontend_type=getattr(mel_hp, "frontend_type", hp.get("frontend_type", "mel")),
+                stft_bands_hz=getattr(
+                    mel_hp, "stft_bands_hz", hp.get("stft_bands_hz")
+                ),
+                cqt_bins=getattr(mel_hp, "cqt_bins", hp.get("cqt_bins", 84)),
+                cqt_bpo=getattr(mel_hp, "cqt_bpo", hp.get("cqt_bpo", 12)),
+                cwt_scales=getattr(mel_hp, "cwt_scales", hp.get("cwt_scales", 64)),
+                use_pcen=getattr(mel_hp, "use_pcen", hp.get("use_pcen", False)),
             )
         opt_cfg = OptimizerConfig(
             lr=hp.get("lr", 1e-3),
@@ -256,7 +284,7 @@ def run(
         model.load_state_dict(strip_compile_prefix(ckpt["state_dict"]), strict=False)
         # Don't keep ckpt in memory — GC it
         clip_s = get_clip_seconds(hp)
-        return model.eval(), clip_s
+        return model.eval(), clip_s, int(mel_cfg.sample_rate)
 
     def find_predictions_file(ckpt_path):
         ckpt = Path(ckpt_path)
@@ -282,6 +310,8 @@ def run(
 
     # ── Stage 1: Discover checkpoints ──────────────────────────────────
     ckpts = discover_best_checkpoints()
+    if sweep_filter is not None:
+        ckpts = [c for c in ckpts if c["sweep"] == sweep_filter]
     print(f"Found {len(ckpts)} checkpoints\n")
 
     # ── Stage 2: Auto-postprocess new checkpoints ──────────────────────
@@ -335,10 +365,13 @@ def run(
 
     # ── Stage 5: Load attack audio once ────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    audio_waveforms: dict[str, np.ndarray] = {}
+    audio_waveforms: dict[str, tuple[np.ndarray, int]] = {}
     for fp in sorted(_ATTACK_DIR.glob("*.wav")):
         audio, sr = torchaudio.load(str(fp))
-        audio_waveforms[fp.name] = audio.mean(dim=0).numpy().astype(np.float32).reshape(-1)
+        audio_waveforms[fp.name] = (
+            audio.mean(dim=0).numpy().astype(np.float32).reshape(-1),
+            int(sr),
+        )
     print(f"Loaded {len(audio_waveforms)} audio files\n")
 
     # ── Stage 6: Evaluate checkpoints (incremental, crash-resilient) ──
@@ -372,7 +405,7 @@ def run(
         model = None
         pred_data = None
         try:
-            model, clip_s = load_model(ckpt["path"])
+            model, clip_s, model_sample_rate = load_model(ckpt["path"])
             model = model.to(device)
 
             pred_file = find_predictions_file(ckpt["path"])
@@ -397,17 +430,24 @@ def run(
             # Build windows using model's actual clip length
             all_atk_segs: list[tuple[str, np.ndarray]] = []
             bg_windows: list[np.ndarray] = []
-            for name, audio in audio_waveforms.items():
+            for name, (audio, audio_sample_rate) in audio_waveforms.items():
+                if audio_sample_rate != model_sample_rate:
+                    audio_t = torch.as_tensor(audio, dtype=torch.float32).unsqueeze(0)
+                    audio = torchaudio.functional.resample(
+                        audio_t, audio_sample_rate, model_sample_rate
+                    ).squeeze(0).numpy()
                 if name.startswith("background"):
-                    bg_windows.extend(split_into_windows(audio, _SR, clip_s))
+                    bg_windows.extend(
+                        split_into_windows(audio, model_sample_rate, clip_s)
+                    )
                 else:
-                    segs = split_by_zero_gaps(audio, _SR)
+                    segs = split_by_zero_gaps(audio, model_sample_rate)
                     for i, seg in enumerate(segs):
                         all_atk_segs.append((f"{Path(name).stem}_seg{i}", seg))
 
             atk_seg_data = []
             for name, seg in all_atk_segs:
-                wins = split_into_windows(seg, _SR, clip_s)
+                wins = split_into_windows(seg, model_sample_rate, clip_s)
                 if not wins:
                     atk_seg_data.append((name, np.array([])))
                 else:

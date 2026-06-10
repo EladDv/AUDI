@@ -66,7 +66,8 @@ def test_mix_config_from_sweep_config_rebuilds_validation_inputs(tmp_path):
                 "noise_path: data/field_bg",
                 "drone_path: data/drone",
                 "flags: >-",
-                "  --clip-seconds 5.12 --batch-size 24 --val-steps-per-epoch 120",
+                "  --sample-rate 8000 --clip-seconds 5.12",
+                "  --batch-size 24 --val-steps-per-epoch 120",
                 "  --hard-noise data/hard --hard-noise-prob 0.07",
                 "  --noise2 data/field_bg --noise2-prob 0.45",
                 "  --snr-bin near:-8:-3:0.4 --snr-bin far:-25:-20:0.6",
@@ -82,31 +83,15 @@ def test_mix_config_from_sweep_config_rebuilds_validation_inputs(tmp_path):
     assert mix_cfg.hard_noise_prob == 0.07
     assert mix_cfg.noise2_path is None
     assert mix_cfg.dataset_length == 24 * 120
-    assert mix_cfg.target_length_samples == 81920
+    assert mix_cfg.sample_rate == 8000
+    assert mix_cfg.target_length_samples == 40960
     assert bin_names == ["near", "far"]
 
 
-def test_deployment_score_rewards_detection_and_penalizes_false_alerts():
-    good = deployment_score(
-        field_mix_recall=0.75,
-        field_mix_red_recall=0.70,
-        field_mix_blue_recall=0.80,
-        field_mix_hard_fp_rate=0.05,
-        attack_coverage_pct=55.0,
-        attack_first_pct=20.0,
-        attack_bg_alerts=1,
-    )
-    bad = deployment_score(
-        field_mix_recall=0.75,
-        field_mix_red_recall=0.70,
-        field_mix_blue_recall=0.80,
-        field_mix_hard_fp_rate=0.40,
-        attack_coverage_pct=30.0,
-        attack_first_pct=80.0,
-        attack_bg_alerts=10,
-    )
+def test_deployment_score_is_weighted_auc_selector():
+    score = deployment_score(classic_auc=0.80, field_mix_auc=0.50)
 
-    assert good > bad
+    assert score == 68.0
 
 
 def test_find_threshold_at_min_precision_uses_best_tpr_above_target_precision():

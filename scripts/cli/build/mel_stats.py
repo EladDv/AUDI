@@ -16,6 +16,7 @@ def run() -> None:
     SR = 16000
     N_MELS = 128
     N_FFT = 1024
+    WIN_LENGTH = 1024
     HOP = 160
     HIGH_PASS = 125.0
     CLIP_SECONDS = 2.56
@@ -56,6 +57,7 @@ def run() -> None:
     mel = torchaudio.transforms.MelSpectrogram(
         sample_rate=SR,
         n_fft=N_FFT,
+        win_length=WIN_LENGTH,
         hop_length=HOP,
         n_mels=N_MELS,
     )
