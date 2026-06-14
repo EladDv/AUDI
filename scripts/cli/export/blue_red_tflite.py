@@ -30,16 +30,19 @@ class CombinedDetectorBlueRed(nn.Module):
         if getattr(model, "detector", None) is None:
             raise ValueError(
                 "Blue/red checkpoint must be trained with --detector-checkpoint"
-            )
+        )
         self.backbone = model.detector.backbone.backbone
         self.det_head = model.detector.backbone.classifier
-        self.shared_fc = model.shared_fc
         self.cls_head = model.cls_head
 
     def forward(self, spec: torch.Tensor) -> torch.Tensor:
         _, features = self.backbone(spec[:, :1])
         det_logit = self.det_head(features)
-        cls_logits = self.cls_head(self.shared_fc(features))
+        if det_logit.ndim == 1:
+            det_logit = det_logit.unsqueeze(1)
+        cls_logits = self.cls_head(features)
+        if cls_logits.ndim == 1:
+            cls_logits = cls_logits.unsqueeze(0)
         return torch.cat([det_logit, cls_logits], dim=1)
 
 
@@ -131,7 +134,7 @@ def main() -> int:
     ap.add_argument("--ckpt", required=True, type=Path)
     ap.add_argument(
         "--output",
-        default=Path("audi-app/models/model.tflite"),
+        default=Path("audi-app/models/model_combined_mn10_mined_hardneg_blue_red.tflite"),
         type=Path,
     )
     ap.add_argument("--n-mels", default=128, type=int)

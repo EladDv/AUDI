@@ -1,7 +1,10 @@
 """Tests for audi.training.validation — pure compute functions."""
 
+import inspect
+
 import numpy as np
 
+from audi.hysteresis import apply_hysteresis
 from audi.training.validation import (
     compute_calibration,
     compute_pr_curve,
@@ -10,6 +13,23 @@ from audi.training.validation import (
     split_by_bin,
     tpr_at_fpr,
 )
+
+
+def test_default_hysteresis_uses_documented_window_and_ratio():
+    params = inspect.signature(apply_hysteresis).parameters
+
+    assert params["window"].default == 8
+    assert params["ratio"].default == 0.6
+    assert params["margin"].default == 0.05
+
+
+def test_hysteresis_ratio_uses_ceiling_not_floor():
+    scores = np.array([0.0, 0.0, 0.0, 0.0, 0.56, 0.56, 0.56, 0.56, 0.56])
+
+    detections = apply_hysteresis(scores, threshold=0.5)
+
+    assert not detections[7]
+    assert detections[8]
 
 
 class TestComputeROCVALUES:

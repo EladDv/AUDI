@@ -22,11 +22,6 @@ from audi.training.validation import (
     split_by_bin,
     tpr_at_fpr,
 )
-from audi.training.validation_plots import (
-    render_det_pr_calibration,
-    render_spectrogram_samples,
-    render_validation_grid,
-)
 
 
 class PCEN(torch.nn.Module):
@@ -134,6 +129,9 @@ class DroneDetector(L.LightningModule):
         model_cfg = model or ModelConfig()
         mel_cfg = mel or MelConfig()
         opt_cfg = optimizer or OptimizerConfig()
+        self._model_cfg = model_cfg
+        self._mel_cfg = mel_cfg
+        self._optimizer_cfg = opt_cfg
 
         if not 0.0 <= distill_alpha <= 1.0:
             raise ValueError(
@@ -172,9 +170,6 @@ class DroneDetector(L.LightningModule):
                 n_fft=mel_cfg.n_fft,
                 win_length=mel_cfg.win_length,
                 use_pcen=mel_cfg.use_pcen,
-                cqt_bins=mel_cfg.cqt_bins,
-                cqt_bpo=mel_cfg.cqt_bpo,
-                cwt_scales=mel_cfg.cwt_scales,
                 stft_bands_hz=mel_cfg.stft_bands_hz,
             )
             self._multi_frontend = fe
@@ -233,6 +228,8 @@ class DroneDetector(L.LightningModule):
             arch=model_cfg.arch,
             num_classes=model_cfg.num_classes,
             pretrained=model_cfg.pretrained,
+            detector_head_hidden_dims=model_cfg.detector_head_hidden_dims,
+            detector_head_dropout=model_cfg.detector_head_dropout,
         )
         if model_cfg.compile:
             self.backbone = torch.compile(self.backbone)  # type: ignore[assignment]  # torch.compile erases type
@@ -292,10 +289,6 @@ class DroneDetector(L.LightningModule):
         self._val_logits: list[torch.Tensor] = []
         self._val_labels: list[torch.Tensor] = []
         self._val_bin_idx: list[torch.Tensor] = []
-        self._val_drone: list[torch.Tensor] = []
-        self._val_noise: list[torch.Tensor] = []
-        self._val_snr: list[torch.Tensor] = []
-        self._val_mix: list[torch.Tensor] = []
 
     def _set_backbone_frozen(self, frozen: bool) -> None:
         """Freeze feature extractor params while leaving classifier trainable."""
@@ -417,15 +410,9 @@ class DroneDetector(L.LightningModule):
     # ── Forward ──────────────────────────────────────────────────
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        """Run detection on a waveform.
-
-        Args:
-            wav: Waveform tensor of shape ``[B, T]``.
-
-        Returns:
-            Logit tensor of shape ``[B]``.
-        """
-        return self.backbone(self._to_mel(wav)).squeeze(1)
+        """Run detection on a waveform or precomputed spectrogram."""
+        spec = wav if wav.ndim == 4 else self._to_mel(wav)
+        return self.backbone(spec).squeeze(1)
 
     # ── Loss ─────────────────────────────────────────────────────
 
@@ -519,7 +506,7 @@ class DroneDetector(L.LightningModule):
             wav, label = batch
             bin_idx = None
 
-        spec = self._to_mel(wav)
+        spec = wav if wav.ndim == 4 else self._to_mel(wav)
         spec, label, bin_idx = self._apply_mixup_cutmix(spec, label, bin_idx)
         logits = self.backbone(spec).squeeze(1)
         hard_loss = self._compute_loss(logits, label, bin_idx)
@@ -544,12 +531,8 @@ class DroneDetector(L.LightningModule):
     def validation_step(self, batch: tuple, batch_idx: int) -> None:
         """Collect validation predictions for epoch-end metrics."""
         if len(batch) == 6:
-            wav, label, bin_idx, drone, noise, snr_val = batch
+            wav, label, bin_idx, *_ = batch
             self._val_bin_idx.append(bin_idx.cpu())
-            self._val_drone.append(drone.cpu())
-            self._val_noise.append(noise.cpu())
-            self._val_snr.append(snr_val.cpu())
-            self._val_mix.append(wav.cpu())
         elif len(batch) == 3:
             wav, label, bin_idx = batch
             self._val_bin_idx.append(bin_idx.cpu())
@@ -570,24 +553,14 @@ class DroneDetector(L.LightningModule):
         self._val_logits.clear()
         self._val_labels.clear()
         self._val_bin_idx.clear()
-        self._val_drone.clear()
-        self._val_noise.clear()
-        self._val_snr.clear()
-        self._val_mix.clear()
 
     def on_validation_epoch_end(self) -> None:
-        """Compute and log validation metrics and figures."""
+        """Compute and log validation metrics."""
         if not self._val_logits:
             return
 
         logits = torch.cat(self._val_logits).numpy()
         labels = torch.cat(self._val_labels).numpy()
-        model_hp = self.hparams.get("model", {})
-        model_name = (
-            model_hp.get("arch", "model")
-            if isinstance(model_hp, dict)
-            else getattr(model_hp, "arch", "model")
-        )
 
         # Per-bin data
         per_bin: dict[str, tuple[np.ndarray, np.ndarray]] = {}
@@ -641,45 +614,6 @@ class DroneDetector(L.LightningModule):
         # ── Calibration ──────────────────────────────────────
         _, _, _, ece = compute_calibration(logits, labels)
         self.log("val/ece", ece, prog_bar=True)
-
-        # ── Figures ──────────────────────────────────────────
-        render_validation_grid(
-            logits,
-            labels,
-            per_bin,
-            epoch=self.current_epoch,
-            logger=self.logger,
-            model_name=model_name,
-            bin_order=self._bin_names,
-        )
-        render_det_pr_calibration(
-            logits,
-            labels,
-            per_bin,
-            epoch=self.current_epoch,
-            logger=self.logger,
-            model_name=model_name,
-            bin_order=self._bin_names,
-        )
-        if self._val_mix:
-            mix_all = torch.cat(self._val_mix)
-            drone_all = torch.cat(self._val_drone)
-            noise_all = torch.cat(self._val_noise)
-            snr_all = torch.cat(self._val_snr).numpy()
-            render_spectrogram_samples(
-                mix_all,
-                drone_all,
-                noise_all,
-                snr_all,
-                logits,
-                epoch=self.current_epoch,
-                logger=self.logger,
-                model_name=model_name,
-                sample_rate=16000,
-                output_dir=str(self.logger.log_dir)
-                if self.logger and self.logger.log_dir
-                else "",
-            )
 
     # ── Optimizer ────────────────────────────────────────────────
 

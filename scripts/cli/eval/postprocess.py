@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from audi.checkpoint import get_clip_seconds, strip_compile_prefix
+from audi.checkpoint import get_clip_seconds, model_from_checkpoint_data
 
 
 def run(noise_path: str | None, drone_path: str | None) -> None:
@@ -19,12 +19,6 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
     from datasets import load_from_disk
     from torch.utils.data import DataLoader
 
-    from audi.cli_utils import NUM_WORKERS
-    from audi.config import (
-        MelConfig,
-        ModelConfig,
-        OptimizerConfig,
-    )
     from audi.evaluation.deployment import (
         deployment_score,
         mix_config_from_run,
@@ -39,6 +33,9 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
         split_by_bin,
         tpr_at_fpr,
     )
+    from scripts.cli._dispatch import NUM_WORKERS, configure_torch_file_sharing
+
+    configure_torch_file_sharing()
 
     HARDNESS = ["easy", "medium", "hard", "very_hard", "extreme", "far_field"]
     GROUPINGS = {
@@ -97,79 +94,6 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
     fallback_drone_path = Path(drone_path) if drone_path else None
     field_mix_cache: dict[tuple[int, int, tuple[str, ...]], DataLoader] = {}
     
-    def _build_detector(ckpt: dict, bin_names: list[str]) -> DroneDetector:
-        hp = ckpt["hyper_parameters"]
-        # Handle both old flat-param and new ModelConfig checkpoints
-        model_hp = hp.get("model", {})
-        if isinstance(model_hp, dict):
-            model_cfg = ModelConfig(
-                arch=model_hp.get("arch", hp.get("model_arch", "cnn14")),
-                pretrained=model_hp.get(
-                    "pretrained", hp.get("pretrained_backbone", True)
-                ),
-                compile=model_hp.get("compile", False),
-            )
-        else:
-            # Clone config but force compile=False for eval
-            model_cfg = ModelConfig(
-                arch=model_hp.arch,
-                num_classes=model_hp.num_classes,
-                pretrained=model_hp.pretrained,
-                compile=False,
-            )
-        mel_hp = hp.get("mel", {})
-        if isinstance(mel_hp, dict):
-            mel_cfg = MelConfig(
-                sample_rate=mel_hp.get("sample_rate", hp.get("sample_rate", 16000)),
-                n_mels=mel_hp.get("n_mels", hp.get("n_mels", 128)),
-                n_fft=mel_hp.get("n_fft", hp.get("n_fft", 1024)),
-                win_length=mel_hp.get("win_length", hp.get("win_length")),
-                hop_length=mel_hp.get("hop_length", hp.get("hop_length", 160)),
-                mean_db=mel_hp.get("mean_db", hp.get("mel_mean")),
-                std_db=mel_hp.get("std_db", hp.get("mel_std")),
-                frontend_type=mel_hp.get("frontend_type", hp.get("frontend_type", "mel")),
-                stft_bands_hz=mel_hp.get(
-                    "stft_bands_hz", hp.get("stft_bands_hz")
-                ),
-                cqt_bins=mel_hp.get("cqt_bins", hp.get("cqt_bins", 84)),
-                cqt_bpo=mel_hp.get("cqt_bpo", hp.get("cqt_bpo", 12)),
-                cwt_scales=mel_hp.get("cwt_scales", hp.get("cwt_scales", 64)),
-                use_pcen=mel_hp.get("use_pcen", hp.get("use_pcen", False)),
-            )
-        else:
-            mel_cfg = mel_hp  # already a MelConfig object
-        opt_hp = hp.get("optimizer", {})
-        if isinstance(opt_hp, dict):
-            opt_cfg = OptimizerConfig(
-                lr=opt_hp.get("lr", hp.get("lr", 1e-3)),
-                weight_decay=opt_hp.get(
-                    "weight_decay", hp.get("weight_decay", 0.01)
-                ),
-                schedule=opt_hp.get(
-                    "schedule", hp.get("lr_schedule", "constant")
-                ),
-                warmup_epochs=opt_hp.get(
-                    "warmup_epochs", hp.get("warmup_epochs", 0)
-                ),
-            )
-        else:
-            opt_cfg = opt_hp  # already an OptimizerConfig object
-        model = DroneDetector(
-            model=model_cfg,
-            mel=mel_cfg,
-            optimizer=opt_cfg,
-            bin_names=bin_names,
-            loss_type=hp.get("loss_type", "bce"),
-            label_smoothing=hp.get("label_smoothing", 0.0),
-            per_bin_weights=hp.get("per_bin_weights", False),
-            spec_augment_prob=float(hp.get("spec_augment_prob", 0.0)),
-            mixup_alpha=hp.get("mixup_alpha", 0.0),
-            cutmix_alpha=hp.get("cutmix_alpha", 0.0),
-            dropout=hp.get("dropout", 0.0),
-            bn_momentum=hp.get("bn_momentum", 0.1),
-        )
-        return model
-
     def _field_mix_loader(
         clip_samples: int, sample_rate: int, snr_bins
     ) -> DataLoader | None:
@@ -296,11 +220,11 @@ def run(noise_path: str | None, drone_path: str | None) -> None:
                 continue
             print(f"  Processing: {tag} ({ckpt_path.name})")
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            model = _build_detector(ckpt, bin_names)
-            model.load_state_dict(
-                strip_compile_prefix(ckpt["state_dict"]), strict=False
+            model = model_from_checkpoint_data(
+                ckpt,
+                device=device,
+                bin_names=bin_names,
             )
-            model = model.to(device).eval()
             all_logits, all_labels, all_bins = [], [], []
             for batch in val_dl:
                 wav, label, bi, *_ = batch

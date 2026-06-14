@@ -19,20 +19,15 @@ def _import_from_audi_app(module_name: str):
 
 
 class TestAudiApp:
-    def test_detector_imports(self):
-        """detector.py imports without error."""
-        mod = _import_from_audi_app("detector")
-        assert hasattr(mod, "DetectionEngine")
-
     def test_app_mel_preprocessing_matches_training_torchaudio(self):
         """Pi mel frontend must numerically match training preprocessing."""
         torch = pytest.importorskip("torch")
         torchaudio_transforms = pytest.importorskip("torchaudio.transforms")
-        detector = _import_from_audi_app("detector")
+        audio_features = _import_from_audi_app("audio_features")
 
         rng = np.random.default_rng(123)
         audio = rng.normal(0.0, 1.0, 81920).astype(np.float32)
-        app_mel = detector.compute_mel_spectrogram(
+        app_mel = audio_features.compute_mel_spectrogram(
             audio,
             16000,
             n_mels=128,
@@ -59,11 +54,11 @@ class TestAudiApp:
         """Full app spec normalization should match detector _to_mel contract."""
         torch = pytest.importorskip("torch")
         torchaudio_transforms = pytest.importorskip("torchaudio.transforms")
-        detector = _import_from_audi_app("detector")
+        audio_features = _import_from_audi_app("audio_features")
 
         rng = np.random.default_rng(321)
         audio = rng.normal(0.0, 0.03, 81920).astype(np.float32)
-        classifier = detector.TFLiteClassifier(
+        classifier = audio_features.TFLiteClassifier(
             model_path=str(Path("/missing/model.tflite")),
             n_mels=128,
             n_fft=1024,
@@ -103,15 +98,77 @@ class TestAudiApp:
             atol=1e-3,
         )
 
+    def test_app_classifier_default_window_matches_deployment_model(self):
+        audio_features = _import_from_audi_app("audio_features")
+
+        classifier = audio_features.TFLiteClassifier(
+            model_path=str(Path("/missing/model.tflite")),
+        )
+
+        assert classifier.window_samples == 81920
+
+    def test_app_classifier_incremental_preprocess_matches_full_windows(self):
+        """Rolling preprocessing must match a full recompute on shifted windows."""
+        audio_features = _import_from_audi_app("audio_features")
+
+        rng = np.random.default_rng(4321)
+        step_samples = 5120
+        window_samples = 81920
+        audio = rng.normal(
+            0.0,
+            0.03,
+            window_samples + step_samples,
+        ).astype(np.float32)
+
+        rolling = audio_features.TFLiteClassifier(
+            model_path=str(Path("/missing/model.tflite")),
+            n_mels=128,
+            n_fft=1024,
+            win_length=1024,
+            hop_length=160,
+            model_sample_rate=16000,
+            window_samples=window_samples,
+            mel_mean=10.430418,
+            mel_std=5.288271,
+            incremental_step_samples=step_samples,
+        )
+        rolling.expected_frames = 512
+        rolling.preprocess(audio[:window_samples], 16000)
+        incremental_spec = rolling.preprocess(audio[step_samples:], 16000)
+
+        full = audio_features.TFLiteClassifier(
+            model_path=str(Path("/missing/model.tflite")),
+            n_mels=128,
+            n_fft=1024,
+            win_length=1024,
+            hop_length=160,
+            model_sample_rate=16000,
+            window_samples=window_samples,
+            mel_mean=10.430418,
+            mel_std=5.288271,
+            incremental_preprocess=False,
+        )
+        full.expected_frames = 512
+        full_spec = full.preprocess(audio[step_samples:], 16000)
+
+        assert rolling._preprocess_cache_hits == 1
+        assert rolling._preprocess_last_reused_frames == 473
+        np.testing.assert_allclose(
+            incremental_spec,
+            full_spec,
+            rtol=3e-5,
+            atol=1e-3,
+        )
+
     def test_app_mel_preprocessing_matches_training_custom_win_length(self):
         """Pi mel frontend must match torchaudio when win_length < n_fft."""
         torch = pytest.importorskip("torch")
         torchaudio_transforms = pytest.importorskip("torchaudio.transforms")
-        detector = _import_from_audi_app("detector")
+        audio_features = _import_from_audi_app("audio_features")
 
         rng = np.random.default_rng(7)
         audio = rng.normal(0.0, 0.25, 40960).astype(np.float32)
-        app_mel = detector.compute_mel_spectrogram(
+        app_mel = audio_features.compute_mel_spectrogram(
             audio,
             16000,
             n_mels=128,
@@ -133,21 +190,26 @@ class TestAudiApp:
 
         np.testing.assert_allclose(app_mel, train_mel, rtol=2e-5, atol=7e-4)
 
-    def test_recorder_imports(self):
-        """recorder.py imports without error."""
-        mod = _import_from_audi_app("recorder")
-        assert hasattr(mod, "RecorderManager")
-        assert hasattr(mod, "AudioRingBuffer")
+    def test_recorder_defaults_match_deployment_sample_rate(self, tmp_path):
+        recorder = _import_from_audi_app("recorder")
 
-    def test_storage_imports(self):
-        """storage.py imports without error."""
-        mod = _import_from_audi_app("storage")
-        assert hasattr(mod, "StorageManager")
+        raw = recorder.ALSARecorder(str(tmp_path / "hot"))
 
-    def test_gpio_alarm_imports(self):
-        """gpio_alarm.py imports without error."""
-        mod = _import_from_audi_app("gpio_alarm")
-        assert hasattr(mod, "GPIOController")
+        assert raw.sample_rate == 16000
+        assert raw.ring_buffer.max_samples == 120 * 16000
+
+    def test_recorder_manager_fallback_sample_rate_matches_deployment(self, tmp_path):
+        recorder = _import_from_audi_app("recorder")
+
+        manager = recorder.RecorderManager(
+            {
+                "audio": {},
+                "storage": {"data_dir": str(tmp_path / "data")},
+            }
+        )
+
+        assert manager.status["sample_rate"] == 16000
+        assert manager.status["ring_buffer_capacity"] == 120
 
     def test_gpio_falls_back_to_mock_unless_required(self, monkeypatch):
         """GPIO setup failures are fatal only when REQUIRE_GPIO is set."""
@@ -179,21 +241,17 @@ class TestAudiApp:
         with pytest.raises(RuntimeError):
             mod.GPIOController({"gpio": {"enabled": True}})
 
-    def test_main_imports(self):
-        """main.py imports without error."""
-        mod = _import_from_audi_app("main")
-        assert hasattr(mod, "AudioGuardApp")
-        assert hasattr(mod, "load_config")
-
     def test_alarm_snapshot_writes_utc_metadata(self, tmp_path):
         """Alarm snapshots should not fail while writing UTC metadata."""
-        detector = _import_from_audi_app("detector")
+        storage = _import_from_audi_app("storage")
 
         class RingBuffer:
             def get_last_n_seconds(self, n_seconds, sample_rate):
                 return np.zeros(int(n_seconds * sample_rate), dtype=np.float32)
 
-        snapshotter = detector.AlarmSnapshotter(str(tmp_path), sample_rate=8000)
+        assert storage.AlarmSnapshotter(str(tmp_path / "default")).sample_rate == 16000
+
+        snapshotter = storage.AlarmSnapshotter(str(tmp_path), sample_rate=8000)
         snapshotter._stop_event.set()
 
         meta = snapshotter.save_snapshot(
@@ -223,6 +281,21 @@ class TestAudiApp:
         assert hyst.add(0.46) == "RED"
         assert hyst.add(0.40) == "RED"
         assert hyst.add(0.34) == "BLUE"
+
+    def test_detection_hysteresis_ratio_uses_ceiling(self):
+        detector = _import_from_audi_app("detector")
+        hyst = detector.HysteresisState(
+            threshold=0.5,
+            window=8,
+            ratio=0.6,
+            margin=0.0,
+        )
+
+        for _ in range(4):
+            assert hyst.add(0.4) is False
+        for _ in range(4):
+            assert hyst.add(0.6) is False
+        assert hyst.add(0.6) is True
 
     def test_detection_threshold_profile_overrides_defaults(self, tmp_path):
         detector = _import_from_audi_app("detector")
@@ -306,6 +379,13 @@ class TestAudiApp:
 
         assert engine.alert_on_blue is False
         assert engine.alert_on_unknown is False
+        assert engine.capture_sample_rate == 16000
+        assert engine.window_samples == 81920
+        assert engine.labels == ["drone"]
+        assert engine.threshold_yes == 0.655
+        assert engine.blue_to_red_threshold == 0.37
+        assert engine.red_to_blue_threshold == 0.56
+        assert engine.alarm_cooldown_s == 120.0
         assert (
             engine._resolve_alert_level(
                 True,
@@ -391,8 +471,8 @@ detection:
         ] == 0.41
 
     def test_alert_history_label_alert(self, tmp_path):
-        detector = _import_from_audi_app("detector")
-        history = detector.AlertHistory(str(tmp_path / "alerts.jsonl"))
+        storage = _import_from_audi_app("storage")
+        history = storage.AlertHistory(str(tmp_path / "alerts.jsonl"))
         history.append({"alert_id": "a1", "state": "YES"})
 
         updated = history.label_alert("a1", "drone_red")
@@ -419,6 +499,15 @@ detection:
 
         assert response.status_code == 200
         assert response.get_json()["detector"]["threshold_profile"] == "quiet"
+
+    def test_webui_serves_checked_in_index_html(self):
+        webui_server = _import_from_audi_app("webui_server")
+        webui = webui_server.WebUI({"web": {"port": 0}})
+
+        response = webui._app.test_client().get("/")
+
+        assert response.status_code == 200
+        assert b"AUDI" in response.data
 
     def test_webui_alert_routing_endpoint(self):
         webui_server = _import_from_audi_app("webui_server")

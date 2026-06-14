@@ -1,6 +1,6 @@
 """Pure compute functions for validation metrics.
 
-No matplotlib imports — pure numpy computation.
+No plotting imports — pure numpy computation.
 """
 
 from __future__ import annotations
@@ -158,30 +158,6 @@ def compute_pr_curve(
     sort_idx = np.argsort(recall)
     ap = float(np.trapezoid(precision[sort_idx], recall[sort_idx]))
     return precision, recall, th, ap
-
-
-def compute_det_curve(
-    fpr: np.ndarray,
-    tpr: np.ndarray,
-    *,
-    clip: float = 1e-6,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Convert (FPR, TPR) to probit-scale (DET) coordinates.
-
-    Args:
-        fpr: False positive rate array.
-        tpr: True positive rate array.
-        clip: Clipping bound to avoid ±∞.
-
-    Returns:
-        (probit_fpr, probit_fnr).
-    """
-    from scipy.special import ndtri
-
-    fnr = 1.0 - np.asarray(tpr, dtype=np.float64)
-    fpr_c = np.clip(np.asarray(fpr, dtype=np.float64), clip, 1.0 - clip)
-    fnr_c = np.clip(fnr, clip, 1.0 - clip)
-    return ndtri(fpr_c).astype(np.float64), ndtri(fnr_c).astype(np.float64)
 
 
 def compute_calibration(

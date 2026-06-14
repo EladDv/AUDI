@@ -1,10 +1,10 @@
 """
-Pi Audio Guard — GPIO Alarm System
+AUDI Type A — GPIO Alert System
 
 Controls Raspberry Pi GPIO pins for:
-  - ALERT:   Buzzer/relay on detection
-  - STROBE:  Blinking LED during alarm
-  - RESET:   Physical button to clear alarm
+  - ALERT:   Buzzer/relay on configured alert levels
+  - STROBE:  Blinking LED during an active alert
+  - RESET:   Physical button to clear the alert
   - REC_LED: Recording indicator (on while capturing)
   - REC_BTN: Toggle recording on/off
   - PAUSE_BTN: Pause recording for 5 minutes
@@ -18,13 +18,13 @@ import threading
 import time
 from collections.abc import Callable
 
-logger = logging.getLogger("audio_guard.gpio")
+logger = logging.getLogger("audi.gpio")
 
 # ---------------------------------------------------------------------------
 
 
 class GPIOController:
-    """Manages GPIO pins for alarm + recording + input buttons."""
+    """Manages GPIO pins for alerts, recording, and input buttons."""
 
     def __init__(self, config: dict):
         gpio_cfg = config.get("gpio", {})
@@ -183,7 +183,7 @@ class GPIOController:
             self._alarm_end_time = 0
         self._write_pin(self.alert_pin, False)
         self._stop_strobe()
-        logger.info("GPIO alarm cleared")
+        logger.info("GPIO alert cleared")
 
     @property
     def is_alarming(self) -> bool:

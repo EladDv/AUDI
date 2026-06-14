@@ -1,0 +1,50 @@
+# Focused MN10 mined-hard-negative finetune used as the detector source for
+# the combined deployment model.
+name: mn10_06_new_tricks_finetune
+noise_path: data/HF_dataset_v7_background
+drone_path: data/HF_dataset_v2_drone
+description: >-
+  Train the MN10 mined-hard-negative detector that feeds the deployed
+  combined detector + blue/red model.
+base_flags: >-
+  --arch mn10_as
+  --clip-seconds 5.12
+  --patience 0
+  --batch-size 24
+  --steps-per-epoch 180
+  --val-steps-per-epoch 100
+  --num-workers 6
+  --loss bce
+  --label-smoothing 0.03
+  --augment
+  --lr-schedule linear
+  --warmup-epochs 1
+  --weight-decay 0.03
+  --noise2 data/HF_dataset_v7_background
+  --noise2-prob 0.35
+  --noise2-multi-prob 0.30
+  --noise2-count 2
+  --noise2-max-attenuation -42
+  --doppler-prob 0.22
+  --pitch-prob 0.15
+  --stretch-prob 0.15
+  --reverb-prob 0.15
+  --eq-prob 0.22
+  --noise-inject-prob 0.15
+  --noise-inject-db -44
+  --time-mask-prob 0.10
+  --lowpass-prob 0.12
+  --atmospheric-prob 0.18
+configs:
+  - name: "01_mined_hardneg_deep_head_hard07"
+    flags: >-
+      --detector-head-hidden-dims 512,256,128
+      --detector-head-dropout 0.20
+      --epochs 10
+      --lr 3e-6
+      --freeze-backbone-epochs 10
+      --positive-probability 0.64
+      --hard-noise data/field_recordings_20260514/mined_hard_negatives/hf_dataset
+      --hard-noise-prob 0.07
+      --finetune-from checkpoints/mel_preprocessing_sweep_20260610_005658/06_mn10_as/checkpoints/epoch=24-step=6250.ckpt
+    note: Maintained deployment detector source.

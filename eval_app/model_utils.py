@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
+import torch
 
 from audi.checkpoint import load_model_from_checkpoint as _load_from_ckpt
+from audi.model import SUPPORTED_MODEL_ARCHS
 from audi.training.detector import DroneDetector
 
 _SR = 16000
 _CHECKPOINTS_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
+_SUPPORTED_MODEL_ARCHS = {arch.lower() for arch in SUPPORTED_MODEL_ARCHS}
 
 
 @st.cache_resource
@@ -46,6 +51,9 @@ def discover_checkpoints() -> list[dict]:
         else:
             label = f"{ckpt_name}"
             run = parts[0] if parts else "unknown"
+        arch = get_model_arch_from_ckpt(str(ckpt_path))
+        if arch is None or arch.lower() not in _SUPPORTED_MODEL_ARCHS:
+            continue
         raw.append(
             {
                 "label": label,
@@ -53,6 +61,7 @@ def discover_checkpoints() -> list[dict]:
                 "run": run,
                 "exp_dir": exp_dir,
                 "epoch": epoch,
+                "arch": arch,
             }
         )
     ckpts = []
@@ -86,11 +95,29 @@ def get_model_arch_from_ckpt(ckpt_path: str) -> str | None:
                         hp = pickle.load(io.BytesIO(hp_file.read()))
                     arch = hp.get("model_arch")
                     if arch:
-                        return arch
+                        return str(arch)
                     model_hp = hp.get("model", {})
+                    if isinstance(model_hp, dict):
+                        arch = model_hp.get("arch")
+                        if arch:
+                            return str(arch)
                     if hasattr(model_hp, "arch"):
-                        return model_hp.arch
-                    return None
+                        return str(model_hp.arch)
+                    break
+    except Exception:
+        pass
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        hp = ckpt.get("hyper_parameters", {})
+        arch = hp.get("model_arch")
+        if arch:
+            return str(arch)
+        model_hp = hp.get("model", {})
+        if isinstance(model_hp, dict):
+            arch = model_hp.get("arch")
+            return str(arch) if arch else None
+        arch = getattr(model_hp, "arch", None)
+        return str(arch) if arch else None
     except Exception:
         pass
     return None
@@ -117,3 +144,52 @@ def find_hearability_calib(ckpt_path: str) -> str | None:
             return str(run_dir / "eval_data" / "hearability_calib.npz")
         run_dir = run_dir.parent
     return None
+
+
+@st.cache_data
+def load_precision_thresholds() -> dict[str, dict[str, dict]]:
+    """Return {sweep/model: {P_level: {sigma, cov, bg}}} from attack eval CSV."""
+    csv_path = _CHECKPOINTS_DIR / "attack_run_precision_eval.csv"
+    if not csv_path.exists():
+        return {}
+    thresholds: dict[str, dict[str, dict]] = {}
+    with open(csv_path) as f:
+        for row in csv.DictReader(f):
+            ref = f"{row.get('sweep','')}/{row['model']}"
+            if ref not in thresholds:
+                thresholds[ref] = {}
+            thresholds[ref][row["precision"]] = {
+                "sigma": float(row["sigma"]),
+                "cov_pct": float(row["cov_pct"]),
+                "first_pct": float(row["first_pct"]),
+                "bg": int(row["bg"]),
+                "bg_alerts": row.get("bg_alerts", "-") or "-",
+            }
+    return thresholds
+
+
+def compute_precision_recall_curve(pred_file: str) -> dict:
+    """Compute precision/recall vs threshold from a predictions file."""
+    pred_data = torch.load(pred_file, map_location="cpu", weights_only=False)
+    val_logits = np.asarray(pred_data["logits"]).flatten()
+    val_labels = np.asarray(pred_data["labels"]).flatten()
+
+    thresholds = np.linspace(val_logits.min(), val_logits.max(), 200)
+    precisions = []
+    recalls = []
+    for th in thresholds:
+        preds = (val_logits > th).astype(int)
+        tp = ((preds == 1) & (val_labels == 1)).sum()
+        fp = ((preds == 1) & (val_labels == 0)).sum()
+        fn = ((preds == 0) & (val_labels == 1)).sum()
+        precisions.append(tp / max(tp + fp, 1))
+        recalls.append(tp / max(tp + fn, 1))
+    precisions = np.array(precisions)
+    recalls = np.array(recalls)
+
+    return {
+        "thresholds": thresholds,
+        "precisions": precisions,
+        "recalls": recalls,
+        "sig_thresholds": 1.0 / (1.0 + np.exp(-thresholds)),
+    }

@@ -4,6 +4,7 @@ import os
 
 import pytest
 import torch
+from lightning import LightningModule
 
 from audi.config import MelConfig, ModelConfig, OptimizerConfig
 from audi.frontend import build_frontend, parse_frequency_bands_hz
@@ -12,21 +13,17 @@ from audi.model.efficientat import DYMN_AS_MODELS, MN_AS_MODELS, STATIC_DYMN_MOD
 from audi.training.detector import DroneDetector
 
 
+class TinyWrappedBackbone(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = torch.nn.Sequential(
+            torch.nn.BatchNorm1d(4),
+            torch.nn.Linear(4, 4),
+        )
+        self.classifier = torch.nn.Linear(4, 1)
+
+
 class TestBuildModel:
-    def test_build_cnn14(self):
-        model = build_model(arch="cnn14", num_classes=1)
-        assert isinstance(model, torch.nn.Module)
-        # Forward pass shape check
-        x = torch.randn(1, 3, 128, 100)
-        out = model(x)
-        assert out.shape == (1, 1)
-
-    def test_build_resnet18(self):
-        model = build_model(arch="resnet18", num_classes=1, pretrained=True)
-        x = torch.randn(1, 3, 128, 100)
-        out = model(x)
-        assert out.shape == (1, 1)
-
     def test_build_unknown_arch(self):
         with pytest.raises(ValueError, match="Unknown arch"):
             build_model(arch="nonexistent")
@@ -34,9 +31,6 @@ class TestBuildModel:
     @pytest.mark.parametrize(
         "arch",
         [
-            "cnn14",
-            "resnet18",
-            "convnext_small",
             "mn04_as",
             "mn10_as",
             "mn40_as",
@@ -50,6 +44,27 @@ class TestBuildModel:
     def test_representative_supported_archs_build_without_downloads(self, arch):
         model = build_model(arch=arch, num_classes=1, pretrained=False)
         model.eval()
+        x = torch.randn(1, 3, 128, 100)
+        with torch.no_grad():
+            out = model(x)
+        assert out.shape == (1, 1)
+
+    def test_efficientat_detector_head_can_be_deep(self):
+        model = build_model(
+            arch="mn10_as",
+            num_classes=1,
+            pretrained=False,
+            detector_head_hidden_dims=(512, 256, 128),
+            detector_head_dropout=0.2,
+        )
+
+        assert isinstance(model.classifier, torch.nn.Sequential)
+        linear_shapes = [
+            (m.in_features, m.out_features)
+            for m in model.classifier
+            if isinstance(m, torch.nn.Linear)
+        ]
+        assert linear_shapes == [(960, 512), (512, 256), (256, 128), (128, 1)]
         x = torch.randn(1, 3, 128, 100)
         with torch.no_grad():
             out = model(x)
@@ -374,3 +389,16 @@ def test_detector_uses_identity_input_norm_for_stft_frontend():
 
         assert isinstance(detector._input_bn, torch.nn.Identity)
         assert detector._multi_frontend.frontends[0].win_length == 256
+
+
+def test_freeze_backbone_keeps_classifier_trainable():
+    detector = DroneDetector.__new__(DroneDetector)
+    LightningModule.__init__(detector)
+    detector.backbone = TinyWrappedBackbone()
+
+    detector._set_backbone_frozen(True)
+
+    assert all(not p.requires_grad for p in detector.backbone.backbone.parameters())
+    assert all(p.requires_grad for p in detector.backbone.classifier.parameters())
+    assert not detector.backbone.backbone.training
+    assert detector.backbone.classifier.training

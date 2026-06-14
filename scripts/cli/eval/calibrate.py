@@ -4,13 +4,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
+
+from audi.evaluation.deployment import HearabilityEstimator
+
 
 def run(noise_path: str | None, drone_path: str | None) -> None:
     import argparse
-
-    import numpy as np
-
-    from audi.hearability_estimator import HearabilityEstimator
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--logit", type=float, default=None)

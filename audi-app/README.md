@@ -1,6 +1,6 @@
 # AUDI — Type A
 
-**Continuous audio recording + detection for Raspberry Pi.** Records audio in 5-minute segments to a 32GB ring buffer on disk, keeps the last 120 seconds of PCM in memory for ML inference and alarm snapshots, and triggers GPIO outputs on detection (YES/BLUE/NO). Touch-friendly web UI on port 8080.
+**Continuous audio recording + drone detection for Raspberry Pi.** Records audio in 5-minute segments to a 32GB ring buffer on disk, keeps the last 120 seconds of PCM in memory for ML inference and alarm snapshots, and drives GPIO outputs for configured alert levels. The default deployment alerts on RED detections and records BLUE/UNKNOWN detections without firing the alarm. Touch-friendly web UI on port 8080.
 
 Open http://raspberry-pi-ip:8080 from any browser on your local network.
 
@@ -9,7 +9,7 @@ Open http://raspberry-pi-ip:8080 from any browser on your local network.
 ```bash
 # On your Raspberry Pi (arm64):
 make build    # Build the Docker image
-make install-service && sudo systemctl start audio-guard    # Auto-start + run now
+make install-service && sudo systemctl start audi           # Auto-start + run now
 ```
 
 Or for a fully automated install:
@@ -40,9 +40,9 @@ scripts/deploy-pi.sh <pi-ip> <username> '<password>'
                     └──────┬───────┘     │   snapshots)  │
                            │             └───────────────┘
                     ┌──────▼───────┐     ┌───────────────┐
-                    │  Detector    │────▶│  GPIO Alarm   │
-                    │  YES / BLUE  │     │  + LEDs +     │
-                    │  / NO        │     │  Buttons      │
+                    │  Detector    │────▶│  GPIO Alert   │
+                    │  YES / NO +  │     │  + LEDs +     │
+                    │  RED / BLUE  │     │  Buttons      │
                     └──────┬───────┘     └───────────────┘
                            │
                     ┌──────▼───────┐
@@ -57,9 +57,9 @@ scripts/deploy-pi.sh <pi-ip> <username> '<password>'
 |--------|------|-------------|
 | **Recorder** | `src/recorder.py` | Captures audio via `arecord` (ALSA) in 5-minute WAV segments. Maintains an **in-memory ring buffer** of the last 120 seconds of float32 PCM samples (60s pre-alarm + 60s post-alarm). Supports pause/resume and stop/start toggling. |
 | **Storage** | `src/storage.py` | Compresses old WAVs to FLAC (~6:1 ratio). Enforces a **32GB storage cap** — oldest files are evicted first when over budget or disk space runs low. |
-| **Detector** | `src/detector.py` | TFLite classifier with Schmitt-trigger hysteresis (5 of 8 windows). Supports detector-only `[det]` and combined `[det, blue, red]` outputs, alarm snapshot saving, and temporal confidence tracking. |
+| **Detector** | `src/detector.py` | FP32 TFLite classifier with Schmitt-trigger YES/NO hysteresis (5 of 8 full-window votes), RED/BLUE typing, alert snapshot saving, and temporal confidence tracking. |
 | **GPIO** | `src/gpio_alarm.py` | Drives Pi GPIO pins: ALERT (buzzer/relay), STROBE (blinking LED), RESET (physical button to silence), REC_LED (recording indicator), REC_BTN (record toggle), PAUSE_BTN (pause 5 min). Graceful mock fallback when not on Pi hardware. |
-| **Web UI** | `src/webui_server.py` | Flask server serving a **touch-optimized HTML UI**. Big Start/Stop buttons (green/red, mutual exclusive), Silence and Pause controls, live VU meter, YES/BLUE/NO state card, alert history, system info panel. |
+| **Web UI** | `src/webui_server.py` | Flask server serving a **touch-optimized HTML UI**. Big Start/Stop buttons (green/red, mutual exclusive), Silence and Pause controls, live VU meter, YES/NO state card with RED/BLUE typing, alert history, system info panel. |
 | **Main** | `src/main.py` | Orchestrator — starts everything, wires callbacks, handles graceful shutdown on SIGTERM/SIGINT. |
 
 ## Config
@@ -68,8 +68,8 @@ Edit `config.yaml`:
 
 ```yaml
 audio:
-  device: "default"                  # ALSA device (arecord -l)
-  sample_rate: 48000
+  device: "auto"                     # Auto-discovers a USB mic, or use an ALSA device from arecord -l
+  sample_rate: 16000
   segment_duration: 300              # 5-minute segments
   ring_buffer_seconds: 120           # 60s pre + 60s post alarm
   device_retry_min: 2                # Min seconds between retries
@@ -83,22 +83,25 @@ storage:
   max_alerts_gb: 2
 
 detection:
-  model_path: /app/models/model_combined_dymn10_blue_red.tflite
+  model_path: /app/models/model_combined_mn10_mined_hardneg_blue_red.tflite
   inference_interval: 0.320
-  active_threshold_profile: balanced
+  active_threshold_profile: mn10_p90
   threshold_profiles_file: ./threshold_profiles.yaml
   mel_mean: 10.430418
   mel_std: 5.288271
-  confidence_threshold_high: 0.6703  # YES → GPIO alarm
+  confidence_threshold_high: 0.6550  # YES detector state
+  alert_on_red: true                 # RED detections fire GPIO by default
+  alert_on_blue: false
+  alert_on_unknown: false
 
 gpio:
   enabled: true
-  alert_pin: 17            # Buzzer/relay
-  strobe_pin: 27           # Visual indicator
-  reset_pin: 22            # Reset button
-  record_led_pin: 23       # Recording indicator
-  record_button_pin: 24    # Record toggle
-  pause_button_pin: 25     # Pause 5 min
+  alert_pin: 22            # Buzzer/relay
+  strobe_pin: 24           # Visual indicator
+  reset_pin: 23            # Reset button
+  record_led_pin: 27       # Recording indicator
+  record_button_pin: 17    # Record toggle
+  pause_button_pin: 18     # Pause 5 min
 
 web:
   host: 0.0.0.0
@@ -119,8 +122,8 @@ curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
 
 # Clone this repo
-git clone <repo-url> pi-audio-guard
-cd pi-audio-guard
+git clone <repo-url> AUDI
+cd AUDI/audi-app
 
 # Install alsa-utils for testing
 sudo apt install alsa-utils flac
@@ -138,7 +141,7 @@ make start
 
 ```bash
 make install-service
-sudo systemctl start audio-guard   # Start immediately
+sudo systemctl start audi          # Start immediately
 ```
 
 ### 4. Verify
@@ -157,7 +160,7 @@ Docker-managed volume.
 - `docker/docker-compose.yml` — Base config
 - `docker/docker-compose.pi.yml` — Pi-specific overrides (privileged mode, GPIO group)
 - `docker/Dockerfile` — arm64 multi-stage build
-- `docker/audio-guard.service` — systemd unit for auto-start
+- `docker/audi.service` — systemd unit for auto-start
 
 ### Local Data
 
@@ -183,30 +186,36 @@ make dev-run
 
 The web UI will be at http://localhost:8080.
 
-## Adding a Real TFLite Model
+## Adding a Real FP32 TFLite Model
 
-1. Export the combined detector + blue/red model:
+1. Export the combined detector + blue/red classifier:
    ```bash
-   uv run python scripts/export_blue_red_tflite.py --ckpt ... --output audi-app/models/model_combined_dymn10_blue_red.tflite
+   uv run --extra export audi-export-blue-red-tflite \
+     --ckpt checkpoints/<blue-red-run>/checkpoints/best.ckpt \
+     --output audi-app/models/model_combined_mn10_mined_hardneg_blue_red.tflite
    ```
-2. Copy the `.tflite` file to the Pi and mount it:
+2. Keep `config.yaml` pointed at:
+   ```bash
+   audi-app/models/model_combined_mn10_mined_hardneg_blue_red.tflite
+   ```
+3. If you mount a model into Docker directly, mount it at the same path:
    ```yaml
    # docker/docker-compose.yml override
    volumes:
-     - /path/to/model_combined_dymn10_blue_red.tflite:/app/models/model_combined_dymn10_blue_red.tflite
+     - /path/to/model_combined.tflite:/app/models/model_combined_mn10_mined_hardneg_blue_red.tflite
    ```
-3. Update `config.yaml` thresholds to match
+4. Update `config.yaml` and `threshold_profiles.yaml` thresholds to match the exported checkpoint.
 
 ## GPIO Wiring
 
 | GPIO (BCM) | Physical Pin | Purpose |
 |------------|-------------|---------|
-| 17         | 11          | Alert output (buzzer/relay) |
-| 27         | 13          | Strobe/LED output |
-| 22         | 15          | Reset button input (pull-up) |
-| 23         | 16          | Recording indicator LED |
-| 24         | 18          | Record toggle button (pull-up) |
-| 25         | 22          | Pause 5 min button (pull-up) |
+| 22         | 15          | Alert output (buzzer/relay) |
+| 24         | 18          | Strobe/LED output |
+| 23         | 16          | Reset button input (pull-up) |
+| 27         | 13          | Recording indicator LED |
+| 17         | 11          | Record toggle button (pull-up) |
+| 18         | 12          | Pause 5 min button (pull-up) |
 | GND        | 6, 9, 14, 20, 25, 30, 34, 39 | Ground |
 
 ## License

@@ -73,7 +73,14 @@ def vad_filter(clips: np.ndarray, vad_model, frame_ratio: float = 0.3) -> np.nda
     Uses silero-vad get_speech_timestamps which returns list of
     {'start': samples, 'end': samples} dicts for speech segments.
     """
-    from silero_vad import get_speech_timestamps
+    try:
+        from silero_vad import get_speech_timestamps
+    except ImportError as exc:
+        raise SystemExit(
+            "silero-vad is required for VAD filtering. "
+            "Run with `uv run --with silero-vad audi-data blue-red-recordings` "
+            "or pass `--skip-vad`."
+        ) from exc
 
     if len(clips) == 0:
         return clips
@@ -197,7 +204,14 @@ def main() -> int:
     vad_model = None
     if not args.skip_vad:
         print("Loading Silero VAD...")
-        from silero_vad import load_silero_vad
+        try:
+            from silero_vad import load_silero_vad
+        except ImportError as exc:
+            raise SystemExit(
+                "silero-vad is required for VAD filtering. "
+                "Run with `uv run --with silero-vad audi-data blue-red-recordings` "
+                "or pass `--skip-vad`."
+            ) from exc
         vad_model = load_silero_vad()
 
     # ── Load AudioSet rooster model ────────────────────────────

@@ -4,6 +4,7 @@ import numpy as np
 
 from audi.config import SNRBin
 from audi.training.dataset import MixedDataset
+from audi.training.hearability import scale_to_db
 
 
 def _rows(value: float, count: int = 2, sample_rate: int | None = None):
@@ -95,3 +96,21 @@ def test_dataset_sanitizes_non_finite_augmented_waveforms():
 
     assert np.isfinite(wav.numpy()).all()
     assert np.all(wav.numpy() == 0.0)
+
+
+def test_scale_to_db_equal_power_no_scaling():
+    drone = np.sin(np.linspace(0, 100 * np.pi, 16000, dtype=np.float32))
+    bg = drone.copy()
+
+    scaled = scale_to_db(drone, bg, 0.0)
+
+    assert np.abs(scaled - drone).mean() < 0.1
+
+
+def test_scale_to_db_positive_snr_increases_gain():
+    drone = np.ones(16000, dtype=np.float32) * 0.1
+    bg = np.ones(16000, dtype=np.float32) * 0.1
+
+    scaled = scale_to_db(drone, bg, 10.0)
+
+    assert scaled.max() > drone.max()

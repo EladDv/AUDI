@@ -11,7 +11,6 @@ import streamlit as st
 import torch
 from plotly.subplots import make_subplots
 
-from audi.hearability_estimator import HearabilityEstimator
 from audi.hysteresis import apply_hysteresis
 from eval_app.audio_utils import (
     _CLIP_S,
@@ -24,9 +23,9 @@ from eval_app.audio_utils import (
 )
 from eval_app.model_utils import (
     discover_checkpoints,
+    load_precision_thresholds,
     load_model,
 )
-from eval_app.precision import load_precision_thresholds
 
 _FIELD_DIR = Path(__file__).resolve().parents[1] / "data" / "field_recordings_20260514"
 PRECISION_THRESHOLDS = load_precision_thresholds()
@@ -164,7 +163,11 @@ def field_viewer_page() -> None:
     fig.update_xaxes(title_text="Time (s)", row=2, col=1)
     fig.update_layout(height=500, margin=dict(l=20, r=20, t=10, b=20),
                       hovermode="x unified", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True, key=f"field_pr_{audio_name}_{selected_ckpt['exp_dir']}")
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"field_pr_{audio_name}_{selected_ckpt['exp_dir']}",
+    )
 
     # ── Full audio playback ──────────────────────────────────────────
     st.subheader("Full Recording")
@@ -188,7 +191,10 @@ def field_viewer_page() -> None:
                 with col_a:
                     st.audio(wav_window, sample_rate=sr)
                 with col_s:
-                    mel_img = compute_mel_image(audio[idx * step: idx * step + _CLIP_SAMPLES], model)
+                    mel_img = compute_mel_image(
+                        audio[idx * step: idx * step + _CLIP_SAMPLES],
+                        model,
+                    )
                     fig_w = go.Figure(data=go.Heatmap(z=mel_img, colorscale="viridis"))
                     fig_w.update_layout(height=200, margin=dict(l=10, r=10, t=5, b=5),
                                         xaxis_title="Frame", yaxis_title="Mel")

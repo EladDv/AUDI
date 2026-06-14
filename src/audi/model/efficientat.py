@@ -136,6 +136,35 @@ def _quiet_get_model(get_model, *args, **kwargs):
         return get_model(*args, **kwargs)
 
 
+def _build_classifier_head(
+    input_dim: int,
+    num_classes: int,
+    hidden_dims: tuple[int, ...],
+    dropout: float,
+) -> nn.Module:
+    if not hidden_dims:
+        return nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(input_dim, num_classes),
+        )
+
+    layers: list[nn.Module] = []
+    prev_dim = input_dim
+    for dim in hidden_dims:
+        layers.extend(
+            [
+                nn.Linear(prev_dim, dim),
+                nn.LayerNorm(dim),
+                nn.GELU(),
+            ]
+        )
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        prev_dim = dim
+    layers.append(nn.Linear(prev_dim, num_classes))
+    return nn.Sequential(*layers)
+
+
 class _EfficientATWrapper(nn.Module):
     """Generic wrapper that adapts an EfficientAT model for our pipeline.
 
@@ -155,12 +184,16 @@ class _EfficientATWrapper(nn.Module):
         feature_dim: int,
         num_classes: int = 1,
         dropout: float = 0.2,
+        head_hidden_dims: tuple[int, ...] = (),
+        head_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.backbone = backbone
-        self.classifier = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(feature_dim, num_classes),
+        self.classifier = _build_classifier_head(
+            feature_dim,
+            num_classes,
+            hidden_dims=head_hidden_dims,
+            dropout=head_dropout if head_hidden_dims else dropout,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -177,6 +210,8 @@ def _build_mn(
     num_classes: int = 1,
     *,
     pretrained: bool = True,
+    head_hidden_dims: tuple[int, ...] = (),
+    head_dropout: float = 0.0,
 ) -> _EfficientATWrapper:
     """Build an AudioSet-pretrained MobileNetV3 wrapper.
 
@@ -213,7 +248,13 @@ def _build_mn(
     # classifier so small distilled students stay small at checkpoint/export time.
     model.classifier = nn.Identity()
     # Discard the original classifier
-    wrapper = _EfficientATWrapper(model, feature_dim, num_classes=num_classes)
+    wrapper = _EfficientATWrapper(
+        model,
+        feature_dim,
+        num_classes=num_classes,
+        head_hidden_dims=head_hidden_dims,
+        head_dropout=head_dropout,
+    )
     return wrapper
 
 
@@ -222,6 +263,8 @@ def _build_dymn(
     num_classes: int = 1,
     *,
     pretrained: bool = True,
+    head_hidden_dims: tuple[int, ...] = (),
+    head_dropout: float = 0.0,
 ) -> _EfficientATWrapper:
     """Build an AudioSet-pretrained Dynamic MobileNet wrapper."""
     from models.dymn.model import get_model
@@ -240,13 +283,22 @@ def _build_dymn(
     # The wrapper consumes backbone features only; drop the original AudioSet
     # classifier so small distilled students stay small at checkpoint/export time.
     model.classifier = nn.Identity()
-    wrapper = _EfficientATWrapper(model, feature_dim, num_classes=num_classes)
+    wrapper = _EfficientATWrapper(
+        model,
+        feature_dim,
+        num_classes=num_classes,
+        head_hidden_dims=head_hidden_dims,
+        head_dropout=head_dropout,
+    )
     return wrapper
 
 
 def _build_static_dymn(
     arch_name: str,
     num_classes: int = 1,
+    *,
+    head_hidden_dims: tuple[int, ...] = (),
+    head_dropout: float = 0.0,
 ) -> _EfficientATWrapper:
     """Build a static DyMN-derived student.
 
@@ -273,7 +325,13 @@ def _build_static_dymn(
     )
     feature_dim = model.classifier[2].in_features
     model.classifier = nn.Identity()
-    return _EfficientATWrapper(model, feature_dim, num_classes=num_classes)
+    return _EfficientATWrapper(
+        model,
+        feature_dim,
+        num_classes=num_classes,
+        head_hidden_dims=head_hidden_dims,
+        head_dropout=head_dropout,
+    )
 
 
 def build_efficientat(
@@ -281,6 +339,8 @@ def build_efficientat(
     num_classes: int = 1,
     pretrained: bool = True,
     cache_dir: str | None = None,
+    head_hidden_dims: tuple[int, ...] = (),
+    head_dropout: float = 0.0,
 ) -> _EfficientATWrapper:
     """Factory: build an EfficientAT model wrapper by pretrained name.
 
@@ -317,17 +377,23 @@ def build_efficientat(
             pretrained_name,
             num_classes=num_classes,
             pretrained=pretrained,
+            head_hidden_dims=head_hidden_dims,
+            head_dropout=head_dropout,
         )
     elif _is_dymn(pretrained_name):
         return _build_dymn(
             pretrained_name,
             num_classes=num_classes,
             pretrained=pretrained,
+            head_hidden_dims=head_hidden_dims,
+            head_dropout=head_dropout,
         )
     elif _is_static_dymn(pretrained_name):
         return _build_static_dymn(
             pretrained_name,
             num_classes=num_classes,
+            head_hidden_dims=head_hidden_dims,
+            head_dropout=head_dropout,
         )
     else:
         supported = ", ".join(EFFICIENTAT_MODELS)

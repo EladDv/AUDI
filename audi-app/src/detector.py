@@ -1,14 +1,14 @@
 """
-Pi Audio Guard — Detection Engine (TFLite int8)
+AUDI Type A — Detection Engine (TFLite FP32)
 
 Real TFLite inference with drone detection and optional blue/red typing.
 
 Pipeline:
-  1. Capture audio from ring buffer (configurable SR, default 48kHz)
+  1. Capture audio from ring buffer (configurable SR, default 16kHz)
   2. Resample to 16kHz via scipy
   3. Compute Mel spectrogram (numpy/scipy, no torch needed)
   4. Normalize + convert to 3-channel grayscale
-  5. Feed to TFLite int8 interpreter
+  5. Feed to TFLite FP32 interpreter
   6. Sigmoid -> confidence score
   7. Optional combined blue/red output from the same model
   8. Temporal smoothing -> YES/NO decision
@@ -17,32 +17,124 @@ Falls back to mock if model not found or ai_edge_litert unavailable.
 """
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
 
 import numpy as np
-from alert_logic import ColorHysteresisState, HysteresisState
-from alert_storage import AlarmSnapshotter, AlertHistory
-from audio_features import (
-    TFLiteClassifier,
-    compute_mel_spectrogram,
-    resample_audio,
-)
+from audio_features import TFLiteClassifier
+from storage import AlarmSnapshotter, AlertHistory
 
-logger = logging.getLogger("audio_guard.detector")
+logger = logging.getLogger("audi.detector")
 
-DEFAULT_LABELS = ["general_alert"]
-__all__ = [
-    "AlarmSnapshotter",
-    "AlertHistory",
-    "ColorHysteresisState",
-    "DetectionEngine",
-    "HysteresisState",
-    "TFLiteClassifier",
-    "compute_mel_spectrogram",
-    "resample_audio",
-]
+DEFAULT_LABELS = ["drone"]
+DEFAULT_CAPTURE_SAMPLE_RATE = 16000
+DEFAULT_WINDOW_SAMPLES = 81920
+DEFAULT_DRONE_THRESHOLD = 0.6550
+DEFAULT_RED_ENTER_THRESHOLD = 0.37
+DEFAULT_RED_EXIT_THRESHOLD = 0.56
+DEFAULT_HYSTERESIS_WINDOW = 8
+DEFAULT_HYSTERESIS_RATIO = 0.6
+DEFAULT_HYSTERESIS_MARGIN = 0.05
+DEFAULT_ALARM_COOLDOWN_S = 120.0
+
+
+class HysteresisState:
+    """Schmitt-trigger state tracker with moving-average confirmation."""
+
+    def __init__(
+        self,
+        threshold: float = 0.70,
+        window: int = 5,
+        ratio: float = 0.6,
+        margin: float = 0.05,
+    ):
+        self.threshold = threshold
+        self.window = window
+        self.ratio = ratio
+        self.margin = margin
+        self.history: list[float] = []
+        self.state = False
+
+    def add(self, score: float) -> bool:
+        self.history.append(score)
+        if len(self.history) > self.window:
+            self.history.pop(0)
+
+        recent = self.history
+        k = max(1, math.ceil(len(recent) * self.ratio))
+        lo = self.threshold - self.margin
+        hi = self.threshold + self.margin
+
+        if self.state:
+            below = sum(1 for s in recent if s < lo)
+            if below >= k:
+                self.state = False
+        else:
+            above = sum(1 for s in recent if s > hi)
+            if above >= k:
+                self.state = True
+
+        return self.state
+
+    def clear(self):
+        self.history.clear()
+        self.state = False
+
+    @property
+    def confidence(self) -> float:
+        if not self.history:
+            return 0.0
+        return sum(self.history) / len(self.history)
+
+
+class ColorHysteresisState:
+    """Stateful blue/red typing with sticky RED behavior."""
+
+    def __init__(
+        self,
+        enter_red_threshold: float = 0.45,
+        exit_red_threshold: float = 0.35,
+        window: int = 5,
+        ratio: float = 0.6,
+    ):
+        self.enter_red_threshold = enter_red_threshold
+        self.exit_red_threshold = exit_red_threshold
+        self.window = window
+        self.ratio = ratio
+        self.history: list[float] = []
+        self.state = "UNKNOWN"
+
+    def add(self, red_score: float) -> str:
+        self.history.append(red_score)
+        if len(self.history) > self.window:
+            self.history.pop(0)
+
+        recent = self.history
+        k = max(1, math.ceil(len(recent) * self.ratio))
+        above_enter = sum(1 for s in recent if s >= self.enter_red_threshold)
+        below_exit = sum(1 for s in recent if s <= self.exit_red_threshold)
+
+        if self.state == "RED":
+            if below_exit >= k:
+                self.state = "BLUE"
+        else:
+            if above_enter >= k:
+                self.state = "RED"
+            elif below_exit >= k:
+                self.state = "BLUE"
+        return self.state
+
+    def clear(self):
+        self.history.clear()
+        self.state = "UNKNOWN"
+
+    @property
+    def confidence(self) -> float | None:
+        if not self.history:
+            return None
+        return sum(self.history) / len(self.history)
 
 
 # ===========================================================================
@@ -79,7 +171,10 @@ class DetectionEngine:
             det_cfg.update(profile_cfg)
 
         # Model config
-        self.model_path = det_cfg.get("model_path", "/app/models/model.tflite")
+        self.model_path = det_cfg.get(
+            "model_path",
+            "/app/models/model_combined_mn10_mined_hardneg_blue_red.tflite",
+        )
         self.model_type = det_cfg.get("model_type", "tflite")
         self.num_threads = det_cfg.get("num_threads", 2)
         self.model_sample_rate = det_cfg.get("model_sample_rate", 16000)
@@ -88,12 +183,14 @@ class DetectionEngine:
         self.win_length = det_cfg.get("win_length", self.n_fft)
         self.hop_length = det_cfg.get("hop_length", 160)
         self.window_samples = det_cfg.get(
-            "window_samples", 40960
-        )  # 16000 * 2.56
+            "window_samples", DEFAULT_WINDOW_SAMPLES
+        )  # 16000 * 5.12
         self.stride = det_cfg.get("stride", 0.0625)
 
         # Thresholds
-        self.threshold_yes = det_cfg.get("confidence_threshold_high", 0.70)
+        self.threshold_yes = det_cfg.get(
+            "confidence_threshold_high", DEFAULT_DRONE_THRESHOLD
+        )
         self.threshold_blue = det_cfg.get(
             "confidence_threshold_low", self.threshold_yes
         )
@@ -106,11 +203,15 @@ class DetectionEngine:
             "blue_red_min_detection_score", self.threshold_blue
         )
         self.red_alert_threshold = det_cfg.get(
-            "red_alert_threshold", self.blue_red_threshold
+            "red_alert_threshold", DEFAULT_RED_ENTER_THRESHOLD
         )
         self.blue_alert_threshold = det_cfg.get("blue_alert_threshold", 0.5)
-        self.blue_to_red_threshold = det_cfg.get("blue_to_red_threshold", 0.45)
-        self.red_to_blue_threshold = det_cfg.get("red_to_blue_threshold", 0.35)
+        self.blue_to_red_threshold = det_cfg.get(
+            "blue_to_red_threshold", DEFAULT_RED_ENTER_THRESHOLD
+        )
+        self.red_to_blue_threshold = det_cfg.get(
+            "red_to_blue_threshold", DEFAULT_RED_EXIT_THRESHOLD
+        )
         self.alert_on_red = det_cfg.get("alert_on_red", True)
         self.alert_on_blue = det_cfg.get("alert_on_blue", False)
         self.alert_on_unknown = det_cfg.get("alert_on_unknown", False)
@@ -124,7 +225,9 @@ class DetectionEngine:
 
         # Audio config from the main audio section
         audio_cfg = config.get("audio", {})
-        self.capture_sample_rate = audio_cfg.get("sample_rate", 48000)
+        self.capture_sample_rate = audio_cfg.get(
+            "sample_rate", DEFAULT_CAPTURE_SAMPLE_RATE
+        )
 
         # Load TFLite classifier
         self.classifier = TFLiteClassifier(
@@ -138,6 +241,7 @@ class DetectionEngine:
             window_samples=self.window_samples,
             mel_mean=det_cfg.get("mel_mean"),
             mel_std=det_cfg.get("mel_std"),
+            incremental_step_samples=int(round(self.window_samples * self.stride)),
         )
         if self.classifier.expected_frames:
             expected_window_samples = (
@@ -157,18 +261,20 @@ class DetectionEngine:
         # Hysteresis state tracker (Schmitt-trigger)
         self.hysteresis = HysteresisState(
             threshold=self.threshold_yes,
-            window=det_cfg.get("hysteresis_window", 5),
-            ratio=det_cfg.get("hysteresis_ratio", 0.6),
-            margin=det_cfg.get("hysteresis_margin", 0.05),
+            window=det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
+            ratio=det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
+            margin=det_cfg.get("hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN),
         )
         self.color_hysteresis = ColorHysteresisState(
             enter_red_threshold=self.blue_to_red_threshold,
             exit_red_threshold=self.red_to_blue_threshold,
             window=det_cfg.get(
-                "color_hysteresis_window", det_cfg.get("hysteresis_window", 5)
+                "color_hysteresis_window",
+                det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
             ),
             ratio=det_cfg.get(
-                "color_hysteresis_ratio", det_cfg.get("hysteresis_ratio", 0.6)
+                "color_hysteresis_ratio",
+                det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
             ),
         )
 
@@ -192,7 +298,9 @@ class DetectionEngine:
         self._red_count = 0
         self._blue_count = 0
         self._last_alarm_time = 0.0
-        self.alarm_cooldown_s = det_cfg.get("alarm_cooldown_s", 0)
+        self.alarm_cooldown_s = det_cfg.get(
+            "alarm_cooldown_s", DEFAULT_ALARM_COOLDOWN_S
+        )
         self._last_timing: dict = {}
 
         # Rolling timing stats (last 128 cycles)
@@ -218,7 +326,9 @@ class DetectionEngine:
         """Apply a configured threshold profile without restarting the app."""
         det_cfg = self._profiled_detection_config(profile)
         self.threshold_profile = profile
-        self.threshold_yes = det_cfg.get("confidence_threshold_high", 0.70)
+        self.threshold_yes = det_cfg.get(
+            "confidence_threshold_high", DEFAULT_DRONE_THRESHOLD
+        )
         self.threshold_blue = det_cfg.get(
             "confidence_threshold_low", self.threshold_yes
         )
@@ -230,11 +340,15 @@ class DetectionEngine:
             "blue_red_min_detection_score", self.threshold_blue
         )
         self.red_alert_threshold = det_cfg.get(
-            "red_alert_threshold", self.blue_red_threshold
+            "red_alert_threshold", DEFAULT_RED_ENTER_THRESHOLD
         )
         self.blue_alert_threshold = det_cfg.get("blue_alert_threshold", 0.5)
-        self.blue_to_red_threshold = det_cfg.get("blue_to_red_threshold", 0.45)
-        self.red_to_blue_threshold = det_cfg.get("red_to_blue_threshold", 0.35)
+        self.blue_to_red_threshold = det_cfg.get(
+            "blue_to_red_threshold", DEFAULT_RED_ENTER_THRESHOLD
+        )
+        self.red_to_blue_threshold = det_cfg.get(
+            "red_to_blue_threshold", DEFAULT_RED_EXIT_THRESHOLD
+        )
         self.alert_on_red = det_cfg.get("alert_on_red", True)
         self.alert_on_blue = det_cfg.get("alert_on_blue", False)
         self.alert_on_unknown = det_cfg.get("alert_on_unknown", False)
@@ -244,18 +358,20 @@ class DetectionEngine:
         )
         self.hysteresis = HysteresisState(
             threshold=self.threshold_yes,
-            window=det_cfg.get("hysteresis_window", 5),
-            ratio=det_cfg.get("hysteresis_ratio", 0.6),
-            margin=det_cfg.get("hysteresis_margin", 0.05),
+            window=det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
+            ratio=det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
+            margin=det_cfg.get("hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN),
         )
         self.color_hysteresis = ColorHysteresisState(
             enter_red_threshold=self.blue_to_red_threshold,
             exit_red_threshold=self.red_to_blue_threshold,
             window=det_cfg.get(
-                "color_hysteresis_window", det_cfg.get("hysteresis_window", 5)
+                "color_hysteresis_window",
+                det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
             ),
             ratio=det_cfg.get(
-                "color_hysteresis_ratio", det_cfg.get("hysteresis_ratio", 0.6)
+                "color_hysteresis_ratio",
+                det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
             ),
         )
         logger.info("Threshold profile switched to %s", profile)
@@ -568,7 +684,7 @@ class DetectionEngine:
                 )
             elif not should_trigger_alarm:
                 logger.info(
-                    "%s observed without GPIO alarm: conf=%.2f (raw=%.2f, color=%s, red=%s)",
+                    "%s observed without GPIO alert: conf=%.2f (raw=%.2f, color=%s, red=%s)",
                     alert_level,
                     self.hysteresis.confidence,
                     raw_score,

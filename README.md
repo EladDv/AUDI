@@ -2,20 +2,20 @@
 
 **A**coustic **U**AV **D**etection and **I**dentification
 
-A deep learning pipeline for real-time acoustic drone detection. Built on PyTorch Lightning with support for multiple architectures, audio augmentation, SNR-bin evaluation, and edge deployment (Raspberry Pi via TFLite).
+A deep learning pipeline for real-time acoustic drone detection. Built on PyTorch Lightning with EfficientAT MN/DyMN backbones, audio augmentation, SNR-bin evaluation, and edge deployment (Raspberry Pi via TFLite).
 
 ---
 
 ## Features
 
-- **Multi-architecture training** — PANNs (CNN8/10/14), ResNet (18/34/50), ConvNeXt (tiny/small/base), EfficientNet, MobileViT, MobileNetV4, and more
+- **EfficientAT training** — maintained MN/DyMN backbones for compact drone detection and edge export
 - **SNR-bin evaluation** — measure performance across six signal-to-noise bins: easy (-5 to 0 dB) through far-field (-30 to -25 dB)
 - **Rich augmentation** — MixUp, CutMix, SpecAugment, gain jitter, multi-noise background, atmospheric absorption filtering, Doppler shift
 - **Crash-resilient sweeps** — Ctrl+C kills only the current run, not the whole sweep. Results stream to CSV incrementally
 - **Bayesian hearability calibration** — per-bin Gaussian calibration maps logits to calibrated probabilities
 - **Attack-run evaluation** — real-world detection metrics at calibrated precision thresholds with OOM recovery and incremental CSV saving
 - **Interactive dashboard** — Streamlit app for model exploration, bin analysis, and attack-run diagnosis
-- **Edge deployment** — TFLite export + Docker-based Raspberry Pi service with GPIO alarm, web UI, and ring buffer storage
+- **Edge deployment** — FP32 TFLite export + Docker-based Raspberry Pi service with web UI, ring buffer storage, and GPIO alerting
 - **Schmitt-trigger hysteresis** — stable detection state with configurable on/off ratios for deployment
 
 ---
@@ -30,15 +30,15 @@ uv sync
 uv run audi-train \
     --noise-path data/my_background \
     --drone-path data/my_drone \
-    --arch resnet18 \
+    --arch mn10_as \
     --lr 1e-4 \
     --mixup-alpha 0.2 \
     --epochs 15 \
     --patience 0 \
     --output-dir checkpoints/my_run
 
-# Run the current hard-negative sweep
-uv run python sweeps/sweep.py sweeps/configs/field_hard_negative_current.yaml
+# Run a maintained sweep
+uv run python sweeps/sweep.py sweeps/configs/mn10_06_new_tricks_finetune.yaml
 
 # Postprocess + calibrate a sweep
 uv run audi-eval postprocess checkpoints/<sweep_dir>
@@ -48,10 +48,10 @@ uv run audi-eval calibrate checkpoints/<sweep_dir>/<run_name>
 uv run audi-eval --noise-path data/my_background --drone-path data/my_drone attack-runs
 
 # Launch the eval dashboard
-uv run audi-eval field
+uv run --extra eval streamlit run eval_app/
 
 # Run tests
-uv run pytest tests/ -v
+uv run pytest -q
 ```
 
 ---
@@ -60,13 +60,14 @@ uv run pytest tests/ -v
 
 - Python >= 3.11
 - [uv](https://github.com/astral-sh/uv) — fast Python package manager
-- CUDA-capable GPU recommended (8+ GB VRAM for most models; 12+ GB for ConvNeXt-Base and long clips)
+- CUDA-capable GPU recommended (8+ GB VRAM for most MN/DyMN runs)
 - Audio data: drone recordings + background noise (see [Data Pipeline](#data-pipeline))
 
 ```bash
 uv sync                    # core deps
-uv sync --group dev        # + pytest, mypy, ruff
-uv sync --group eval       # + streamlit, plotly
+uv sync --group dev        # + pytest, ruff, app-test audio frontend deps
+uv sync --extra eval       # + streamlit, plotly dashboards
+uv sync --extra export     # + TFLite export tooling
 ```
 
 ---
@@ -79,27 +80,23 @@ src/audi/
   config.py                # Immutable dataclasses (ModelConfig, MelConfig, OptimizerConfig)
   augment.py               # Audio augmentation transforms
   checkpoint.py            # Checkpoint loading utilities
-  cli_utils.py             # CLI argument helpers
-  hearability_estimator.py # ERB-band SNR scaling and estimation
   hysteresis.py            # Schmitt-trigger hysteresis for deployment
+  frontend.py              # Mel and STFT frontend variants
+  hard_negative_mining.py  # Field false-positive mining helpers
   model/
     __init__.py            # build_model() factory + arch registry
-    _base.py               # AudioBackbone ABC
-    panns.py               # PANNs CNN8/10/14
-    vision.py              # ResNet + ConvNeXt + EfficientNet backbones
+    efficientat.py         # MN/DyMN/EfficientAT backbones
   training/
     dataset.py             # MixedDataset + binned SNR sampling
     detector.py            # DroneDetector LightningModule
     hearability.py         # ERB-band SNR scaling
     validation.py          # ROC, precision, threshold computation
-    validation_plots.py    # TensorBoard visualization
 
 scripts/
   cli/                     # Console entry points and maintained command modules
-    train.py               # audi-train detect/classify dispatcher
-    evaluate.py            # audi-eval postprocess, calibrate, attack-runs, field
-    build_data.py          # audi-data dataset building dispatcher
-    export/                # audi-export-tflite and blue/red export
+    _dispatch.py           # audi-eval and audi-data dispatch helpers
+    train_detect.py        # audi-train detector training command
+    export/                # FP32 audi-export-tflite and blue/red export
 
 sweeps/
   sweep.py                 # YAML-driven sweep runner
@@ -116,13 +113,13 @@ audi-app/                  # Edge deployment (Raspberry Pi Docker service)
 
 ### Single Model Training
 
-Train a detection model with `audi-train detect` (the default subcommand):
+Train a detection model with `audi-train`:
 
 ```bash
 uv run audi-train \
     --noise-path data/HF_dataset_v2_background \
     --drone-path data/HF_dataset_v2_drone \
-    --arch convnext_small \
+    --arch mn10_as \
     --clip-seconds 5.12 \
     --lr 1e-4 \
     --lr-schedule linear \
@@ -150,7 +147,7 @@ name: my_sweep
 noise_path: data/my_background
 drone_path: data/my_drone
 description: My sweep description
-base_flags: --arch convnext_small --mixup-alpha 0.2 --epochs 15 --patience 0
+base_flags: --arch mn10_as --mixup-alpha 0.2 --epochs 15 --patience 0
 configs:
   - name: "01_baseline"
     flags: --lr 1e-4
@@ -179,22 +176,17 @@ The sweep runner also supports `--no-postprocess` and `--no-calibrate` flags to 
 
 | Config | What it tests |
 |--------|--------------|
-| `field_hard_negative_current.yaml` | Current V4 field hard-negative finetune across MN/DyMN sizes |
-| `blue_red_classify.yaml` | Combined detector plus blue/red classification workflow |
-| `convnext_current.yaml` | Restored compact ConvNeXt Small/Base baseline sweep |
-| `classify_mn.yaml` | MN classification pretraining for detector finetuning |
-| `efficientat*.yaml` | EfficientAT/MN size and noise coverage |
-| `mn_sweep_v6.yaml` | Current MN architecture research sweep on v6 backgrounds |
-| `dsp_sweep.yaml`, `dsp_v3v4_sweep.yaml`, `dsp_validation.yaml` | DSP feature research |
-| `mel_sweep.yaml` | Mel geometry and PCEN research |
-| `frontend_sweep.yaml`, `frontend_sweep_mn.yaml` | CQT/CWT frontend research |
+| `blue_red_mn10_mined_hardneg_classifier.yaml` | Blue/red classifier follow-up on mined hard negatives |
+| `efficientat_v7_noisier.yaml` | EfficientAT/MN size and noise coverage |
+| `mn10_06_new_tricks_finetune.yaml` | MN10 mined-hard-negative finetune used as the deployment detector source |
+| `mel_preprocessing_sweep.yaml` | Mel geometry and preprocessing research |
 | `audio_resample_frontend_sweep.yaml` | 8 kHz 128-mel and 4 kHz linear-STFT frontend research |
 
 Blue/red training and export are maintained commands:
 
 ```bash
 uv run audi-train-blue-red --help
-uv run audi-export-blue-red-tflite --help
+uv run --extra export audi-export-blue-red-tflite --help
 ```
 
 ---
@@ -217,12 +209,12 @@ uv run audi-export-blue-red-tflite --help
 **Model:**
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--arch` | `cnn14` | Backbone: cnn8/10/14, resnet18/34/50, convnext_tiny/small/base, efficientnet_b1/b3/b5, edgenet_*, mobilenetv4_*, mobilevitv2_* |
-| `--no-pretrained` | `False` | Train from scratch (no ImageNet pretrained weights) |
+| `--arch` | `mn10_as` | EfficientAT backbone: MN, DyMN, or static-DyMN variant |
+| `--no-pretrained` | `False` | Train from scratch (no AudioSet pretrained weights) |
 | `--no-compile` | `False` | Disable `torch.compile` |
 | `--dropout` | `0.0` | Dropout rate (0.2 recommended for calibration) |
 | `--bn-momentum` | `0.1` | Batch norm momentum |
-| `--mel-preset` | `default` | Mel spectrogram preset: `default` (128 mels) or `vit_224` (224×224) |
+| `--mel-preset` | `default` | Mel spectrogram preset: `default` (128 mels) or `custom` |
 | `--n-fft` | preset | FFT size when `--mel-preset custom` is used |
 | `--win-length` | `n_fft` | STFT analysis window length when `--mel-preset custom` is used |
 | `--hop-length` | preset | Hop length when `--mel-preset custom` is used |
@@ -230,7 +222,7 @@ uv run audi-export-blue-red-tflite --help
 **Optimizer:**
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--lr` | `1e-3` | Learning rate (use 1e-3 for CNNs, 1e-4 for ResNets/ConvNeXts) |
+| `--lr` | `1e-3` | Learning rate |
 | `--weight-decay` | `0.01` | AdamW weight decay (0.03 helps small datasets) |
 | `--lr-schedule` | `constant` | LR schedule: `constant`, `cosine`, or `linear` |
 | `--warmup-epochs` | `0` | LR warmup epochs (3–8 recommended with cosine/linear) |
@@ -240,14 +232,14 @@ uv run audi-export-blue-red-tflite --help
 |------|---------|-------------|
 | `--epochs` | `30` | Maximum training epochs |
 | `--batch-size` | `32` | Per-GPU batch size |
-| `--steps-per-epoch` | `100` | Training steps per epoch (limits dataset passes) |
-| `--val-steps-per-epoch` | `40` | Validation steps per epoch |
+| `--steps-per-epoch` | `250` | Training steps per epoch (limits dataset passes) |
+| `--val-steps-per-epoch` | `200` | Validation steps per epoch |
 | `--patience` | `5` | Early stopping patience (0 = disable) |
 | `--seed` | `42` | Random seed |
-| `--output-dir` | `checkpoints` | Output directory |
+| `--output-dir` | `experiments` | Output directory |
 | `--save-top-k` | `1` | Keep N best checkpoints |
 | `--accumulate-grad-batches` | `1` | Gradient accumulation steps |
-| `--num-workers` | (auto) | Data loader worker processes |
+| `--num-workers` | `4` | Data loader worker processes |
 
 **Regularization:**
 | Flag | Default | Description |
@@ -258,54 +250,38 @@ uv run audi-export-blue-red-tflite --help
 | `--spec-augment-prob` | `0.0` | SpecAugment probability (0.3 recommended) |
 | `--mixup-alpha` | `0.0` | MixUp α (0.1–0.2 recommended) |
 | `--cutmix-alpha` | `0.0` | CutMix α |
-| `--augment` | `False` | Enable gain jitter + background swap |
+| `--augment` | `False` | Enable waveform augmentations such as Doppler, pitch, stretch, reverb, EQ, injected noise, masks, lowpass, and atmospheric filtering |
 
 **Finetuning:**
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--finetune-from` | `None` | Path to checkpoint for full finetuning |
-| `--pretrained-checkpoint` | `None` | Path to pretrained backbone weights |
-
-### Classification Pretraining
-
-Pretrain a backbone on raw drone-vs-non-drone audio (no background mixing):
-
-```bash
-uv run audi-train classify \
-    --drone-path data/my_drone_classify \
-    --model-arch resnet18 \
-    --lr 1e-4 \
-    --epochs 10 \
-    --output-dir checkpoints/classify
-```
-
-Useful for downstream finetuning on the detection task — classification pretraining teaches the backbone to recognize drone spectral patterns before adding background noise.
 
 ### Best-Practice Configs
 
 **Quick baseline (15 epochs, good calibration):**
 ```bash
---arch resnet18 --lr 1e-4 --mixup-alpha 0.2 --epochs 15 --patience 0
+--arch mn10_as --lr 1e-4 --mixup-alpha 0.2 --epochs 15 --patience 0
 ```
 
 **Extended training (50 epochs, best attack-run coverage):**
 ```bash
---arch resnet18 --lr 1e-4 --mixup-alpha 0.2 --epochs 50 --patience 0 --save-top-k 1
+--arch mn10_as --lr 1e-4 --mixup-alpha 0.2 --epochs 50 --patience 0 --save-top-k 1
 ```
 
 **Best calibration (dropout 0.2):**
 ```bash
---arch resnet18 --lr 1e-4 --dropout 0.2 --epochs 15 --patience 0
+--arch mn10_as --lr 1e-4 --dropout 0.2 --epochs 15 --patience 0
 ```
 
 **Cosine schedule with warmup:**
 ```bash
---arch resnet18 --lr 1e-4 --lr-schedule cosine --warmup-epochs 3 --epochs 15 --patience 0
+--arch mn10_as --lr 1e-4 --lr-schedule cosine --warmup-epochs 3 --epochs 15 --patience 0
 ```
 
-**Production ConvNeXt with long clips:**
+**Production MN10 with long clips:**
 ```bash
---arch convnext_small --clip-seconds 5.12 --lr 1e-4 --lr-schedule linear --warmup-epochs 8 \
+--arch mn10_as --clip-seconds 5.12 --lr 1e-4 --lr-schedule linear --warmup-epochs 8 \
     --loss bce --label-smoothing 0.1 --augment --epochs 25 --patience 0
 ```
 
@@ -383,9 +359,9 @@ TOP MODELS at PRECISION=0.90
 # Regenerate field alert TP/FP/FN table from attack-run thresholds
 uv run audi-eval field
 
-# Limit to the current hard-negative sweep
+# Limit to one sweep directory
 uv run audi-eval field \
-    --sweep field_hard_negative_finetune_v4_sizes_20260530_130027
+    --sweep <sweep-name>
 ```
 
 Results are saved to `checkpoints/field_eval_all.csv`.
@@ -394,130 +370,32 @@ Results are saved to `checkpoints/field_eval_all.csv`.
 
 ## Data Pipeline
 
-The `audi-data` command handles all data preprocessing. Run subcommands to build datasets from scratch:
+The `audi-data` command exposes the maintained preprocessing utilities used by detector training:
 
 ### Dataset Building Subcommands
 
+#### `precompute-waveforms` / `precompute-features`
 
-#### `urban-esc`
-
-Build an expanded background noise dataset from 8 public audio sources (ESC-50, UrbanSound8K, TUT, MUSAN, DEMAND, etc.):
-
-```bash
-uv run audi-data urban-esc \
-    --output-path data/hf_background_urban \
-    --chunk-min 5 --chunk-max 30 \
-    --max-clips-per-category 0
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--output-path` | (required) | Output dataset directory |
-| `--chunk-min` | 5 | Minimum chunk duration (seconds) |
-| `--chunk-max` | 30 | Maximum chunk duration (seconds) |
-| `--datasets` | all | Specific datasets: `esc50`, `urbansound`, `ambient`, `musan`, `demand`, `tut`, `sunbird` |
-| `--max-clips-per-category` | 0 | Clip limit per category (0 = auto-weighted: wind 1000, cars 900, etc.) |
-
-#### `filtered-hf`
-
-Convert raw audio directories into train/val/test HF dataset splits:
+Precompute detection training shards for `audi-train --precomputed-*` runs. `precompute-waveforms` stores mixed waveform shards; `precompute-features` converts those shards to normalized frontend tensors and uses CUDA when available, otherwise CPU:
 
 ```bash
-# Build filtered dataset
-uv run audi-data filtered-hf \
-    --input-dir data/dataset_v2 \
-    --output-path data/HF_dataset_v2 \
-    --chunk-sec 30
-```
+uv run audi-data precompute-waveforms \
+    --noise-path data/HF_dataset_v2_background \
+    --drone-path data/HF_dataset_v2_drone \
+    --split train --num-examples 50000 \
+    --output-dir data/precomputed/waveforms/train
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--input-dir` | (required) | Directory with audio subfolders |
-| `--output-path` | (required) | Output HF dataset path |
-| `--target-sr` | 16000 | Target sample rate |
-| `--label` | (auto) | Label for classification (`drone` / `noise`) |
-| `--split-background` | `True` | Split BG subfolder into `_background` dataset |
-| `--chunk-sec` | 30 | Chunk audio into fixed-length segments |
-| `--val-ratio` | 0.1 | Validation split ratio |
-| `--test-ratio` | 0.1 | Test split ratio |
-
-#### `chunk-spectro`
-
-Chunk audio files and render mel spectrograms for visualization:
-
-```bash
-uv run audi-data chunk-spectro \
-    --dataset-v2-dir data/dataset_v2 \
-    --output-dir artifacts/chunked_15s \
-    --chunk-sec 15 --n-mels 128
-```
-
-#### `hearability-templates`
-
-Build ERB-band hearability templates from background noise. These templates characterize the noise floor in each frequency band and are used for SNR-based training bin assignment.
-
-```bash
-uv run audi-data hearability-templates \
-    --dataset-path data/HF_dataset_v2_background \
-    --output-path artifacts/hearability_templates \
-    --erb-bands 28 --template-percentile 50
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dataset-path` | (required) | HF dataset directory |
-| `--output-path` | (auto) | Output directory for templates |
-| `--erb-bands` | 28 | Number of ERB frequency bands |
-| `--template-percentile` | 50 | Percentile for noise floor template |
-
-#### `pretrain-drones`
-
-Download and preprocess the geronimobasso drone audio detection dataset from HuggingFace for classification pretraining:
-
-```bash
-uv run audi-data pretrain-drones
-```
-
-#### `dads-classify`
-
-Preprocess the DADS (Drone Audio Detection Signals) dataset for classification pretraining:
-
-```bash
-uv run audi-data dads-classify
-```
-
-#### `analyze-snr`
-
-Analyze per-band signal-to-noise ratio between drone and noise recordings:
-
-```bash
-uv run audi-data analyze-snr \
-    --drone-path data/drone \
-    --noise-path data/noise \
-    --output-dir artifacts/snr_analysis
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--drone-path` | (required) | Drone audio directory |
-| `--noise-path` | (required) | Noise audio directory |
-| `--output-dir` | (auto) | Output directory for plots |
-| `--drone-gain-db` | (auto) | Drone gain levels in dB (e.g. `0 -10 -20`) |
-
-#### `mel-stats`
-
-Compute mel-spectrogram mean and standard deviation for model normalization:
-
-```bash
-uv run audi-data mel-stats
+uv run audi-data precompute-features \
+    --waveform-path data/precomputed/waveforms/train \
+    --split train \
+    --output-dir data/precomputed/features/train
 ```
 
 #### Current Field Utilities
 
 ```bash
 uv run audi-data field-bg
-uv run audi-data merge-audioset-fp
-uv run audi-data blue-red-recordings
+uv run --with silero-vad audi-data blue-red-recordings
 uv run audi-data mine-field-hard-negatives --checkpoint checkpoints/my_run/best.ckpt
 ```
 
@@ -529,10 +407,11 @@ Expected dataset structure under `data/`:
 data/
   dataset_v2/                  # Raw dataset v2 for chunking
   attack_runs/                 # Real drone flyover recordings (*.wav)
-  hf_dataset_sharded_expanded/ # Secondary noise for multi-noise training (urban_esc50.py)
   HF_dataset_v2_background/    # Background noise (train/val/test splits)
   HF_dataset_v2_drone/         # Drone audio (train/val/test splits)
-  hf_dataset_sharded_expanded_merged/ # Secondary noise for multi-noise training + audioset noises (audioset_fp.py)
+  HF_dataset_v7_background/    # Field background windows
+  field_hard_negatives/        # Mined field false-positive clips
+  precomputed/                 # Optional waveform/frontend training shards
 ```
 
 All `data/` and `checkpoints/` directories are git-ignored.
@@ -582,9 +461,9 @@ Writes the compact field alert table to `checkpoints/field_eval_all.csv`.
 The `audi-app/` directory contains a complete Docker-based deployment:
 
 - Real-time audio capture via ALSA (`arecord`)
-- TFLite int8 inference at 320ms intervals
-- Schmitt-trigger hysteresis for stable YES/BLUE/NO detection
-- GPIO alarm outputs (buzzer, strobe LED)
+- TFLite FP32 inference at 320 ms intervals
+- Schmitt-trigger hysteresis for stable YES/NO detection plus RED/BLUE typing
+- GPIO alert outputs for configured alert levels (RED by default)
 - Physical buttons (reset, record toggle, pause)
 - Touch-friendly web UI on port 8080
 - 32 GB ring buffer with automatic FLAC compression and eviction
@@ -593,11 +472,16 @@ The `audi-app/` directory contains a complete Docker-based deployment:
 See `audi-app/README.md` for full setup instructions.
 
 ```bash
-# Export a trained model to TFLite for edge deployment
-uv run audi-export-tflite \
+# Export a detector-only FP32 TFLite model
+uv run --extra export audi-export-tflite \
     --ckpt checkpoints/my_run/best.ckpt \
     --noise-path data/my_background \
     --drone-path data/my_drone
+
+# Export the combined detector + blue/red classifier used by audi-app
+uv run --extra export audi-export-blue-red-tflite \
+    --ckpt checkpoints/my_blue_red_run/best.ckpt \
+    --output audi-app/models/model_combined_mn10_mined_hardneg_blue_red.tflite
 ```
 
 ---

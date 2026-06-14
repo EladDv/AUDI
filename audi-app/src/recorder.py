@@ -1,5 +1,5 @@
 """
-Pi Audio Guard — Continuous Audio Recorder
+AUDI Type A — Continuous Audio Recorder
 
 Captures audio from the Pi's audio input (USB mic, I2S mic, or line-in)
 in fixed-duration segments. Maintains an in-memory ring buffer of the
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-logger = logging.getLogger("audio_guard.recorder")
+logger = logging.getLogger("audi.recorder")
 
 
 def auto_discover_device() -> str:
@@ -172,7 +172,7 @@ class ALSARecorder:
         self,
         hot_dir: str,
         device: str = "default",
-        sample_rate: int = 48000,
+        sample_rate: int = 16000,
         channels: int = 1,
         bit_depth: int = 16,
         segment_duration: int = 300,
@@ -506,7 +506,7 @@ class RecorderManager:
         self.recorder = ALSARecorder(
             hot_dir=config["storage"]["data_dir"],
             device=device,
-            sample_rate=audio_cfg.get("sample_rate", 48000),
+            sample_rate=audio_cfg.get("sample_rate", 16000),
             channels=audio_cfg.get("channels", 1),
             bit_depth=audio_cfg.get("bit_depth", 16),
             segment_duration=audio_cfg.get("segment_duration", 300),

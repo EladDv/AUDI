@@ -3,7 +3,7 @@
 Usage:
     uv run audi-eval field
     uv run audi-eval field --top 10
-    uv run audi-eval field --sweep field_hard_negative_finetune_v4_sizes_20260530_130027
+    uv run audi-eval field --sweep <sweep-name>
 """
 from __future__ import annotations
 
@@ -200,57 +200,15 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
         ckpt_path = ckpts[-1]
 
         try:
-            from audi.checkpoint import get_clip_seconds, strip_compile_prefix
-            from audi.config import MelConfig, ModelConfig, OptimizerConfig
-            from audi.training.detector import DroneDetector
+            from audi.checkpoint import load_model_from_checkpoint
 
-            ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-            hp = ckpt["hyper_parameters"]
-            model_hp = hp.get("model", {})
-            if isinstance(model_hp, dict):
-                model_cfg = ModelConfig(
-                    arch=model_hp.get("arch", hp.get("model_arch", "cnn14")),
-                    pretrained=model_hp.get("pretrained", hp.get("pretrained_backbone", True)),
-                    compile=False,
-                )
-            else:
-                model_cfg = ModelConfig(
-                    arch=model_hp.arch,
-                    pretrained=model_hp.pretrained,
-                    compile=False,
-                )
-            mel_hp = hp.get("mel", {})
-            if isinstance(mel_hp, dict):
-                mel_cfg = MelConfig(
-                    sample_rate=mel_hp.get("sample_rate", hp.get("sample_rate", 16000)),
-                    n_mels=mel_hp.get("n_mels", hp.get("n_mels", 128)),
-                    n_fft=mel_hp.get("n_fft", hp.get("n_fft", 1024)),
-                    win_length=mel_hp.get("win_length", hp.get("win_length")),
-                    hop_length=mel_hp.get("hop_length", hp.get("hop_length", 160)),
-                    mean_db=mel_hp.get("mean_db", hp.get("mel_mean")),
-                    std_db=mel_hp.get("std_db", hp.get("mel_std")),
-                    frontend_type=mel_hp.get("frontend_type", hp.get("frontend_type", "mel")),
-                    stft_bands_hz=mel_hp.get(
-                        "stft_bands_hz", hp.get("stft_bands_hz")
-                    ),
-                    cqt_bins=mel_hp.get("cqt_bins", hp.get("cqt_bins", 84)),
-                    cqt_bpo=mel_hp.get("cqt_bpo", hp.get("cqt_bpo", 12)),
-                    cwt_scales=mel_hp.get("cwt_scales", hp.get("cwt_scales", 64)),
-                    use_pcen=mel_hp.get("use_pcen", hp.get("use_pcen", False)),
-                )
-            else:
-                mel_cfg = mel_hp
-            model = DroneDetector(
-                model=model_cfg,
-                mel=mel_cfg,
-                optimizer=OptimizerConfig(),
-                bin_names=hp.get("bin_names", []),
+            model = load_model_from_checkpoint(
+                ckpt_path,
+                device=device,
+                quiet=True,
             )
-            model.load_state_dict(strip_compile_prefix(ckpt["state_dict"]), strict=False)
-            model = model.to(device).eval()
-            clip_s = get_clip_seconds(hp)
-            model_sample_rate = int(mel_cfg.sample_rate)
-            del ckpt
+            clip_s = model._clip_seconds
+            model_sample_rate = int(model._mel_cfg.sample_rate)
             torch.cuda.empty_cache()
         except Exception as e:
             print(f"load failed: {e}")

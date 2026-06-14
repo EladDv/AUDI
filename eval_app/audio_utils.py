@@ -9,18 +9,11 @@ import torch
 import torchaudio
 
 from audi.training.detector import DroneDetector
-from audi.checkpoint import get_clip_seconds
 
 _SR = 16000
-# Default 2.56 — overridden when a checkpoint is loaded
+# Eval dashboard window length.
 _CLIP_S = 5.12
 _CLIP_SAMPLES = int(_SR * _CLIP_S)
-
-def set_clip_seconds(clip_s: float) -> None:
-    """Update the global clip length (called after loading a checkpoint)."""
-    global _CLIP_S, _CLIP_SAMPLES
-    _CLIP_S = clip_s
-    _CLIP_SAMPLES = int(_SR * clip_s)
 
 _ATTACK_DIR = _Path(__file__).resolve().parent.parent / "data" / "attack_runs"
 

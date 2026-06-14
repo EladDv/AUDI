@@ -8,19 +8,6 @@ base_flags: >-
   --loss bce --label-smoothing 0.1 --augment --lr 1e-4
   --lr-schedule linear
 configs:
-  - name: "01_all"
-    flags: --dsp-feature-sets v3,v4,v5 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
-    note: All features — V3+V4+V5 (11 feats).
-
-  - name: "02_proj128"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-projector-hidden 128 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
-    note: Large projector MLP — more capacity.
-
-  - name: "03_hop320"
-    flags: --dsp-feature-sets v3,v4,v5 --dsp-hop-length 320 --warmup-epochs 8 --weight-decay 0.03 --arch convnext_small
-    note: Coarse time — 20ms hop, faster.
-
-  # ── MobileNets (MN) — core variants ───────────────────────────────
   - name: "14_dymn04_as"
     flags: --arch dymn04_as
     note: DyMN width=0.4, 0.98M params, AudioSet mAP 43.2
@@ -28,7 +15,6 @@ configs:
     flags: --arch dymn10_as
     note: DyMN width=1.0, 4.88M params, AudioSet mAP 47.1
 
-  # ── MobileNets (MN) — core variants ───────────────────────────────
   - name: "16_mn04_as"
     flags: --arch mn04_as
     note: MN width=0.4, 0.98M params, AudioSet mAP 43.2

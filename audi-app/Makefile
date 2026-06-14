@@ -24,40 +24,40 @@ logs: ## Tail container logs
 	docker compose -f docker/docker-compose.yml logs -f
 
 check: ## Run system check inside container
-	docker compose -f docker/docker-compose.yml run --rm audio-guard python3 src/main.py --check
+	docker compose -f docker/docker-compose.yml run --rm audi python3 src/main.py --check
 
 clean: ## Remove container, image, and data volume
 	docker compose -f docker/docker-compose.yml down -v
-	docker rmi audio-guard:latest 2>/dev/null || true
+	docker rmi audi:latest 2>/dev/null || true
 
 shell: ## Open a shell in the running container
-	docker exec -it audio-guard bash
+	docker exec -it audi bash
 
 restart: stop start ## Restart the container
 
 # --- Systemd Service Installation (for auto-start on boot) ---
 install-service: ## Install systemd service for auto-start on boot
-	sudo cp docker/audio-guard.service /etc/systemd/system/audio-guard.service
+	sudo cp docker/audi.service /etc/systemd/system/audi.service
 	sudo systemctl daemon-reload
-	sudo systemctl enable audio-guard.service
-	@echo "Service installed. Start with: sudo systemctl start audio-guard"
+	sudo systemctl enable audi.service
+	@echo "Service installed. Start with: sudo systemctl start audi"
 
 install-kiosk: ## Install browser kiosk autostart and desktop launcher
 	sudo bash scripts/install-kiosk.sh
 
 uninstall-service: ## Remove systemd service
-	sudo systemctl stop audio-guard.service 2>/dev/null || true
-	sudo systemctl disable audio-guard.service 2>/dev/null || true
-	sudo rm -f /etc/systemd/system/audio-guard.service
+	sudo systemctl stop audi.service 2>/dev/null || true
+	sudo systemctl disable audi.service 2>/dev/null || true
+	sudo rm -f /etc/systemd/system/audi.service
 	sudo systemctl daemon-reload
 	@echo "Service uninstalled."
 
 status: ## Check service and container status
 	@echo "=== Systemd Service ==="
-	-sudo systemctl status audio-guard.service 2>/dev/null | head -20
+	-sudo systemctl status audi.service 2>/dev/null | head -20
 	@echo ""
 	@echo "=== Docker Container ==="
-	-docker ps --filter name=audio-guard --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	-docker ps --filter name=audi --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 	@echo ""
 	@echo "=== Web UI ==="
 	@echo "http://localhost:8080 (or http://<pi-ip>:8080)"

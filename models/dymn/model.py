@@ -6,8 +6,8 @@ from torchvision.ops.misc import ConvNormActivation
 from torch.hub import load_state_dict_from_url
 import urllib.parse
 
-from models.dymn.dy_block import DynamicInvertedResidualConfig, DY_Block, DynamicConv, DyReLUB
-from models.mn.block_types import InvertedResidualConfig, InvertedResidual
+from models.dymn.dy_block import DynamicInvertedResidualConfig, DY_Block, DynamicConv
+from models.mn.block_types import InvertedResidual
 
 # points to github releases
 model_url = "https://github.com/fschmid56/EfficientAT/releases/download/v0.0.1/"
@@ -162,7 +162,6 @@ class DyMN(nn.Module):
         if return_fmaps:
             fmaps.append(x)
 
-        g = None
         for layer in self.layers:
             x = layer(x)
             if return_fmaps:

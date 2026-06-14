@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.dymn.utils import make_divisible, cnn_out_size
+from models.mn.utils import make_divisible, cnn_out_size
 
 
 class DynamicInvertedResidualConfig:

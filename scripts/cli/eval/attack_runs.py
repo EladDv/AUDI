@@ -21,10 +21,8 @@ import numpy as np
 import torch
 import torchaudio
 
-from audi.checkpoint import get_clip_seconds, strip_compile_prefix
-from audi.config import MelConfig, ModelConfig, OptimizerConfig
+from audi.checkpoint import load_model_from_checkpoint
 from audi.hysteresis import apply_hysteresis
-from audi.training.detector import DroneDetector
 from audi.training.validation import (
     compute_precision,
     compute_roc_values,
@@ -54,7 +52,7 @@ def run(
     _skip_postprocess: bool = False,
     _skip_calibrate: bool = False,
 ) -> None:
-    # --- argparse (manual, since evaluate.py dispatches via sys.argv) ---
+    # --- argparse (manual, since audi-eval dispatches via sys.argv) ---
     rest = sys.argv[1:] if len(sys.argv) > 1 else []
     if any(arg in {"-h", "--help"} for arg in rest):
         print(
@@ -211,80 +209,8 @@ def run(
         torch.cuda.empty_cache()
 
     def load_model(ckpt_path: str):
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        hp = ckpt["hyper_parameters"]
-        model_hp = hp.get("model", {})
-        if isinstance(model_hp, dict):
-            model_cfg = ModelConfig(
-                arch=model_hp.get("arch", hp.get("model_arch", "cnn14")),
-                pretrained=model_hp.get("pretrained", hp.get("pretrained_backbone", True)),
-                compile=False,
-            )
-        else:
-            model_cfg = ModelConfig(
-                arch=model_hp.arch,
-                pretrained=model_hp.pretrained,
-                compile=False,
-            )
-        mel_hp = hp.get("mel", {})
-        if isinstance(mel_hp, dict):
-            mel_cfg = MelConfig(
-                sample_rate=mel_hp.get("sample_rate", hp.get("sample_rate", 16000)),
-                n_mels=mel_hp.get("n_mels", hp.get("n_mels", 128)),
-                n_fft=mel_hp.get("n_fft", hp.get("n_fft", 1024)),
-                win_length=mel_hp.get("win_length", hp.get("win_length")),
-                hop_length=mel_hp.get("hop_length", hp.get("hop_length", 160)),
-                mean_db=mel_hp.get("mean_db", hp.get("mel_mean")),
-                std_db=mel_hp.get("std_db", hp.get("mel_std")),
-                frontend_type=mel_hp.get("frontend_type", hp.get("frontend_type", "mel")),
-                stft_bands_hz=mel_hp.get(
-                    "stft_bands_hz", hp.get("stft_bands_hz")
-                ),
-                cqt_bins=mel_hp.get("cqt_bins", hp.get("cqt_bins", 84)),
-                cqt_bpo=mel_hp.get("cqt_bpo", hp.get("cqt_bpo", 12)),
-                cwt_scales=mel_hp.get("cwt_scales", hp.get("cwt_scales", 64)),
-                use_pcen=mel_hp.get("use_pcen", hp.get("use_pcen", False)),
-            )
-        else:
-            mel_cfg = MelConfig(
-                sample_rate=getattr(mel_hp, "sample_rate", hp.get("sample_rate", 16000)),
-                n_mels=getattr(mel_hp, "n_mels", hp.get("n_mels", 128)),
-                n_fft=getattr(mel_hp, "n_fft", hp.get("n_fft", 1024)),
-                win_length=getattr(mel_hp, "win_length", hp.get("win_length")),
-                hop_length=getattr(mel_hp, "hop_length", hp.get("hop_length", 160)),
-                mean_db=getattr(mel_hp, "mean_db", hp.get("mel_mean")),
-                std_db=getattr(mel_hp, "std_db", hp.get("mel_std")),
-                frontend_type=getattr(mel_hp, "frontend_type", hp.get("frontend_type", "mel")),
-                stft_bands_hz=getattr(
-                    mel_hp, "stft_bands_hz", hp.get("stft_bands_hz")
-                ),
-                cqt_bins=getattr(mel_hp, "cqt_bins", hp.get("cqt_bins", 84)),
-                cqt_bpo=getattr(mel_hp, "cqt_bpo", hp.get("cqt_bpo", 12)),
-                cwt_scales=getattr(mel_hp, "cwt_scales", hp.get("cwt_scales", 64)),
-                use_pcen=getattr(mel_hp, "use_pcen", hp.get("use_pcen", False)),
-            )
-        opt_cfg = OptimizerConfig(
-            lr=hp.get("lr", 1e-3),
-            weight_decay=hp.get("weight_decay", 0.01),
-            schedule=hp.get("lr_schedule", "constant"),
-            warmup_epochs=hp.get("warmup_epochs", 0),
-        )
-        model = DroneDetector(
-            model=model_cfg, mel=mel_cfg, optimizer=opt_cfg,
-            bin_names=hp.get("bin_names", []),
-            loss_type=hp.get("loss_type", "bce"),
-            label_smoothing=hp.get("label_smoothing", 0.0),
-            per_bin_weights=hp.get("per_bin_weights", False),
-            spec_augment_prob=float(hp.get("spec_augment_prob", 0.0)),
-            mixup_alpha=hp.get("mixup_alpha", 0.0),
-            cutmix_alpha=hp.get("cutmix_alpha", 0.0),
-            dropout=hp.get("dropout", 0.0),
-            bn_momentum=hp.get("bn_momentum", 0.1),
-        )
-        model.load_state_dict(strip_compile_prefix(ckpt["state_dict"]), strict=False)
-        # Don't keep ckpt in memory — GC it
-        clip_s = get_clip_seconds(hp)
-        return model.eval(), clip_s, int(mel_cfg.sample_rate)
+        model = load_model_from_checkpoint(ckpt_path, device="cpu", quiet=True)
+        return model, model._clip_seconds, int(model._mel_cfg.sample_rate)
 
     def find_predictions_file(ckpt_path):
         ckpt = Path(ckpt_path)

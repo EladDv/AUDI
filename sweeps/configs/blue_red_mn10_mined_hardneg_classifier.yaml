@@ -1,0 +1,31 @@
+# Frozen MN10 mined-hard-negative detector with a deep blue/red classifier head.
+name: blue_red_mn10_mined_hardneg_classifier
+command: uv run audi-train-blue-red
+postprocess: false
+description: >-
+  Train a deeper blue/red classification head on top of the
+  maintained MN10 mined-hard-negative detector. The detector stays
+  frozen and detection loss is disabled so the run learns color classification
+  without changing the P90/P95 detector operating point.
+base_flags: >-
+  --bg-path data/HF_dataset_v7_background
+  --drone-path data/hf_blue_red
+  --model-arch mn10_as
+  --detector-checkpoint checkpoints/mn10_06_new_tricks_finetune_20260614_150118/01_mined_hardneg_deep_head_hard07/checkpoints/epoch=7-step=1440.ckpt
+  --epochs 25
+  --batch-size 64
+  --clip-seconds 5.12
+  --snr-min -20
+  --snr-max 10
+  --positive-prob 0.5
+  --det-loss-weight 0
+  --cls-loss-weight 1.0
+  --freeze-backbone-epochs 999
+  --dataset-length 3000
+  --val-length 800
+  --monitor val_red_auc
+  --save-top-k 2
+configs:
+  - name: "00_mn10_mined_hardneg_deep_512_512_256_128_lr1e4_d25"
+    flags: --lr 1e-4 --cls-head-hidden-dims 512,512,256,128 --cls-head-dropout 0.25
+    note: Four hidden layers on frozen MN10 mined-hard-negative detector features.

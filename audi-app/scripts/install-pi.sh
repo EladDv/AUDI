@@ -11,7 +11,7 @@
 # What it does:
 #   1. Detects Pi model and OS
 #   2. Installs system deps (Docker, alsa-utils, flac, git)
-#   3. Clones or copies the app to /opt/pi-audio-guard
+#   3. Clones or copies the app to /opt/AUDI
 #   4. Adds user to docker, audio, gpio groups
 #   5. Configures ALSA for the default mic
 #   6. Builds the Docker image
@@ -133,8 +133,8 @@ else
     if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/config.yaml" ]; then
         ok "App already installed at $INSTALL_DIR"
     else
-        err "Cannot find app source. Run this script from the pi-audio-guard directory:"
-        err "  cd pi-audio-guard && bash scripts/install-pi.sh"
+        err "Cannot find app source. Run this script from the AUDI/audi-app directory:"
+        err "  cd AUDI/audi-app && bash scripts/install-pi.sh"
         exit 1
     fi
 fi
@@ -164,7 +164,7 @@ fi
 ASOUND_FILE="${DATA_DIR}/asound.conf"
 if [ ! -f "$ASOUND_FILE" ]; then
     cat > "$ASOUND_FILE" << 'EOF'
-# Default ALSA configuration for Pi Audio Guard
+# Default ALSA configuration for AUDI Type A
 # Uses the first available capture device
 pcm.!default {
     type asym
@@ -191,7 +191,7 @@ ok "Docker image built"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 info "Installing systemd service..."
-cp docker/audio-guard.service "$SERVICE_FILE"
+cp docker/audi.service "$SERVICE_FILE"
 sed -i "s|/home/pi/audi-app|${INSTALL_DIR}|g" "$SERVICE_FILE"
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}.service"
@@ -243,7 +243,7 @@ fi
 # ---- 10. Firewall (if ufw) ----
 if command -v ufw &> /dev/null; then
     info "Configuring firewall..."
-    ufw allow 8080/tcp comment "Pi Audio Guard Web UI" 2>/dev/null || true
+    ufw allow 8080/tcp comment "AUDI Web UI" 2>/dev/null || true
     ok "Port 8080 opened in firewall"
 fi
 

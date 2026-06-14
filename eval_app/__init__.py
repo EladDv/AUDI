@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Interactive model evaluation dashboard for audi drone detection.
 
-Run: uv run streamlit run eval_app/
+Run: uv run --extra eval streamlit run eval_app/
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import streamlit as st
 import torch
 from plotly.subplots import make_subplots
 
-from audi.hearability_estimator import HearabilityEstimator
+from audi.evaluation.deployment import HearabilityEstimator
 from audi.hysteresis import apply_hysteresis
 from eval_app.audio_utils import (
     _CLIP_S,
@@ -25,18 +25,18 @@ from eval_app.audio_utils import (
     predict_windows,
     window_time_axis,
 )
-from eval_app.ensemble import ensemble_viewer_page
-from eval_app.leaderboard import leaderboard_page
 from eval_app.field_viewer import field_viewer_page
+from eval_app.leaderboard import leaderboard_page
 from eval_app.model_utils import (
     _CHECKPOINTS_DIR,
+    compute_precision_recall_curve,
     discover_checkpoints,
     find_hearability_calib,
     find_predictions_file,
     get_model_arch_from_ckpt,
     load_model,
+    load_precision_thresholds,
 )
-from eval_app.precision import compute_precision_recall_curve, load_precision_thresholds
 
 # ── Page setup ───────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ def classify_bins_simple(scores, easy_th, medium_th, hard_th, vhard_th):
 
 page = st.sidebar.radio(
     "Page",
-    ["Model Viewer", "Attack Run Leaderboard", "Field Viewer", "Ensemble Viewer"],
+    ["Model Viewer", "Attack Run Leaderboard", "Field Viewer"],
     index=0,
 )
 
@@ -80,14 +80,14 @@ if page == "Attack Run Leaderboard":
 elif page == "Field Viewer":
     field_viewer_page()
     st.stop()
-elif page == "Ensemble Viewer":
-    ensemble_viewer_page()
-    st.stop()
 
 # ── Sidebar ─────────────────────────────────────────────────────────────
 
 st.sidebar.header("Model")
 ckpts = discover_checkpoints()
+if not ckpts:
+    st.info("No supported EfficientAT checkpoints found under checkpoints/.")
+    st.stop()
 run_names = sorted(set(c["run"] for c in ckpts))
 selected_run = st.sidebar.selectbox("Sweep / run", run_names)
 

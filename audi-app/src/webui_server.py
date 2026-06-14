@@ -1,5 +1,5 @@
 """
-Pi Audio Guard — Web UI
+AUDI Type A — Web UI
 
 Minimal Flask web server serving a touch-friendly interface for a
 small Pi display. Shows live status, big control buttons, and
@@ -8,12 +8,13 @@ alarm history.
 
 import logging
 import math
+import os
 import threading
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, request, send_file
 
-logger = logging.getLogger("audio_guard.webui")
+logger = logging.getLogger("audi.webui")
 
 # Path to HTML template
 HERE = Path(__file__).parent
@@ -44,6 +45,81 @@ def dbfs_to_vu_percent(db: float) -> float:
         value = VU_DB_FLOOR
     value = max(VU_DB_FLOOR, min(VU_DB_CEILING, value))
     return ((value - VU_DB_FLOOR) / (VU_DB_CEILING - VU_DB_FLOOR)) * 100.0
+
+
+def _cpu_temp() -> float:
+    """Try to read CPU temperature from common Linux paths."""
+    paths = [
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/class/hwmon/hwmon0/temp1_input",
+    ]
+    for p in paths:
+        try:
+            with open(p) as f:
+                return int(f.read().strip()) / 1000.0
+        except (FileNotFoundError, ValueError):
+            continue
+    return 0.0
+
+
+def _memory() -> dict:
+    """Read memory info from /proc/meminfo."""
+    mem = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if "MemTotal" in line:
+                    mem["total_kb"] = int(line.split()[1])
+                elif "MemAvailable" in line:
+                    mem["available_kb"] = int(line.split()[1])
+    except OSError:
+        pass
+    total = mem.get("total_kb", 0)
+    avail = mem.get("available_kb", 0)
+    used_pct = round((1 - avail / total) * 100, 1) if total > 0 else 0
+    return {"used_pct": used_pct, "total_kb": total, "available_kb": avail}
+
+
+def _load() -> dict:
+    try:
+        a, b, c = os.getloadavg()
+        return {"1min": round(a, 2), "5min": round(b, 2), "15min": round(c, 2)}
+    except OSError:
+        return {"1min": 0, "5min": 0, "15min": 0}
+
+
+def _uptime() -> tuple[float, str]:
+    try:
+        with open("/proc/uptime") as f:
+            secs = float(f.read().split()[0])
+    except OSError:
+        secs = 0
+    h = int(secs // 3600)
+    m = int((secs % 3600) // 60)
+    return secs, f"{h}h {m}m"
+
+
+def _disk() -> dict:
+    try:
+        stat = os.statvfs("/")
+        total = stat.f_blocks * stat.f_frsize
+        free = stat.f_bavail * stat.f_frsize
+        used_pct = round((1 - free / total) * 100, 1) if total > 0 else 0
+        return {"used_pct": used_pct, "free_gb": round(free / 1e9, 1)}
+    except OSError:
+        return {"used_pct": 0, "free_gb": 0}
+
+
+def system_stats() -> dict:
+    uptime_secs, uptime_str = _uptime()
+    return {
+        "cpu_temperature_c": _cpu_temp(),
+        "memory": _memory(),
+        "load": _load(),
+        "uptime_seconds": uptime_secs,
+        "uptime_str": uptime_str,
+        "disk": _disk(),
+    }
 
 
 class WebUI:
@@ -91,11 +167,9 @@ class WebUI:
         @app.route("/")
         def index():
             """Serve the main touch UI."""
-            try:
-                html = TEMPLATE_PATH.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                html = self._fallback_html()
-            return render_template_string(html)
+            if not TEMPLATE_PATH.exists():
+                return "Web UI template missing", 500
+            return send_file(TEMPLATE_PATH)
 
         @app.route("/api/status")
         def api_status():
@@ -168,7 +242,7 @@ class WebUI:
 
         @app.route("/api/clear_alarm", methods=["POST"])
         def api_clear_alarm():
-            """Manually clear GPIO alarm from UI."""
+            """Manually clear the GPIO alert from UI."""
             if self.gpio:
                 self.gpio.clear_alarm()
                 return jsonify({"status": "cleared"})
@@ -325,119 +399,4 @@ class WebUI:
         @app.route("/api/system")
         def api_system():
             """System health: CPU temp, memory, uptime, load."""
-            from system_info import all_stats
-
-            return jsonify(all_stats())
-
-    # ------------------------------------------------------------------
-    # Fallback inline template
-    # ------------------------------------------------------------------
-
-    def _fallback_html(self) -> str:
-        """Inline fallback if template file is missing."""
-        return """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
-<title>Pi Audio Guard</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 16px; }
-h1 { font-size: 1.4rem; margin-bottom: 12px; color: #0af; }
-.status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
-.status-card { background: #1a1a2e; border-radius: 10px; padding: 12px; }
-.status-card .label { font-size: 0.7rem; color: #888; text-transform: uppercase; }
-.status-card .value { font-size: 1.1rem; font-weight: 600; margin-top: 4px; }
-.btn-group { display: flex; gap: 12px; margin-top: 16px; }
-.btn { flex: 1; padding: 20px; border: none; border-radius: 14px; font-size: 1.1rem;
-  font-weight: 700; color: #fff; cursor: pointer; touch-action: manipulation; }
-.btn-primary { background: #0a7; }
-.btn-danger { background: #c33; }
-.btn-warning { background: #c83; }
-.btn:active { transform: scale(0.95); opacity: 0.8; }
-.alarm-box { margin-top: 16px; padding: 16px; border-radius: 12px; text-align: center; }
-.alarm-box.active { background: #3a1111; border: 2px solid #c33; }
-.alarm-box.inactive { background: #1a1a2e; }
-.alarm-label { font-size: 1rem; margin-bottom: 8px; }
-.alarm-label.alert { color: #f44; font-weight: 700; }
-.prob-bar { margin: 4px 0; display: flex; align-items: center; }
-.prob-bar .label { width: 100px; font-size: 0.8rem; }
-.prob-bar .track { flex: 1; height: 16px; background: #222; border-radius: 8px; overflow: hidden; }
-.prob-bar .fill { height: 100%; border-radius: 8px; transition: width 0.3s; }
-.footer { margin-top: 24px; font-size: 0.7rem; color: #555; text-align: center; }
-</style>
-</head>
-<body>
-<h1>Pi Audio Guard</h1>
-<div class="status-grid" id="statusGrid"></div>
-<div class="alarm-box inactive" id="alarmBox">
-  <div class="alarm-label">Status: Monitoring</div>
-  <div id="topPrediction"></div>
-</div>
-<div id="probBars"></div>
-<div class="btn-group">
-  <button class="btn btn-primary" onclick="forceInference()">Force Scan</button>
-  <button class="btn btn-danger" onclick="clearAlarm()">Silence Alarm</button>
-</div>
-<div class="footer" id="footer"></div>
-<script>
-function update() {
-  fetch('/api/status').then(r=>r.json()).then(d=>{
-    const g = document.getElementById('statusGrid');
-    const rec = d.recorder || {};
-    const st = d.storage || {};
-    const det = d.detector || {};
-    const gp = d.gpio || {};
-    g.innerHTML = `
-      <div class="status-card"><div class="label">Recording</div>
-        <div class="value" style="color:${rec.running?'#0a7':'#c33'}">
-          ${rec.running?'Active':'Stopped'}
-        </div></div>
-      <div class="status-card"><div class="label">Storage</div>
-        <div class="value">${st.used_gb||0} / ${st.max_size_gb||32} GB</div></div>
-      <div class="status-card"><div class="label">Detections</div>
-        <div class="value">${det.alarms_triggered||0}</div></div>
-      <div class="status-card"><div class="label">GPIO Alarm</div>
-        <div class="value" style="color:${gp.alarming?'#f44':'#0a7'}">
-          ${gp.alarming?'ACTIVE':'Idle'}
-        </div></div>
-    `;
-    const box = document.getElementById('alarmBox');
-    box.className = 'alarm-box ' + (gp.alarming ? 'active' : 'inactive');
-    document.getElementById('topPrediction').textContent = '';
-  });
-  fetch('/api/alarm_history').then(r=>r.json()).then(d=>{
-    const pb = document.getElementById('probBars');
-    const s = d.smoothed || {};
-    const colors = ['#f44','#fa0','#fc0','#0af','#0f7','#a0f'];
-    const entries = Object.entries(s).sort((a,b)=>b[1]-a[1]);
-    pb.innerHTML = entries.map(([l,p],i)=>`
-      <div class="prob-bar">
-        <div class="label">${l}</div>
-        <div class="track"><div class="fill"
-          style="width:${(p*100).toFixed(0)}%;background:${colors[i%colors.length]}">
-        </div></div>
-        <span style="margin-left:8px;font-size:0.8rem;width:40px">${(p*100).toFixed(0)}%</span>
-      </div>
-    `).join('');
-    const top = entries[0];
-    if (top && top[1] > (d.last_inference?.threshold || 0.7)) {
-      document.getElementById('topPrediction').innerHTML =
-        '<strong>DETECTED: ' + top[0] + '</strong>';
-    }
-  });
-  document.getElementById('footer').textContent =
-    'Updated: ' + new Date().toLocaleTimeString();
-}
-function forceInference() {
-  fetch('/api/force_inference',{method:'POST'}).then(()=>update());
-}
-function clearAlarm() {
-  fetch('/api/clear_alarm',{method:'POST'}).then(()=>update());
-}
-setInterval(update, 2000);
-update();
-</script>
-</body>
-</html>"""
+            return jsonify(system_stats())

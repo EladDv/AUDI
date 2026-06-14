@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-logger = logging.getLogger("audio_guard.detector")
+logger = logging.getLogger("audi.detector")
 
 
 def _hz_to_mel(hz: np.ndarray) -> np.ndarray:
@@ -77,16 +77,58 @@ def compute_mel_spectrogram(
 
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
 
-    # torchaudio Spectrogram(center=True, pad_mode="reflect") pads by n_fft // 2
-    # before framing. torch.hann_window defaults to periodic=True.
+    import librosa
+
+    spec = librosa.stft(
+        audio,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        window="hann",
+        center=True,
+        pad_mode="reflect",
+    )
+    power_spec = spec.real * spec.real + spec.imag * spec.imag
+
+    mel_fb = _torchaudio_mel_filterbank(
+        n_mels=n_mels,
+        n_fft=n_fft,
+        sample_rate=sample_rate,
+        f_min=float(f_min),
+        f_max=float(f_max),
+    )
+    mel = mel_fb @ power_spec
+    mel = librosa.power_to_db(mel, ref=1.0, amin=1e-10, top_db=None)
+
+    return mel.astype(np.float32)
+
+
+def _compute_mel_spectrogram_frames(
+    *,
+    audio: np.ndarray,
+    sample_rate: int,
+    n_mels: int,
+    n_fft: int,
+    win_length: int,
+    hop_length: int,
+    f_min: float,
+    f_max: float,
+    frame_start: int,
+    frame_count: int,
+) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    frame_count = int(frame_count)
+    if frame_count <= 0:
+        return np.empty((n_mels, 0), dtype=np.float32)
+
     pad = n_fft // 2
     padded = np.pad(audio, (pad, pad), mode="reflect")
     if len(padded) < n_fft:
         padded = np.pad(padded, (0, n_fft - len(padded)), mode="constant")
 
-    from numpy.lib.stride_tricks import sliding_window_view
-
-    frames = sliding_window_view(padded, n_fft)[::hop_length]
+    offsets = (frame_start + np.arange(frame_count, dtype=np.int64)) * hop_length
+    sample_idx = offsets[:, np.newaxis] + np.arange(n_fft, dtype=np.int64)
+    frames = padded[sample_idx]
     window = _stft_window(n_fft, win_length)
     spec = np.fft.rfft(frames * window[np.newaxis, :], n=n_fft, axis=1)
     power_spec = (spec.real * spec.real + spec.imag * spec.imag).T
@@ -100,8 +142,19 @@ def compute_mel_spectrogram(
     )
     mel = mel_fb @ power_spec
     mel = 10.0 * np.log10(np.maximum(mel, 1e-10))
-
     return mel.astype(np.float32)
+
+
+def _audio_normalization_scale(audio: np.ndarray) -> float:
+    audio64 = audio.astype(np.float64, copy=False)
+    audio_rms = float(np.sqrt(np.mean(audio64 * audio64)))
+    if audio_rms <= 1e-8:
+        return 1.0
+    scale = 1.0 / audio_rms
+    raw_peak = float(np.max(np.abs(audio)))
+    if raw_peak * scale > 0.98:
+        scale = 0.98 / raw_peak
+    return scale
 
 
 @lru_cache(maxsize=16)
@@ -159,7 +212,7 @@ def resample_audio(
 
 
 class TFLiteClassifier:
-    """Load and run a TFLite int8 model for drone detection."""
+    """Load and run a FP32 TFLite model for drone detection."""
 
     def __init__(
         self,
@@ -170,9 +223,11 @@ class TFLiteClassifier:
         win_length: int | None = None,
         hop_length: int = 160,
         model_sample_rate: int = 16000,
-        window_samples: int = 40960,
+        window_samples: int = 81920,
         mel_mean: float | None = None,
         mel_std: float | None = None,
+        incremental_preprocess: bool = True,
+        incremental_step_samples: int | None = None,
     ):
         self.model_path = model_path
         self.n_mels = n_mels
@@ -183,6 +238,15 @@ class TFLiteClassifier:
         self.window_samples = window_samples
         self.mel_mean = mel_mean
         self.mel_std = mel_std
+        self.incremental_preprocess = incremental_preprocess
+        self.incremental_step_samples = incremental_step_samples
+
+        self._mel_cache_audio: np.ndarray | None = None
+        self._mel_cache_raw_db: np.ndarray | None = None
+        self._mel_cache_target_frames: int | None = None
+        self._preprocess_cache_hits = 0
+        self._preprocess_cache_misses = 0
+        self._preprocess_last_reused_frames = 0
 
         self._interpreter = None
         self._input_details = None
@@ -195,6 +259,12 @@ class TFLiteClassifier:
             self._load_model(num_threads)
         except Exception as e:
             logger.warning("TFLite model not loaded: %s - using mock", e)
+
+    def reset_preprocess_cache(self) -> None:
+        self._mel_cache_audio = None
+        self._mel_cache_raw_db = None
+        self._mel_cache_target_frames = None
+        self._preprocess_last_reused_frames = 0
 
     def _load_model(self, num_threads: int):
         from ai_edge_litert.interpreter import Interpreter
@@ -254,28 +324,17 @@ class TFLiteClassifier:
         else:
             audio = audio[: self.window_samples]
 
-        audio_rms = np.sqrt(np.mean(audio.astype(np.float64) ** 2))
-        if audio_rms > 1e-8:
-            audio = audio / audio_rms
-        peak = float(np.max(np.abs(audio)))
-        if peak > 0.98:
-            audio = audio * (0.98 / peak)
-
-        mel = compute_mel_spectrogram(
-            audio,
-            self.model_sample_rate,
-            n_mels=self.n_mels,
-            n_fft=self.n_fft,
-            win_length=self.win_length,
-            hop_length=self.hop_length,
-        )
         target_frames = self.expected_frames or (self.window_samples // self.hop_length)
+        scale = _audio_normalization_scale(audio)
+        mel = self._raw_mel_db(audio, target_frames)
+        if scale > 0.0 and scale != 1.0:
+            mel = mel + np.float32(20.0 * np.log10(scale))
+
         if mel.shape[-1] < target_frames:
             raise ValueError(
                 f"Mel spectrogram has {mel.shape[-1]} frames, "
                 f"but model expects {target_frames}; check window_samples"
             )
-        mel = mel[..., :target_frames]
 
         if self.mel_mean is not None and self.mel_std is not None:
             mel = (mel - self.mel_mean) / max(self.mel_std, 1e-8)
@@ -288,6 +347,128 @@ class TFLiteClassifier:
 
         return mel.astype(np.float32)
 
+    def _raw_mel_db(self, audio: np.ndarray, target_frames: int) -> np.ndarray:
+        step = self._matching_cache_step(audio, target_frames)
+        cached = self._mel_cache_raw_db
+        if step is not None and cached is not None:
+            mel = self._raw_mel_db_incremental(audio, cached, target_frames, step)
+            self._store_mel_cache(audio, mel, target_frames)
+            self._preprocess_cache_hits += 1
+            return mel
+
+        mel = compute_mel_spectrogram(
+            audio,
+            self.model_sample_rate,
+            n_mels=self.n_mels,
+            n_fft=self.n_fft,
+            win_length=self.win_length,
+            hop_length=self.hop_length,
+        )[..., :target_frames]
+        self._store_mel_cache(audio, mel, target_frames)
+        self._preprocess_cache_misses += 1
+        self._preprocess_last_reused_frames = 0
+        return mel
+
+    def _raw_mel_db_incremental(
+        self,
+        audio: np.ndarray,
+        cached: np.ndarray,
+        target_frames: int,
+        step: int,
+    ) -> np.ndarray:
+        if step == 0:
+            self._preprocess_last_reused_frames = target_frames
+            return np.array(cached, dtype=np.float32, copy=True)
+
+        frame_shift = step // self.hop_length
+        pad = self.n_fft // 2
+        left_edge_frames = (pad + self.hop_length - 1) // self.hop_length
+        right_safe_last = (len(audio) - pad) // self.hop_length
+        reuse_start = min(left_edge_frames, target_frames)
+        reuse_stop = min(target_frames, right_safe_last - frame_shift + 1)
+
+        mel = np.empty((self.n_mels, target_frames), dtype=np.float32)
+        reused_frames = max(0, reuse_stop - reuse_start)
+
+        if reuse_start > 0:
+            mel[:, :reuse_start] = _compute_mel_spectrogram_frames(
+                audio=audio,
+                sample_rate=self.model_sample_rate,
+                n_mels=self.n_mels,
+                n_fft=self.n_fft,
+                win_length=self.win_length,
+                hop_length=self.hop_length,
+                f_min=0.0,
+                f_max=self.model_sample_rate / 2.0,
+                frame_start=0,
+                frame_count=reuse_start,
+            )
+        if reused_frames > 0:
+            mel[:, reuse_start:reuse_stop] = cached[
+                :, reuse_start + frame_shift : reuse_stop + frame_shift
+            ]
+        if reuse_stop < target_frames:
+            mel[:, reuse_stop:] = _compute_mel_spectrogram_frames(
+                audio=audio,
+                sample_rate=self.model_sample_rate,
+                n_mels=self.n_mels,
+                n_fft=self.n_fft,
+                win_length=self.win_length,
+                hop_length=self.hop_length,
+                f_min=0.0,
+                f_max=self.model_sample_rate / 2.0,
+                frame_start=reuse_stop,
+                frame_count=target_frames - reuse_stop,
+            )
+
+        self._preprocess_last_reused_frames = reused_frames
+        return mel
+
+    def _matching_cache_step(
+        self,
+        audio: np.ndarray,
+        target_frames: int,
+    ) -> int | None:
+        if (
+            not self.incremental_preprocess
+            or self._mel_cache_audio is None
+            or self._mel_cache_raw_db is None
+            or self._mel_cache_target_frames != target_frames
+            or self._mel_cache_audio.shape != audio.shape
+        ):
+            return None
+
+        expected_steps: list[int] = []
+        if self.incremental_step_samples is not None:
+            expected_steps.append(int(self.incremental_step_samples))
+        expected_steps.append(0)
+
+        for step in expected_steps:
+            if step < 0 or step >= len(audio):
+                continue
+            if step % self.hop_length != 0:
+                continue
+            frame_shift = step // self.hop_length
+            if frame_shift >= target_frames:
+                continue
+            if step == 0:
+                if np.array_equal(self._mel_cache_audio, audio):
+                    return 0
+                continue
+            if np.array_equal(self._mel_cache_audio[step:], audio[:-step]):
+                return step
+        return None
+
+    def _store_mel_cache(
+        self,
+        audio: np.ndarray,
+        mel: np.ndarray,
+        target_frames: int,
+    ) -> None:
+        self._mel_cache_audio = np.array(audio, dtype=np.float32, copy=True)
+        self._mel_cache_raw_db = np.array(mel, dtype=np.float32, copy=True)
+        self._mel_cache_target_frames = int(target_frames)
+
     def predict_logits(self, spec: np.ndarray) -> np.ndarray:
         """Run inference and return all raw logits as a flat float32 array."""
         if not self._loaded:
@@ -298,7 +479,10 @@ class TFLiteClassifier:
             expected_batch = int(input_shape[0])
             if expected_batch > 1 and spec.shape[0] == 1:
                 spec = np.repeat(spec, expected_batch, axis=0)
-        self._interpreter.set_tensor(self._input_details[0]["index"], spec)
+        self._interpreter.set_tensor(
+            self._input_details[0]["index"],
+            spec.astype(np.float32),
+        )
         self._interpreter.invoke()
         logits = self._interpreter.get_tensor(self._output_details[0]["index"])
         logits = np.asarray(logits, dtype=np.float32)

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
 def apply_hysteresis(
     scores: np.ndarray,
     threshold: float,
-    window: int = 5,
-    ratio: float = 0.5,
+    window: int = 8,
+    ratio: float = 0.6,
     margin: float = 0.05,
 ) -> np.ndarray:
     """Schmitt-trigger hysteresis with moving-average confirmation.
@@ -41,7 +43,7 @@ def apply_hysteresis(
     for i in range(n):
         start = max(0, i - window + 1)
         recent = scores[start : i + 1]
-        k = max(1, int(len(recent) * ratio))
+        k = max(1, math.ceil(len(recent) * ratio))
 
         if state:
             # Currently ON — stay ON unless >= k recent scores drop below LO

@@ -7,8 +7,10 @@ configurable augmentation pipeline.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from math import gcd
 from pathlib import Path
 from typing import Any
@@ -113,6 +115,280 @@ def _rms_normalize(audio: np.ndarray) -> np.ndarray:
     if not np.isfinite(rms) or rms <= 1e-8:
         return np.zeros_like(audio, dtype=np.float32)
     return _finite_audio(audio / rms)
+
+
+def _path_str(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    return str(Path(path))
+
+
+def waveform_config_payload(cfg: MixConfig) -> dict[str, Any]:
+    """Return the waveform-side HP payload for precompute compatibility.
+
+    This intentionally excludes model, mel/frontend, optimizer, and training-loop
+    HPs. Precomputed waveforms may be reused only when this payload matches.
+    """
+    aug_payload = asdict(cfg.aug) if cfg.aug is not None else None
+    return {
+        "noise_path": _path_str(cfg.noise_path),
+        "drone_path": _path_str(cfg.drone_path),
+        "hard_noise_path": _path_str(cfg.hard_noise_path),
+        "hard_noise_prob": cfg.hard_noise_prob,
+        "noise2_path": _path_str(cfg.noise2_path),
+        "noise2_prob": cfg.noise2_prob,
+        "noise2_multi_noise_prob": cfg.noise2_multi_noise_prob,
+        "noise2_count": cfg.noise2_count,
+        "noise2_max_attenuation_db": cfg.noise2_max_attenuation_db,
+        "snr_bins": [asdict(b) for b in cfg.snr_bins],
+        "target_length_samples": cfg.target_length_samples,
+        "positive_probability": cfg.positive_probability,
+        "highpass_hz": cfg.highpass_hz,
+        "sample_rate": cfg.sample_rate,
+        "aug": aug_payload,
+    }
+
+
+def waveform_config_hash(cfg: MixConfig) -> str:
+    payload = waveform_config_payload(cfg)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def validate_precomputed_manifest(path: str | Path, cfg: MixConfig, *, split: str) -> None:
+    manifest_path = Path(path) / "manifest.json"
+    if not manifest_path.exists():
+        raise SystemExit(f"Missing precomputed manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    expected_hash = waveform_config_hash(cfg)
+    got_hash = manifest.get("waveform_config_hash")
+    if got_hash != expected_hash:
+        expected_payload = waveform_config_payload(cfg)
+        got_payload = manifest.get("waveform_config", {})
+        raise SystemExit(
+            "Precomputed dataset waveform HP mismatch for "
+            f"{path} split={split}.\n"
+            f"expected_hash={expected_hash}\n"
+            f"manifest_hash={got_hash}\n"
+            f"expected_waveform_config={json.dumps(expected_payload, sort_keys=True)}\n"
+            f"manifest_waveform_config={json.dumps(got_payload, sort_keys=True)}"
+        )
+    got_split = manifest.get("split")
+    if got_split != split:
+        raise SystemExit(
+            f"Precomputed dataset split mismatch for {path}: "
+            f"expected {split!r}, manifest has {got_split!r}"
+        )
+
+
+def frontend_config_payload(mel_cfg: Any) -> dict[str, Any]:
+    """Return frontend HP payload for precomputed feature compatibility."""
+    payload = asdict(mel_cfg) if hasattr(mel_cfg, "__dataclass_fields__") else dict(mel_cfg)
+    # JSON has no tuples; normalize recursively through json.
+    return json.loads(json.dumps(payload, sort_keys=True, default=str))
+
+
+def frontend_config_hash(mel_cfg: Any) -> str:
+    payload = frontend_config_payload(mel_cfg)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def validate_precomputed_feature_manifest(
+    path: str | Path,
+    cfg: MixConfig,
+    mel_cfg: Any,
+    *,
+    split: str,
+) -> None:
+    manifest_path = Path(path) / "manifest.json"
+    if not manifest_path.exists():
+        raise SystemExit(f"Missing precomputed feature manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    expected_wave_hash = waveform_config_hash(cfg)
+    expected_frontend_hash = frontend_config_hash(mel_cfg)
+    got_wave_hash = manifest.get("waveform_config_hash")
+    got_frontend_hash = manifest.get("frontend_config_hash")
+    if got_wave_hash != expected_wave_hash or got_frontend_hash != expected_frontend_hash:
+        raise SystemExit(
+            "Precomputed feature dataset HP mismatch for "
+            f"{path} split={split}.\n"
+            f"expected_waveform_hash={expected_wave_hash}\n"
+            f"manifest_waveform_hash={got_wave_hash}\n"
+            f"expected_frontend_hash={expected_frontend_hash}\n"
+            f"manifest_frontend_hash={got_frontend_hash}\n"
+            f"expected_waveform_config={json.dumps(waveform_config_payload(cfg), sort_keys=True)}\n"
+            f"manifest_waveform_config={json.dumps(manifest.get('waveform_config', {}), sort_keys=True)}\n"
+            f"expected_frontend_config={json.dumps(frontend_config_payload(mel_cfg), sort_keys=True)}\n"
+            f"manifest_frontend_config={json.dumps(manifest.get('frontend_config', {}), sort_keys=True)}"
+        )
+    got_split = manifest.get("split")
+    if got_split != split:
+        raise SystemExit(
+            f"Precomputed feature split mismatch for {path}: "
+            f"expected {split!r}, manifest has {got_split!r}"
+        )
+
+
+class EpochSliceDataset(Dataset[tuple[torch.Tensor, ...]]):
+    """Expose one disjoint fixed-size slice of a larger dataset per epoch."""
+
+    def __init__(self, dataset: Dataset[tuple[torch.Tensor, ...]], *, samples_per_epoch: int) -> None:
+        if samples_per_epoch <= 0:
+            raise ValueError("samples_per_epoch must be positive")
+        self.dataset = dataset
+        self.samples_per_epoch = samples_per_epoch
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        start = self.epoch * self.samples_per_epoch
+        remaining = len(self.dataset) - start
+        return max(0, min(self.samples_per_epoch, remaining))
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+        n = len(self)
+        if idx < 0:
+            idx += n
+        if idx < 0 or idx >= n:
+            raise IndexError(idx)
+        return self.dataset[self.epoch * self.samples_per_epoch + idx]
+
+
+class PrecomputedFeatureDataset(Dataset[tuple[torch.Tensor, ...]]):
+    """Dataset backed by precomputed normalized frontend feature shards."""
+
+    def __init__(self, path: str | Path, *, return_bin: bool = False) -> None:
+        self.path = Path(path)
+        self.return_bin = return_bin
+        self.shards = sorted(self.path.glob("*.pt"))
+        if not self.shards:
+            raise SystemExit(f"No precomputed feature shards found in {self.path}")
+        first = torch.load(self.shards[0], map_location="cpu", weights_only=False)
+        first_n = int(first["spec"].shape[0])
+        if len(self.shards) == 1:
+            self._lengths = [first_n]
+        else:
+            last = torch.load(self.shards[-1], map_location="cpu", weights_only=False)
+            last_n = int(last["spec"].shape[0])
+            self._lengths = [first_n] * (len(self.shards) - 1) + [last_n]
+        self.length = sum(self._lengths)
+        self._cache_idx: int | None = None
+        self._cache: dict[str, torch.Tensor] | None = None
+
+    def __len__(self) -> int:
+        return self.length
+
+    def _locate(self, idx: int) -> tuple[int, int]:
+        if idx < 0:
+            idx += self.length
+        if idx < 0 or idx >= self.length:
+            raise IndexError(idx)
+        base = 0
+        for shard_idx, n in enumerate(self._lengths):
+            if idx < base + n:
+                return shard_idx, idx - base
+            base += n
+        raise IndexError(idx)
+
+    def _load_shard(self, shard_idx: int) -> dict[str, torch.Tensor]:
+        if self._cache_idx != shard_idx:
+            self._cache = torch.load(
+                self.shards[shard_idx], map_location="cpu", weights_only=False
+            )
+            self._cache_idx = shard_idx
+        assert self._cache is not None
+        return self._cache
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+        shard_idx, local_idx = self._locate(idx)
+        shard = self._load_shard(shard_idx)
+        spec = shard["spec"][local_idx].float()
+        label = shard["label"][local_idx].float()
+        bin_idx = shard["bin_idx"][local_idx].long()
+        if self.return_bin:
+            return spec, label, bin_idx
+        return spec, label
+
+
+class PrecomputedDetectionDataset(Dataset[tuple[torch.Tensor, ...]]):
+    """Dataset backed by precomputed waveform shards.
+
+    Shards are ``*.pt`` files containing tensor batches. This keeps the model
+    frontend in the training loop while removing expensive HF audio decode,
+    random mixing, and waveform augmentation from every dataloader item.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        return_bin: bool = False,
+        return_components: bool = False,
+    ) -> None:
+        self.path = Path(path)
+        self.return_bin = return_bin or return_components
+        self.return_components = return_components
+        self.shards = sorted(self.path.glob("*.pt"))
+        if not self.shards:
+            raise SystemExit(f"No precomputed waveform shards found in {self.path}")
+        first = torch.load(self.shards[0], map_location="cpu", weights_only=False)
+        first_n = int(first["mix"].shape[0])
+        if len(self.shards) == 1:
+            self._lengths = [first_n]
+        else:
+            last = torch.load(self.shards[-1], map_location="cpu", weights_only=False)
+            last_n = int(last["mix"].shape[0])
+            self._lengths = [first_n] * (len(self.shards) - 1) + [last_n]
+        self.length = sum(self._lengths)
+        self._cache_idx: int | None = None
+        self._cache: dict[str, torch.Tensor] | None = None
+
+    def __len__(self) -> int:
+        return self.length
+
+    def _locate(self, idx: int) -> tuple[int, int]:
+        if idx < 0:
+            idx += self.length
+        if idx < 0 or idx >= self.length:
+            raise IndexError(idx)
+        base = 0
+        for shard_idx, n in enumerate(self._lengths):
+            if idx < base + n:
+                return shard_idx, idx - base
+            base += n
+        raise IndexError(idx)
+
+    def _load_shard(self, shard_idx: int) -> dict[str, torch.Tensor]:
+        if self._cache_idx != shard_idx:
+            self._cache = torch.load(
+                self.shards[shard_idx], map_location="cpu", weights_only=False
+            )
+            self._cache_idx = shard_idx
+        assert self._cache is not None
+        return self._cache
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+        shard_idx, local_idx = self._locate(idx)
+        shard = self._load_shard(shard_idx)
+        mix = shard["mix"][local_idx].float()
+        label = shard["label"][local_idx].float()
+        bin_idx = shard["bin_idx"][local_idx].long()
+        drone = shard.get("drone")
+        noise = shard.get("noise")
+        snr_db = shard.get("snr_db")
+        return BatchItem(
+            mix=mix,
+            label=label,
+            bin_idx=bin_idx,
+            drone=drone[local_idx].float() if drone is not None else None,
+            noise=noise[local_idx].float() if noise is not None else None,
+            snr_db=snr_db[local_idx].float() if snr_db is not None else None,
+        ).to_tuple(
+            return_bin=self.return_bin, return_components=self.return_components
+        )
 
 
 class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
@@ -286,11 +562,6 @@ class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):
                     mix = lowpass(
                         mix, self.sample_rate, aug.lowpass_cutoff_range
                     )
-                except Exception:
-                    pass
-            if random.random() < aug.stretch_prob:
-                try:
-                    mix = time_stretch(mix, aug.time_stretch_rate)
                 except Exception:
                     pass
             if random.random() < aug.pitch_prob:

@@ -32,7 +32,9 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, Dataset
 
 from audi.checkpoint import load_model_from_checkpoint
-from audi.cli_utils import NUM_WORKERS
+from scripts.cli._dispatch import NUM_WORKERS, configure_torch_file_sharing
+
+configure_torch_file_sharing()
 
 SR = 16000
 CLIP_S = 2.56
@@ -114,6 +116,58 @@ def _rates_at_max_fnr(
     if best is None:
         return _binary_rates(scores, labels, 0.0)
     return best
+
+
+def _parse_hidden_dims(value: str | None) -> list[int]:
+    if value is None or value.strip() == "":
+        return []
+    dims: list[int] = []
+    for raw in value.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        dim = int(raw)
+        if dim <= 0:
+            raise argparse.ArgumentTypeError("hidden dimensions must be positive")
+        dims.append(dim)
+    return dims
+
+
+def _build_classifier_head(
+    input_dim: int,
+    hidden_dims: list[int],
+    dropout: float,
+) -> nn.Module:
+    if not hidden_dims:
+        return nn.Linear(input_dim, 2)
+
+    layers: list[nn.Module] = []
+    prev_dim = input_dim
+    for dim in hidden_dims:
+        layers.extend(
+            [
+                nn.Linear(prev_dim, dim),
+                nn.LayerNorm(dim),
+                nn.GELU(),
+            ]
+        )
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        prev_dim = dim
+    layers.append(nn.Linear(prev_dim, 2))
+    return nn.Sequential(*layers)
+
+
+def _classifier_input_dim(classifier: nn.Module) -> int:
+    """Infer the feature dimension consumed by a detector classifier head."""
+    if isinstance(classifier, nn.Linear):
+        return int(classifier.in_features)
+    for module in classifier.modules():
+        if isinstance(module, nn.Linear):
+            return int(module.in_features)
+    raise ValueError(
+        f"Could not infer classifier input dimension from {classifier!r}"
+    )
 
 
 def _fit_length(audio: np.ndarray, target: int, *, random_crop: bool = True) -> np.ndarray:
@@ -261,7 +315,6 @@ class BlueRedDetector(L.LightningModule):
         self,
         model_arch: str = "mn10_as",
         lr: float = 1e-4,
-        dropout: float = 0.2,
         n_mels: int = 128,
         n_fft: int = 1024,
         win_length: int | None = None,
@@ -271,6 +324,8 @@ class BlueRedDetector(L.LightningModule):
         mixup_alpha: float = 0.0,
         freeze_backbone_epochs: int = 2,
         detector_checkpoint: Path | None = None,
+        cls_head_hidden_dims: str = "",
+        cls_head_dropout: float = 0.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -298,8 +353,9 @@ class BlueRedDetector(L.LightningModule):
         # ── Backbone + heads ──
         self._build_model(
             model_arch,
-            dropout=dropout,
             detector_checkpoint=detector_checkpoint,
+            cls_head_hidden_dims=_parse_hidden_dims(cls_head_hidden_dims),
+            cls_head_dropout=cls_head_dropout,
         )
         self._val_red_scores: list[torch.Tensor] = []
         self._val_red_labels: list[torch.Tensor] = []
@@ -309,8 +365,9 @@ class BlueRedDetector(L.LightningModule):
     def _build_model(
         self,
         model_arch: str,
-        dropout: float,
         detector_checkpoint: Path | None,
+        cls_head_hidden_dims: list[int],
+        cls_head_dropout: float,
     ):
         if detector_checkpoint is not None:
             detector = load_model_from_checkpoint(detector_checkpoint, quiet=True)
@@ -322,7 +379,7 @@ class BlueRedDetector(L.LightningModule):
                     f"Warning: --model-arch={model_arch} but checkpoint is {source_arch}; "
                     "using checkpoint backbone."
                 )
-            feature_dim = self.detector.backbone.classifier[1].in_features
+            feature_dim = _classifier_input_dim(self.detector.backbone.classifier)
             self.backbone = self.detector.backbone
             self.pool = None
             self.flatten = None
@@ -330,19 +387,17 @@ class BlueRedDetector(L.LightningModule):
             self.detector = None
             feature_dim = self._build_audioset_model(model_arch)
 
-        # Shared embedding
-        self.shared_fc = nn.Sequential(
-            nn.Linear(feature_dim, 640),
-            nn.Hardswish(),
-            nn.Dropout(dropout),
-        )
-
         # Detection head: binary (drone vs no-drone). In detector-checkpoint
         # mode we use the detector's already-trained binary head.
-        self.det_head = None if detector_checkpoint is not None else nn.Linear(640, 1)
+        self.det_head = None if detector_checkpoint is not None else nn.Linear(feature_dim, 1)
 
-        # Classification head: 2-class (blue vs red)
-        self.cls_head = nn.Linear(640, 2)
+        # Classification head: 2-class (blue vs red). Defaults to linear, with
+        # optional hidden layers for frozen-detector color sweeps.
+        self.cls_head = _build_classifier_head(
+            feature_dim,
+            hidden_dims=cls_head_hidden_dims,
+            dropout=cls_head_dropout,
+        )
 
     def _build_audioset_model(self, model_arch: str) -> int:
         from models.mn.model import get_model
@@ -403,11 +458,10 @@ class BlueRedDetector(L.LightningModule):
         """Return (det_logits[B, 1], cls_logits[B, 2])."""
         spec = self._to_spec(wav)
         features, detector_logits = self._extract_features(spec)
-        emb = self.shared_fc(features)
-        cls_logits = self.cls_head(emb)
+        cls_logits = self.cls_head(features)
         if detector_logits is not None:
             return detector_logits.unsqueeze(-1), cls_logits
-        return self.det_head(emb), cls_logits
+        return self.det_head(features), cls_logits
 
     def training_step(self, batch, batch_idx):
         wav, det_label, cls_label = batch
@@ -562,7 +616,6 @@ def main() -> int:
     ap.add_argument("--detector-checkpoint", type=Path, default=None,
                     help="Trained detector checkpoint to use as frozen feature source")
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--dropout", type=float, default=0.2)
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--clip-seconds", type=float, default=CLIP_S)
@@ -580,6 +633,10 @@ def main() -> int:
     ap.add_argument("--det-loss-weight", type=float, default=1.0,
                     help="Set to 0 to train only the blue/red head")
     ap.add_argument("--freeze-backbone-epochs", type=int, default=2)
+    ap.add_argument("--cls-head-hidden-dims", default="",
+                    help="Comma-separated hidden dims for an MLP blue/red head")
+    ap.add_argument("--cls-head-dropout", type=float, default=0.0,
+                    help="Dropout applied between MLP blue/red head layers")
     ap.add_argument("--dataset-length", type=int, default=2000,
                     help="Virtual dataset size per epoch")
     ap.add_argument("--val-length", type=int, default=None,
@@ -647,11 +704,12 @@ def main() -> int:
     model = BlueRedDetector(
         model_arch=args.model_arch,
         lr=args.lr,
-        dropout=args.dropout,
         cls_loss_weight=args.cls_loss_weight,
         det_loss_weight=args.det_loss_weight,
         freeze_backbone_epochs=args.freeze_backbone_epochs,
         detector_checkpoint=args.detector_checkpoint,
+        cls_head_hidden_dims=args.cls_head_hidden_dims,
+        cls_head_dropout=args.cls_head_dropout,
     )
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6

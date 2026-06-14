@@ -1,8 +1,7 @@
 """Checkpoint loading utilities for AUDI models.
 
-Centralises the checkpoint-bridging logic (old flat-param vs new config-object
-hparams) and _orig_mod prefix stripping that was duplicated across evaluate.py,
-qat_train.py, export_tflite.py, eval_ensemble.py, and eval_app/model_utils.py.
+Centralises checkpoint-bridging logic (old flat-param vs new config-object
+hparams) and ``_orig_mod`` prefix stripping for train/eval/export callers.
 """
 
 from __future__ import annotations
@@ -29,17 +28,25 @@ def _resolve_model_config(hp: dict) -> ModelConfig:
     model_hp = hp.get("model", {})
     if isinstance(model_hp, dict):
         return ModelConfig(
-            arch=model_hp.get("arch", hp.get("model_arch", "cnn14")),
+            arch=model_hp.get("arch", hp.get("model_arch", "mn10_as")),
+            num_classes=model_hp.get("num_classes", 1),
             pretrained=model_hp.get(
                 "pretrained", hp.get("pretrained_backbone", True)
             ),
             compile=False,
+            detector_head_hidden_dims=tuple(
+                model_hp.get("detector_head_hidden_dims", ())
+            ),
+            detector_head_dropout=float(model_hp.get("detector_head_dropout", 0.0)),
         )
     # Config object stored in checkpoint
     return ModelConfig(
         arch=model_hp.arch,
+        num_classes=model_hp.num_classes,
         pretrained=model_hp.pretrained,
         compile=False,
+        detector_head_hidden_dims=getattr(model_hp, "detector_head_hidden_dims", ()),
+        detector_head_dropout=getattr(model_hp, "detector_head_dropout", 0.0),
     )
 
 
@@ -59,9 +66,6 @@ def _resolve_mel_config(hp: dict) -> MelConfig:
             stft_bands_hz=mel_hp.get(
                 "stft_bands_hz", hp.get("stft_bands_hz")
             ),
-            cqt_bins=mel_hp.get("cqt_bins", hp.get("cqt_bins", 84)),
-            cqt_bpo=mel_hp.get("cqt_bpo", hp.get("cqt_bpo", 12)),
-            cwt_scales=mel_hp.get("cwt_scales", hp.get("cwt_scales", 64)),
             use_pcen=mel_hp.get("use_pcen", hp.get("use_pcen", False)),
         )
     # Config object stored in checkpoint
@@ -77,9 +81,6 @@ def _resolve_mel_config(hp: dict) -> MelConfig:
         stft_bands_hz=getattr(
             mel_hp, "stft_bands_hz", hp.get("stft_bands_hz")
         ),
-        cqt_bins=getattr(mel_hp, "cqt_bins", hp.get("cqt_bins", 84)),
-        cqt_bpo=getattr(mel_hp, "cqt_bpo", hp.get("cqt_bpo", 12)),
-        cwt_scales=getattr(mel_hp, "cwt_scales", hp.get("cwt_scales", 64)),
         use_pcen=getattr(mel_hp, "use_pcen", hp.get("use_pcen", False)),
     )
 
@@ -109,6 +110,41 @@ def get_clip_seconds(hp: dict) -> float:
     return 2.56  # legacy default
 
 
+def model_from_checkpoint_data(
+    ckpt: dict,
+    device: str = "cpu",
+    *,
+    bin_names: list[str] | None = None,
+) -> DroneDetector:
+    """Build and load a DroneDetector from an already-read checkpoint dict."""
+    hp = ckpt["hyper_parameters"]
+
+    model_cfg = _resolve_model_config(hp)
+    mel_cfg = _resolve_mel_config(hp)
+    opt_cfg = _resolve_optimizer_config(hp)
+
+    if bin_names is None:
+        bin_names = hp.get("bin_names", [])
+
+    model = DroneDetector(
+        model=model_cfg,
+        mel=mel_cfg,
+        optimizer=opt_cfg,
+        bin_names=list(bin_names),
+        loss_type=hp.get("loss_type", "bce"),
+        label_smoothing=hp.get("label_smoothing", 0.0),
+        per_bin_weights=hp.get("per_bin_weights", False),
+        spec_augment_prob=float(hp.get("spec_augment_prob", 0.0)),
+        mixup_alpha=hp.get("mixup_alpha", 0.0),
+        cutmix_alpha=hp.get("cutmix_alpha", 0.0),
+        dropout=hp.get("dropout", 0.0),
+        bn_momentum=hp.get("bn_momentum", 0.1),
+        clip_seconds=get_clip_seconds(hp),
+    )
+    model.load_state_dict(strip_compile_prefix(ckpt["state_dict"]), strict=False)
+    return model.to(device).eval()
+
+
 def load_model_from_checkpoint(
     ckpt_path: str | Path,
     device: str = "cpu",
@@ -133,32 +169,7 @@ def load_model_from_checkpoint(
     """
     ckpt_path = Path(ckpt_path)
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-    hp = ckpt["hyper_parameters"]
-
-    model_cfg = _resolve_model_config(hp)
-    mel_cfg = _resolve_mel_config(hp)
-    opt_cfg = _resolve_optimizer_config(hp)
-
-    if bin_names is None:
-        bin_names = hp.get("bin_names", [])
-
     if not quiet:
+        model_cfg = _resolve_model_config(ckpt["hyper_parameters"])
         print(f"Loading {model_cfg.arch} from {ckpt_path.name}")
-
-    model = DroneDetector(
-        model=model_cfg,
-        mel=mel_cfg,
-        optimizer=opt_cfg,
-        bin_names=list(bin_names),
-        loss_type=hp.get("loss_type", "bce"),
-        label_smoothing=hp.get("label_smoothing", 0.0),
-        per_bin_weights=hp.get("per_bin_weights", False),
-        spec_augment_prob=float(hp.get("spec_augment_prob", 0.0)),
-        mixup_alpha=hp.get("mixup_alpha", 0.0),
-        cutmix_alpha=hp.get("cutmix_alpha", 0.0),
-        dropout=hp.get("dropout", 0.0),
-        bn_momentum=hp.get("bn_momentum", 0.1),
-        clip_seconds=get_clip_seconds(hp),
-    )
-    model.load_state_dict(strip_compile_prefix(ckpt["state_dict"]), strict=False)
-    return model.to(device).eval()
+    return model_from_checkpoint_data(ckpt, device=device, bin_names=bin_names)

@@ -2,16 +2,16 @@
 """Sweep runner — pass a YAML config path to run a sweep.
 
 Usage:
-    uv run python sweeps/sweep.py configs/field_hard_negative_current.yaml
-    uv run python sweeps/sweep.py configs/blue_red_classify.yaml
+    uv run python sweeps/sweep.py configs/mn10_06_new_tricks_finetune.yaml
+    uv run python sweeps/sweep.py configs/blue_red_mn10_mined_hardneg_classifier.yaml
 
 YAML format:
     name: str
+    command: str               # optional, defaults to detector training
     base_flags: str            # flags applied to every config
     configs:
       - name: str
         flags: str             # per-config flags, combined with base_flags
-    pretrained_checkpoint: str  # optional, finetune sweeps only
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 PROJECT = Path(__file__).resolve().parents[1]
-TRAIN_SCRIPT_CMD = "uv run audi-train detect"
+TRAIN_SCRIPT_CMD = "uv run audi-train"
 BASE_FLAGS = ""
 
 
@@ -47,7 +47,8 @@ def load_sweep_config(yaml_path: str | Path) -> dict[str, Any]:
         "noise_path": data.get("noise_path", ""),
         "drone_path": data.get("drone_path", ""),
         "description": data.get("description", ""),
-        "mode": data.get("mode", "detect"),
+        "command": data.get("command", ""),
+        "postprocess": data.get("postprocess", True),
     }
 
 
@@ -76,6 +77,7 @@ def _save_run_config(
     sweep_name: str = "",
     noise_path: str = "",
     drone_path: str = "",
+    command: str = "",
 ) -> None:
     """Save the run's config as YAML inside its checkpoint folder."""
     import yaml
@@ -90,6 +92,7 @@ def _save_run_config(
         "flags": flags,
         "noise_path": noise_path,
         "drone_path": drone_path,
+        "command": command,
         "timestamp": datetime.now().isoformat(),
     }
     # Strip empty values for cleaner output
@@ -104,7 +107,7 @@ def run_config(
     name: str, flags: str, sweep_dir: Path,
     noise_path: str = "", drone_path: str = "",
     sweep_name: str = "",
-    mode: str = "detect",
+    command: str = "",
 ) -> Path | None:
     """Run one training config. Returns run_dir on success, None on failure."""
     run_dir = sweep_dir / name
@@ -122,6 +125,7 @@ def run_config(
                     run_dir, name, flags,
                     sweep_name=sweep_name,
                     noise_path=noise_path, drone_path=drone_path,
+                    command=command,
                 )
             return run_dir
 
@@ -132,9 +136,9 @@ def run_config(
         shutil.rmtree(run_dir)
 
     # Build command with noise/drone paths
-    script_cmd = f"uv run audi-train {mode}"
+    script_cmd = command or TRAIN_SCRIPT_CMD
     path_args = ""
-    if noise_path and mode == "detect":
+    if noise_path:
         path_args += f" --noise-path {noise_path}"
     if drone_path:
         path_args += f" --drone-path {drone_path}"
@@ -166,6 +170,7 @@ def run_config(
         run_dir, name, flags,
         sweep_name=sweep_name,
         noise_path=noise_path, drone_path=drone_path,
+        command=command,
     )
     return run_dir
 
@@ -190,6 +195,12 @@ def extract_metrics(run_dir: Path) -> dict[str, float]:
             "val/auc",
             "val/ece",
             "val/average_precision",
+            "val_cls_acc",
+            "val_red_auc",
+            "val_red_fnr",
+            "val_red_fpr",
+            "val_red_tpr_at_fnr_10",
+            "val_red_fpr_at_fnr_10",
         ]:
             if tag in scalar_tags:
                 events = ea.Scalars(tag)
@@ -262,7 +273,7 @@ def sweep_main(
     do_postprocess: bool = True,
     noise_path: str = "",
     drone_path: str = "",
-    mode: str = "detect",
+    command: str = "",
 ) -> int:
     if sweep_dir is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -278,7 +289,7 @@ def sweep_main(
                 cfg["name"], cfg["flags"], sweep_dir,
                 noise_path=noise_path, drone_path=drone_path,
                 sweep_name=sweep_name,
-                mode=mode,
+                command=command,
             )
             if run_dir is None:
                 results.append({"name": cfg["name"], "status": "failed"})
@@ -346,7 +357,8 @@ if __name__ == "__main__":
     # CLI overrides YAML
     noise_path = noise_path or cfg.get("noise_path", "")
     drone_path = drone_path or cfg.get("drone_path", "")
-    mode = cfg.get("mode", "detect")
+    command = cfg.get("command", "")
+    do_postprocess = bool(cfg.get("postprocess", True))
 
     raise SystemExit(
         sweep_main(
@@ -354,6 +366,7 @@ if __name__ == "__main__":
             cfg["name"],
             noise_path=noise_path,
             drone_path=drone_path,
-            mode=mode,
+            command=command,
+            do_postprocess=do_postprocess,
         )
     )

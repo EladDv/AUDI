@@ -34,7 +34,6 @@ class _FakeBlueRed(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.detector = _FakeDetector()
-        self.shared_fc = torch.nn.Identity()
         self.cls_head = torch.nn.Linear(1, 2)
 
 

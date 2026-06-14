@@ -15,22 +15,30 @@ class ModelConfig:
     """Architecture and backbone configuration.
 
     Attributes:
-        arch: Model architecture name (e.g. "cnn14", "resnet18").
+        arch: EfficientAT model architecture name (e.g. "mn10_as", "dymn10_as").
         num_classes: Number of output logits (1 for binary).
-        pretrained: Whether to load ImageNet/AudioSet backbone weights.
+        pretrained: Whether to load AudioSet backbone weights.
         compile: Whether to apply torch.compile to the model.
+        detector_head_hidden_dims: Optional hidden dims for EfficientAT detector heads.
+        detector_head_dropout: Dropout between detector head hidden layers.
     """
 
-    arch: str = "cnn14"
+    arch: str = "mn10_as"
     num_classes: int = 1
     pretrained: bool = True
     compile: bool = True
+    detector_head_hidden_dims: tuple[int, ...] = ()
+    detector_head_dropout: float = 0.0
 
     def __post_init__(self) -> None:
         if self.num_classes < 1:
             raise ValueError(
                 f"num_classes must be >= 1, got {self.num_classes}"
             )
+        if any(dim <= 0 for dim in self.detector_head_hidden_dims):
+            raise ValueError("detector_head_hidden_dims must be positive")
+        if self.detector_head_dropout < 0:
+            raise ValueError("detector_head_dropout must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -61,13 +69,10 @@ class MelConfig:
     pcen_delta: float = 2.0
     pcen_r: float = 0.5
     pcen_eps: float = 1e-6
-    # Multi-frontend: "mel" (default), "stft", "stft_bands", "cqt", "cwt",
-    # or comma-separated combinations.
+    # Multi-frontend: "mel" (default), "stft", "stft_bands", or
+    # comma-separated combinations.
     frontend_type: str = "mel"
     stft_bands_hz: tuple[tuple[float, float], ...] | None = None
-    cqt_bins: int = 84
-    cqt_bpo: int = 12
-    cwt_scales: int = 64
 
     def __post_init__(self) -> None:
         win_length = self.n_fft if self.win_length is None else self.win_length
@@ -87,17 +92,6 @@ class MelConfig:
             raise ValueError(f"hop_length must be > 0, got {self.hop_length}")
         object.__setattr__(self, "win_length", win_length)
 
-    @classmethod
-    def vit_224(cls) -> MelConfig:
-        """ViT-compatible config producing 224 mel bins (row dimension).
-
-        Pair with target_length_samples=36704 (2.294 s) to get exactly
-        224 time frames at default hop_length=160 — yields [B, 3, 224, 224].
-        Both dimensions are divisible by 7 (required by FasterViT).
-        """
-        return cls(n_mels=224)
-
-
 @dataclass(frozen=True)
 class AugmentationConfig:
     """Audio augmentation pipeline configuration.
@@ -113,8 +107,6 @@ class AugmentationConfig:
         time_stretch_range: (min, max) speed factor for drone.
         reverb_prob: Probability of applying reverb to mix.
         reverb_decay: (min, max) RT60 in seconds.
-        background_swap_prob: Probability of mixing in secondary background.
-        background_swap_db: dB level of secondary background relative to primary.
         eq_prob: Probability of random 2-band parametric EQ.
         eq_gain_db: ±dB per EQ band.
         noise_inject_prob: Probability of Gaussian noise injection.
@@ -134,8 +126,6 @@ class AugmentationConfig:
     time_stretch_range: tuple[float, float] = (0.9, 1.1)
     reverb_prob: float = 0.25
     reverb_decay: tuple[float, float] = (0.1, 0.5)
-    background_swap_prob: float = 0.25
-    background_swap_db: float = -10.0
     eq_prob: float = 0.25
     eq_gain_db: float = 6.0
     noise_inject_prob: float = 0.25
@@ -248,46 +238,6 @@ class OptimizerConfig:
     schedule: Literal["constant", "cosine", "linear"] = "constant"
     warmup_epochs: int = 0
     max_epochs: int = 30
-
-
-@dataclass(frozen=True)
-class TrainConfig:
-    """Complete training run configuration.
-
-    Aggregates all sub-configs into one immutable object.
-    """
-
-    model: ModelConfig = field(default_factory=ModelConfig)
-    mel: MelConfig = field(default_factory=MelConfig)
-    mix: MixConfig | None = None  # Set at runtime, no default paths
-    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
-
-    batch_size: int = 32
-    steps_per_epoch: int = 100
-    val_steps_per_epoch: int = 40
-    num_workers: int = 4
-    accumulate_grad_batches: int = 1
-    seed: int = 42
-    patience: int = 5
-    save_top_k: int = 3
-    output_dir: Path = Path("checkpoints")
-
-    # Regularization
-    dropout: float = 0.0
-    bn_momentum: float = 0.1
-    mixup_alpha: float = 0.0
-    cutmix_alpha: float = 0.0
-    spec_augment_prob: bool = 0.0
-    per_bin_weights: bool = False
-    label_smoothing: float = 0.0
-
-    # Loss
-    loss_type: Literal["bce", "focal"] = "bce"
-
-    # Finetuning
-    finetune_from: Path | None = None
-    pretrained_checkpoint: Path | None = None
-
 
 def parse_snr_bins(specs: list[str]) -> list[SNRBin]:
     """Parse SNR bin specifications from CLI strings.

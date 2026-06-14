@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Pi Audio Guard — Main Entrypoint
+AUDI Type A — Main Entrypoint
 
 Orchestrates all subsystems:
   1. Loads configuration
   2. Starts audio recorder (continuous capture, ring buffer)
   3. Starts storage manager (FLAC compression, 32GB ring buffer eviction)
   4. Starts detection engine (TFLite, temporal hysteresis)
-  5. Starts GPIO alarm controller
+  5. Starts GPIO alert controller
   6. Starts web UI
   7. Graceful shutdown on SIGTERM/SIGINT
 """
@@ -43,7 +43,7 @@ def _load_threshold_profiles(cfg: dict, config_file: Path) -> dict:
     if not profiles_path.is_absolute():
         profiles_path = config_file.parent / profiles_path
     if not profiles_path.exists():
-        logging.getLogger("audio_guard").warning(
+        logging.getLogger("audi").warning(
             "Threshold profiles file not found: %s", profiles_path
         )
         return cfg
@@ -52,14 +52,14 @@ def _load_threshold_profiles(cfg: dict, config_file: Path) -> dict:
         profiles_cfg = yaml.safe_load(f) or {}
     profiles = profiles_cfg.get("threshold_profiles", profiles_cfg)
     if not isinstance(profiles, dict):
-        logging.getLogger("audio_guard").warning(
+        logging.getLogger("audi").warning(
             "Threshold profiles file has no usable profiles: %s",
             profiles_path,
         )
         return cfg
 
     det_cfg["threshold_profiles"] = profiles
-    logging.getLogger("audio_guard").info(
+    logging.getLogger("audi").info(
         "Threshold profiles loaded from %s", profiles_path
     )
     return cfg
@@ -75,7 +75,7 @@ def load_config(config_path: str = None) -> dict:
     paths.extend(
         [
             HERE.parent / "config.yaml",
-            Path("/etc/audio-guard/config.yaml"),
+            Path("/etc/audi/config.yaml"),
             Path("config.yaml"),
         ]
     )
@@ -84,18 +84,18 @@ def load_config(config_path: str = None) -> dict:
         if p.exists():
             with open(p) as f:
                 cfg = yaml.safe_load(f) or {}
-            logging.getLogger("audio_guard").info("Config loaded from %s", p)
+            logging.getLogger("audi").info("Config loaded from %s", p)
             return _load_threshold_profiles(cfg, p)
 
     # Defaults
-    logging.getLogger("audio_guard").warning(
+    logging.getLogger("audi").warning(
         "No config file found — using defaults. Create config.yaml at %s",
         HERE.parent / "config.yaml",
     )
     return {
         "audio": {
-            "device": "default",
-            "sample_rate": 48000,
+            "device": "auto",
+            "sample_rate": 16000,
             "channels": 1,
             "bit_depth": 16,
             "segment_duration": 300,
@@ -113,43 +113,48 @@ def load_config(config_path: str = None) -> dict:
             "max_alerts_gb": 2,
         },
         "detection": {
-            "model_path": "/app/models/model.tflite",
+            "model_path": "/app/models/model_combined_mn10_mined_hardneg_blue_red.tflite",
             "model_type": "tflite",
             "model_sample_rate": 16000,
             "n_mels": 128,
             "n_fft": 1024,
             "win_length": 1024,
             "hop_length": 160,
-            "window_samples": 40960,
-            "stride": 0.125,
+            "window_samples": 81920,
+            "stride": 0.0625,
             "num_threads": 2,
-            "active_threshold_profile": None,
-            "threshold_profiles_file": "/etc/audio-guard/threshold_profiles.yaml",
-            "confidence_threshold_high": 0.70,
-            "confidence_threshold_low": 0.40,
+            "active_threshold_profile": "mn10_p90",
+            "threshold_profiles_file": "/app/threshold_profiles.yaml",
+            "confidence_threshold_high": 0.6550,
+            "confidence_threshold_low": 0.6550,
             "blue_red_threshold": 0.50,
-            "blue_red_min_detection_score": 0.70,
-            "red_alert_threshold": 0.50,
+            "blue_red_min_detection_score": 0.6550,
+            "red_alert_threshold": 0.37,
             "blue_alert_threshold": 0.50,
-            "blue_to_red_threshold": 0.45,
-            "red_to_blue_threshold": 0.35,
-            "color_hysteresis_window": 5,
+            "blue_to_red_threshold": 0.37,
+            "red_to_blue_threshold": 0.56,
+            "color_hysteresis_window": 8,
             "color_hysteresis_ratio": 0.6,
             "alert_on_red": True,
             "alert_on_blue": False,
             "alert_on_unknown": False,
             "save_color_trace": True,
-            "inference_interval": 5,
+            "inference_interval": 0.320,
+            "hysteresis_window": 8,
+            "hysteresis_ratio": 0.6,
+            "hysteresis_margin": 0.05,
+            "alarm_cooldown_s": 120,
             "labels": ["drone"],
+            "alert_history_file": "/data/alerts/alert_history.json",
         },
         "gpio": {
             "enabled": True,
-            "alert_pin": 17,
-            "strobe_pin": 27,
-            "reset_pin": 22,
-            "record_led_pin": 23,
-            "record_button_pin": 24,
-            "pause_button_pin": 25,
+            "alert_pin": 22,
+            "strobe_pin": 24,
+            "reset_pin": 23,
+            "record_led_pin": 27,
+            "record_button_pin": 17,
+            "pause_button_pin": 18,
             "alert_duration_ms": 5000,
             "pulse_interval_ms": 500,
             "red_buzzer_on_ms": 120,
@@ -162,7 +167,7 @@ def load_config(config_path: str = None) -> dict:
         "web": {"host": "0.0.0.0", "port": 8080},
         "logging": {
             "level": "INFO",
-            "file": "/var/log/audio-guard.log",
+            "file": "/var/log/audi.log",
             "max_size_mb": 10,
             "backup_count": 3,
         },
@@ -178,8 +183,8 @@ def setup_logging(cfg: dict):
     log_cfg = cfg.get("logging", {})
     level = getattr(logging, log_cfg.get("level", "INFO").upper(), logging.INFO)
 
-    # Root audio_guard logger
-    logger = logging.getLogger("audio_guard")
+    # Root audi logger
+    logger = logging.getLogger("audi")
     logger.setLevel(level)
 
     formatter = logging.Formatter(
@@ -194,7 +199,7 @@ def setup_logging(cfg: dict):
     logger.addHandler(stdout)
 
     # File handler (if path writable)
-    log_file = log_cfg.get("file", "/var/log/audio-guard.log")
+    log_file = log_cfg.get("file", "/var/log/audi.log")
     try:
         fh = logging.handlers.RotatingFileHandler(
             log_file,
@@ -220,7 +225,7 @@ class AudioGuardApp:
 
     def __init__(self, config: dict):
         self.config = config
-        self.logger = logging.getLogger("audio_guard.main")
+        self.logger = logging.getLogger("audi.main")
         self._shutdown_requested = False
 
         # Subsystems (initialized in start())
@@ -233,7 +238,7 @@ class AudioGuardApp:
     def start(self):
         """Initialize and start all subsystems."""
         self.logger.info("=" * 60)
-        self.logger.info("Pi Audio Guard starting...")
+        self.logger.info("AUDI Type A starting...")
         self.logger.info("=" * 60)
 
         # 1. GPIO (first, so it's ready for alarms + buttons)
@@ -453,7 +458,7 @@ def main():
 
     # Setup logging
     setup_logging(config)
-    logger = logging.getLogger("audio_guard")
+    logger = logging.getLogger("audi")
 
     # Check mode
     if args.check:

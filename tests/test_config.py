@@ -28,7 +28,7 @@ class TestSNRBin:
 class TestModelConfig:
     def test_defaults(self):
         cfg = ModelConfig()
-        assert cfg.arch == "cnn14"
+        assert cfg.arch == "mn10_as"
         assert cfg.num_classes == 1
         assert cfg.pretrained is True
 

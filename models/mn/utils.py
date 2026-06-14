@@ -1,7 +1,7 @@
 import math
 from typing import Optional, Callable
+
 import torch
-import torch.nn as nn
 from torch import Tensor
 
 
@@ -44,16 +44,3 @@ def collapse_dim(x: Tensor, dim: int, mode: str = "pool", pool_fn:  Callable[[Te
         s[combine_dim] *= dim
         s[dim] //= dim
         return x.view(s)
-
-
-class CollapseDim(nn.Module):
-    def __init__(self, dim: int, mode: str = "pool", pool_fn:  Callable[[Tensor, int], Tensor] = torch.mean,
-                 combine_dim: int = None):
-        super(CollapseDim, self).__init__()
-        self.dim = dim
-        self.mode = mode
-        self.pool_fn = pool_fn
-        self.combine_dim = combine_dim
-
-    def forward(self, x):
-        return collapse_dim(x, dim=self.dim, mode=self.mode, pool_fn=self.pool_fn, combine_dim=self.combine_dim)

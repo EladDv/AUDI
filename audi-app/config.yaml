@@ -4,8 +4,8 @@
 
 # --- Audio Recording ---
 audio:
-  device: "auto"                    # ALSA device name — 'auto' discovers first USB device, or use 'hw:2,0'
-  sample_rate: 16000             # Hz — 16KHz recommended for detection quality
+  device: "auto"                 # ALSA device name: 'auto' discovers a USB mic, or use 'hw:2,0'
+  sample_rate: 16000             # Hz — 16 kHz matches the deployed detector
   bit_depth: 16                  # 16-bit PCM
   channels: 1                    # Mono — sufficient for detection
   segment_duration: 300          # Seconds (5 minutes) per recording segment
@@ -27,7 +27,7 @@ storage:
 # --- Detection Engine (TFLite float32) ---
 detection:
   model_type: "tflite"
-  model_path: "./models/model_combined_dymn10_blue_red.tflite"
+  model_path: "./models/model_combined_mn10_mined_hardneg_blue_red.tflite"
 
   # Model config (must match the exported TFLite model)
   model_sample_rate: 16000       # Hz — model expects 16kHz audio
@@ -53,21 +53,21 @@ detection:
 
   # Threshold profiles. Values are loaded from threshold_profiles_file so field
   # tuning can happen without code changes.
-  active_threshold_profile: "balanced"
+  active_threshold_profile: "mn10_p90"
   threshold_profiles_file: "./threshold_profiles.yaml"
 
   # Combined model output:
   #   logit 0: drone detector
   #   logit 1: blue drone
   #   logit 2: red drone (positive class for color)
-  confidence_threshold_high: 0.6703   # Triggers alarm
-  confidence_threshold_low: 0.6703    # Minimum raw drone score for color typing
+  confidence_threshold_high: 0.6550   # YES detector state threshold
+  confidence_threshold_low: 0.6550    # Minimum raw drone score for color typing
   blue_red_threshold: 0.50            # Raw RED/BLUE split before hysteresis
-  blue_red_min_detection_score: 0.6703 # Only type windows that look like drones
-  red_alert_threshold: 0.37           # RED alert if red confidence is above this
-  blue_alert_threshold: 0.50          # BLUE alert if blue confidence is above this
-  blue_to_red_threshold: 0.37         # Lower threshold to enter RED state
-  red_to_blue_threshold: 0.56         # Harder threshold to leave RED state
+  blue_red_min_detection_score: 0.6550 # Only type windows that look like drones
+  red_alert_threshold: 0.37           # RED alert if enabled and confidence is above this
+  blue_alert_threshold: 0.50          # BLUE alert if enabled and confidence is above this
+  blue_to_red_threshold: 0.37         # Threshold for BLUE -> RED state
+  red_to_blue_threshold: 0.56         # Threshold for RED -> BLUE state
   color_hysteresis_window: 8
   color_hysteresis_ratio: 0.6
   alert_on_red: true
@@ -77,12 +77,12 @@ detection:
   hysteresis_window: 8               # Hysteresis window size
   hysteresis_ratio: 0.6              # Hysteresis ratio
   hysteresis_margin: 0.05            # Hysteresis margin
-  alarm_cooldown_s: 120               # Exclusion period after alarm (0 = no cooldown)
+  alarm_cooldown_s: 120              # Exclusion period after alarm (0 = no cooldown)
 
   labels: ["drone"]                  # Detection class label
   alert_history_file: "./data/alerts/alert_history.json"
 
-# --- GPIO Alarm System ---
+# --- GPIO Alert System ---
 gpio:
   enabled: true
   alert_pin: 22                  # Alert output — e.g. buzzer/relay
@@ -108,6 +108,6 @@ web:
 # --- Logging ---
 logging:
   level: "DEBUG"                  # DEBUG, INFO, WARNING, ERROR
-  file: "./audio-guard.log"
+  file: "./audi.log"
   max_size_mb: 500
   backup_count: 3

@@ -15,7 +15,7 @@ def leaderboard_page() -> None:
 
     csv_path = _CHECKPOINTS_DIR / "attack_run_precision_eval.csv"
     if not csv_path.exists():
-        st.warning("No eval data. Run `uv run python scripts/evaluate.py attack-runs` first.")
+        st.warning("No eval data. Run `uv run audi-eval attack-runs` first.")
         return
 
     with open(csv_path) as f:
