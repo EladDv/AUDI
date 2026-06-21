@@ -96,7 +96,7 @@ def load_config(config_path: str = None) -> dict:
         "audio": {
             "device": "auto",
             "sample_rate": 16000,
-            "channels": 1,
+            "channels": 4,
             "bit_depth": 16,
             "segment_duration": 300,
             "ring_buffer_seconds": 120,

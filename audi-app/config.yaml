@@ -7,7 +7,7 @@ audio:
   device: "auto"                 # ALSA device name: 'auto' discovers a USB mic, or use 'hw:2,0'
   sample_rate: 16000             # Hz — 16 kHz matches the deployed detector
   bit_depth: 16                  # 16-bit PCM
-  channels: 1                    # Mono — sufficient for detection
+  channels: 4                    # Capture device channels; detector/classifier run per app config
   segment_duration: 300          # Seconds (5 minutes) per recording segment
   ring_buffer_seconds: 120       # In-memory buffer: 60s pre-alarm + 60s post-alarm
   format: "wav"                  # Raw capture format (wav before compression)
