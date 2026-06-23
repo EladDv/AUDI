@@ -427,10 +427,8 @@ class TestAudiApp:
                     "hysteresis_window": 1,
                     "hysteresis_ratio": 1.0,
                     "hysteresis_margin": 0.0,
-                    "color_hysteresis_window": 1,
-                    "color_hysteresis_ratio": 1.0,
-                    "blue_red_min_detection_score": 0.0,
-                    "red_alert_threshold": 0.5,
+                    "red_color_threshold": 0.5,
+                    "blue_color_threshold": 0.5,
                     "alarm_cooldown_s": 0,
                 },
                 "audio": {"sample_rate": 4, "channels": 4},
@@ -472,18 +470,38 @@ class TestAudiApp:
         assert engine.latest_mels["channels"][2]["mel"][0, 0] == 2.0
         assert alarms and alarms[0]["firing_channel_index"] == 2
 
-    def test_color_hysteresis_sticks_red_until_lower_exit_threshold(self):
+    def test_color_typing_returns_red_blue_or_unknown(self, tmp_path):
         detector = _import_from_audi_app("detector")
-        hyst = detector.ColorHysteresisState(
-            enter_red_threshold=0.45,
-            exit_red_threshold=0.35,
-            window=1,
-            ratio=1.0,
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "red_color_threshold": 0.60,
+                    "blue_color_threshold": 0.60,
+                },
+                "audio": {"sample_rate": 16000},
+                "storage": {"alerts_dir": str(tmp_path)},
+            },
+            ring_buffer=None,
         )
 
-        assert hyst.add(0.46) == "RED"
-        assert hyst.add(0.40) == "RED"
-        assert hyst.add(0.34) == "BLUE"
+        assert (
+            engine._classify_blue_red(True, np.array([0.0, 1.0]))["drone_color"]
+            == "RED"
+        )
+        assert (
+            engine._classify_blue_red(True, np.array([1.0, 0.0]))["drone_color"]
+            == "BLUE"
+        )
+        assert (
+            engine._classify_blue_red(True, np.array([0.0, 0.0]))["drone_color"]
+            == "UNKNOWN"
+        )
+        assert (
+            engine._classify_blue_red(False, np.array([0.0, 1.0]))["drone_color"]
+            == "UNKNOWN"
+        )
 
     def test_detection_hysteresis_ratio_uses_ceiling(self):
         detector = _import_from_audi_app("detector")
@@ -513,8 +531,8 @@ class TestAudiApp:
                     "threshold_profiles": {
                         "sensitive": {
                             "confidence_threshold_high": 0.72,
-                            "blue_to_red_threshold": 0.42,
-                            "red_to_blue_threshold": 0.30,
+                            "red_color_threshold": 0.62,
+                            "blue_color_threshold": 0.64,
                         }
                     },
                 },
@@ -526,8 +544,8 @@ class TestAudiApp:
 
         assert engine.threshold_profile == "sensitive"
         assert engine.threshold_yes == 0.72
-        assert engine.blue_to_red_threshold == 0.42
-        assert engine.red_to_blue_threshold == 0.30
+        assert engine.red_color_threshold == 0.62
+        assert engine.blue_color_threshold == 0.64
 
     def test_detection_threshold_profile_can_switch_at_runtime(self, tmp_path):
         detector = _import_from_audi_app("detector")
@@ -541,13 +559,13 @@ class TestAudiApp:
                     "threshold_profiles": {
                         "balanced": {
                             "confidence_threshold_high": 0.80,
-                            "blue_to_red_threshold": 0.45,
-                            "red_to_blue_threshold": 0.35,
+                            "red_color_threshold": 0.65,
+                            "blue_color_threshold": 0.66,
                         },
                         "sensitive": {
                             "confidence_threshold_high": 0.72,
-                            "blue_to_red_threshold": 0.42,
-                            "red_to_blue_threshold": 0.30,
+                            "red_color_threshold": 0.62,
+                            "blue_color_threshold": 0.64,
                         },
                     },
                 },
@@ -562,8 +580,8 @@ class TestAudiApp:
         assert status["threshold_profile"] == "sensitive"
         assert status["threshold_profiles"] == ["balanced", "sensitive"]
         assert engine.threshold_yes == 0.72
-        assert engine.blue_to_red_threshold == 0.42
-        assert engine.red_to_blue_threshold == 0.30
+        assert engine.red_color_threshold == 0.62
+        assert engine.blue_color_threshold == 0.64
 
     def test_blue_and_unknown_alerts_are_disabled_by_default(self, tmp_path):
         detector = _import_from_audi_app("detector")
@@ -586,8 +604,8 @@ class TestAudiApp:
         assert engine.window_samples == 81920
         assert engine.labels == ["drone"]
         assert engine.threshold_yes == 0.655
-        assert engine.blue_to_red_threshold == 0.37
-        assert engine.red_to_blue_threshold == 0.56
+        assert engine.red_color_threshold == 0.60
+        assert engine.blue_color_threshold == 0.60
         assert engine.alarm_cooldown_s == 120.0
         assert (
             engine._resolve_alert_level(
@@ -610,7 +628,6 @@ class TestAudiApp:
                 "detection": {
                     "model_path": str(tmp_path / "missing.tflite"),
                     "alert_history_file": str(tmp_path / "alerts.jsonl"),
-                    "blue_alert_threshold": 0.50,
                 },
                 "audio": {"sample_rate": 16000},
                 "storage": {"alerts_dir": str(tmp_path)},
@@ -649,8 +666,8 @@ class TestAudiApp:
 threshold_profiles:
   field:
     confidence_threshold_high: 0.81
-    blue_to_red_threshold: 0.41
-    red_to_blue_threshold: 0.29
+    red_color_threshold: 0.61
+    blue_color_threshold: 0.62
 """,
             encoding="utf-8",
         )
@@ -670,8 +687,8 @@ detection:
             "confidence_threshold_high"
         ] == 0.81
         assert cfg["detection"]["threshold_profiles"]["field"][
-            "blue_to_red_threshold"
-        ] == 0.41
+            "red_color_threshold"
+        ] == 0.61
 
     def test_alert_history_label_alert(self, tmp_path):
         storage = _import_from_audi_app("storage")

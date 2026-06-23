@@ -90,6 +90,8 @@ detection:
   mel_mean: 10.430418
   mel_std: 5.288271
   confidence_threshold_high: 0.6550  # YES detector state
+  red_color_threshold: 0.60           # RED if red confidence is at least this
+  blue_color_threshold: 0.60          # BLUE if blue confidence is at least this
   alert_on_red: true                 # RED detections fire GPIO by default
   alert_on_blue: false
   alert_on_unknown: false
@@ -112,8 +114,9 @@ web:
 ```
 
 Edit `threshold_profiles.yaml` to tune deployment thresholds without changing
-application code. The active profile overrides detector and color thresholds at
-startup.
+application code. The active profile overrides the detector threshold and the
+two color typing thresholds at startup. Color is assigned only after a positive
+detection: RED, BLUE, or UNKNOWN.
 
 ## Deployment on Pi
 

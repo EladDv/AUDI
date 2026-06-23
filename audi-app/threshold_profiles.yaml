@@ -1,32 +1,20 @@
 # AUDI threshold profiles.
 #
 # Detector thresholds are calibrated for the maintained MN10 mined-hard-negative
-# detector. Color thresholds use the red-positive typing policy.
+# detector. Color is typed only after positive detection:
+# RED if red confidence >= red_color_threshold,
+# BLUE if blue confidence >= blue_color_threshold,
+# otherwise UNKNOWN.
 threshold_profiles:
   mn10_p75:
-    confidence_threshold_high: 0.5524
-    confidence_threshold_low: 0.5524
-    blue_red_threshold: 0.50
-    blue_red_min_detection_score: 0.5524
-    red_alert_threshold: 0.37
-    blue_alert_threshold: 0.50
-    blue_to_red_threshold: 0.37
-    red_to_blue_threshold: 0.56
+    confidence_threshold_high: 0.5785
+    red_color_threshold: 0.217
+    blue_color_threshold: 0.330
   mn10_p90:
-    confidence_threshold_high: 0.6550
-    confidence_threshold_low: 0.6550
-    blue_red_threshold: 0.50
-    blue_red_min_detection_score: 0.6550
-    red_alert_threshold: 0.37
-    blue_alert_threshold: 0.50
-    blue_to_red_threshold: 0.37
-    red_to_blue_threshold: 0.56
+    confidence_threshold_high: 0.6895
+    red_color_threshold: 0.330
+    blue_color_threshold: 0.400
   mn10_p99:
-    confidence_threshold_high: 0.7166
-    confidence_threshold_low: 0.7166
-    blue_red_threshold: 0.50
-    blue_red_min_detection_score: 0.7166
-    red_alert_threshold: 0.37
-    blue_alert_threshold: 0.50
-    blue_to_red_threshold: 0.37
-    red_to_blue_threshold: 0.56
+    confidence_threshold_high: 0.7165
+    red_color_threshold: 0.400
+    blue_color_threshold: 0.500

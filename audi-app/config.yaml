@@ -60,16 +60,9 @@ detection:
   #   logit 0: drone detector
   #   logit 1: blue drone
   #   logit 2: red drone (positive class for color)
-  confidence_threshold_high: 0.6550   # YES detector state threshold
-  confidence_threshold_low: 0.6550    # Minimum raw drone score for color typing
-  blue_red_threshold: 0.50            # Raw RED/BLUE split before hysteresis
-  blue_red_min_detection_score: 0.6550 # Only type windows that look like drones
-  red_alert_threshold: 0.37           # RED alert if enabled and confidence is above this
-  blue_alert_threshold: 0.50          # BLUE alert if enabled and confidence is above this
-  blue_to_red_threshold: 0.37         # Threshold for BLUE -> RED state
-  red_to_blue_threshold: 0.56         # Threshold for RED -> BLUE state
-  color_hysteresis_window: 8
-  color_hysteresis_ratio: 0.6
+  confidence_threshold_high: 0.6895   # YES detector state threshold
+  red_color_threshold: 0.60           # RED if red confidence is at least this
+  blue_color_threshold: 0.60          # BLUE if blue confidence is at least this
   alert_on_red: true
   alert_on_blue: false
   alert_on_unknown: false

@@ -39,6 +39,9 @@ configure_torch_file_sharing()
 SR = 16000
 CLIP_S = 2.56
 CLIP_SAMPLES = int(SR * CLIP_S)  # 40960
+RED_FNR_TARGETS = (0.01, 0.05, 0.10, 0.20, 0.30, 0.50)
+RED_RECALL_TARGETS = (0.75, 0.80, 0.90, 0.95, 0.99)
+BLUE_RECALL_TARGETS = (0.75, 0.80, 0.90, 0.95, 0.99)
 
 
 # ── Utility ──────────────────────────────────────────────────────────
@@ -115,6 +118,34 @@ def _rates_at_max_fnr(
                 best = rates
     if best is None:
         return _binary_rates(scores, labels, 0.0)
+    return best
+
+
+def _rates_at_min_recall(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    min_recall: float,
+) -> dict[str, float]:
+    """Pick the strictest threshold whose red recall stays above target."""
+    return _rates_at_max_fnr(scores, labels, 1.0 - min_recall)
+
+
+def _rates_at_min_blue_recall(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    min_recall: float,
+) -> dict[str, float]:
+    """Pick the lowest red threshold whose blue recall stays above target."""
+    max_fpr = 1.0 - min_recall
+    thresholds = np.unique(np.concatenate(([0.0, 1.0], scores)))
+    best: dict[str, float] | None = None
+    for threshold in thresholds:
+        rates = _binary_rates(scores, labels, float(threshold))
+        if rates["fpr"] <= max_fpr:
+            if best is None or rates["threshold"] < best["threshold"]:
+                best = rates
+    if best is None:
+        return _binary_rates(scores, labels, 1.0)
     return best
 
 
@@ -566,7 +597,7 @@ class BlueRedDetector(L.LightningModule):
             "val_red_tn": default["tn"],
         }
         fp_fn_points = []
-        for target_fnr in (0.01, 0.05, 0.10, 0.20, 0.30, 0.50):
+        for target_fnr in RED_FNR_TARGETS:
             rates = _rates_at_max_fnr(scores, labels, target_fnr)
             suffix = f"{int(target_fnr * 100):02d}"
             metrics[f"val_red_tpr_at_fnr_{suffix}"] = rates["tpr"]
@@ -576,6 +607,29 @@ class BlueRedDetector(L.LightningModule):
             metrics[f"val_red_threshold_at_fn_rate_{suffix}"] = rates["threshold"]
             fp_fn_points.append(
                 f"fnr<={target_fnr:.2f}:fpr={rates['fp_rate']:.3f}@{rates['threshold']:.3f}"
+            )
+        recall_points = []
+        for target_recall in RED_RECALL_TARGETS:
+            rates = _rates_at_min_recall(scores, labels, target_recall)
+            suffix = f"{int(target_recall * 100):02d}"
+            metrics[f"val_red_threshold_at_red_recall_{suffix}"] = rates["threshold"]
+            metrics[f"val_red_tpr_at_red_recall_{suffix}"] = rates["tpr"]
+            metrics[f"val_red_fpr_at_red_recall_{suffix}"] = rates["fpr"]
+            recall_points.append(
+                f"recall>={target_recall:.2f}:fpr={rates['fp_rate']:.3f}"
+                f"@{rates['threshold']:.3f}"
+            )
+        blue_recall_points = []
+        for target_recall in BLUE_RECALL_TARGETS:
+            rates = _rates_at_min_blue_recall(scores, labels, target_recall)
+            suffix = f"{int(target_recall * 100):02d}"
+            blue_recall = 1.0 - rates["fpr"]
+            metrics[f"val_red_threshold_at_blue_recall_{suffix}"] = rates["threshold"]
+            metrics[f"val_red_tpr_at_blue_recall_{suffix}"] = rates["tpr"]
+            metrics[f"val_blue_recall_at_blue_recall_{suffix}"] = blue_recall
+            blue_recall_points.append(
+                f"blue-recall>={target_recall:.2f}:red-tpr={rates['tpr']:.3f}"
+                f"@{rates['threshold']:.3f}"
             )
 
         self.log_dict(metrics, prog_bar=False)
@@ -588,7 +642,9 @@ class BlueRedDetector(L.LightningModule):
             f"tpr@fnr10={metrics['val_red_tpr_at_fnr_10']:.3f} "
             f"fpr@fnr10={metrics['val_red_fpr_at_fnr_10']:.3f} "
             f"thr@fnr10={metrics['val_red_threshold_at_fnr_10']:.3f} "
-            f"fp-vs-fn=[{', '.join(fp_fn_points)}]"
+            f"fp-vs-fn=[{', '.join(fp_fn_points)}] "
+            f"thr@red-recall=[{', '.join(recall_points)}] "
+            f"thr@blue-recall=[{', '.join(blue_recall_points)}]"
         )
 
     def on_train_epoch_start(self):

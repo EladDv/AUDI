@@ -1233,8 +1233,8 @@
           det.blue_confidence == null ? '--' : det.blue_confidence.toFixed(2);
         document.getElementById('thresholdInfo').textContent =
           'YES >= ' + (det.threshold_yes || 0.7).toFixed(2) +
-          '  B→R >= ' + (det.blue_to_red_threshold || 0.45).toFixed(2) +
-          '  R→B <= ' + (det.red_to_blue_threshold || 0.35).toFixed(2) +
+          '  RED >= ' + (det.red_color_threshold || 0.6).toFixed(2) +
+          '  BLUE >= ' + (det.blue_color_threshold || 0.6).toFixed(2) +
           (det.blue_red_model_loaded ? '' : '  color model offline');
 
         // Record button — same state as the recording label

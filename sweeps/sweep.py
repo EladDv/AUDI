@@ -26,6 +26,9 @@ from typing import Any
 PROJECT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT_CMD = "uv run audi-train"
 BASE_FLAGS = ""
+RED_FNR_THRESHOLD_SUFFIXES = ("01", "05", "10", "20", "30", "50")
+RED_RECALL_THRESHOLD_SUFFIXES = ("75", "80", "90", "95", "99")
+BLUE_RECALL_THRESHOLD_SUFFIXES = ("75", "80", "90", "95", "99")
 
 
 def load_sweep_config(yaml_path: str | Path) -> dict[str, Any]:
@@ -190,7 +193,7 @@ def extract_metrics(run_dir: Path) -> dict[str, float]:
 
         metrics: dict[str, float] = {}
         scalar_tags = ea.Tags().get("scalars", [])
-        for tag in [
+        scalar_tags_to_extract = [
             "val/tpr_at_precision_90",
             "val/auc",
             "val/ece",
@@ -201,7 +204,20 @@ def extract_metrics(run_dir: Path) -> dict[str, float]:
             "val_red_fpr",
             "val_red_tpr_at_fnr_10",
             "val_red_fpr_at_fnr_10",
-        ]:
+            *[
+                f"val_red_threshold_at_fnr_{suffix}"
+                for suffix in RED_FNR_THRESHOLD_SUFFIXES
+            ],
+            *[
+                f"val_red_threshold_at_red_recall_{suffix}"
+                for suffix in RED_RECALL_THRESHOLD_SUFFIXES
+            ],
+            *[
+                f"val_red_threshold_at_blue_recall_{suffix}"
+                for suffix in BLUE_RECALL_THRESHOLD_SUFFIXES
+            ],
+        ]
+        for tag in scalar_tags_to_extract:
             if tag in scalar_tags:
                 events = ea.Scalars(tag)
                 if events:
@@ -218,8 +234,13 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
     with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
 

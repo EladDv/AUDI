@@ -33,8 +33,8 @@ DEFAULT_LABELS = ["drone"]
 DEFAULT_CAPTURE_SAMPLE_RATE = 16000
 DEFAULT_WINDOW_SAMPLES = 81920
 DEFAULT_DRONE_THRESHOLD = 0.6550
-DEFAULT_RED_ENTER_THRESHOLD = 0.37
-DEFAULT_RED_EXIT_THRESHOLD = 0.56
+DEFAULT_RED_COLOR_THRESHOLD = 0.60
+DEFAULT_BLUE_COLOR_THRESHOLD = 0.60
 DEFAULT_HYSTERESIS_WINDOW = 8
 DEFAULT_HYSTERESIS_RATIO = 0.6
 DEFAULT_HYSTERESIS_MARGIN = 0.05
@@ -90,58 +90,9 @@ class HysteresisState:
         return sum(self.history) / len(self.history)
 
 
-class ColorHysteresisState:
-    """Stateful blue/red typing with sticky RED behavior."""
-
-    def __init__(
-        self,
-        enter_red_threshold: float = 0.45,
-        exit_red_threshold: float = 0.35,
-        window: int = 5,
-        ratio: float = 0.6,
-    ):
-        self.enter_red_threshold = enter_red_threshold
-        self.exit_red_threshold = exit_red_threshold
-        self.window = window
-        self.ratio = ratio
-        self.history: list[float] = []
-        self.state = "UNKNOWN"
-
-    def add(self, red_score: float) -> str:
-        self.history.append(red_score)
-        if len(self.history) > self.window:
-            self.history.pop(0)
-
-        recent = self.history
-        k = max(1, math.ceil(len(recent) * self.ratio))
-        above_enter = sum(1 for s in recent if s >= self.enter_red_threshold)
-        below_exit = sum(1 for s in recent if s <= self.exit_red_threshold)
-
-        if self.state == "RED":
-            if below_exit >= k:
-                self.state = "BLUE"
-        else:
-            if above_enter >= k:
-                self.state = "RED"
-            elif below_exit >= k:
-                self.state = "BLUE"
-        return self.state
-
-    def clear(self):
-        self.history.clear()
-        self.state = "UNKNOWN"
-
-    @property
-    def confidence(self) -> float | None:
-        if not self.history:
-            return None
-        return sum(self.history) / len(self.history)
-
-
 @dataclass
 class ChannelDetectionState:
     hysteresis: HysteresisState
-    color_hysteresis: ColorHysteresisState
     last_alarm_time: float = 0.0
     last_inference: dict | None = None
     score_history: list[dict] = field(default_factory=list)
@@ -202,26 +153,15 @@ class DetectionEngine:
         self.threshold_yes = det_cfg.get(
             "confidence_threshold_high", DEFAULT_DRONE_THRESHOLD
         )
-        self.threshold_blue = det_cfg.get(
-            "confidence_threshold_low", self.threshold_yes
-        )
         self.labels = det_cfg.get("labels", DEFAULT_LABELS)
         self.inference_interval = det_cfg.get("inference_interval", 0.320)
 
         # Combined model output: [detector_logit, blue_logit, red_logit].
-        self.blue_red_threshold = det_cfg.get("blue_red_threshold", 0.5)
-        self.blue_red_min_detection_score = det_cfg.get(
-            "blue_red_min_detection_score", self.threshold_blue
+        self.red_color_threshold = det_cfg.get(
+            "red_color_threshold", DEFAULT_RED_COLOR_THRESHOLD
         )
-        self.red_alert_threshold = det_cfg.get(
-            "red_alert_threshold", DEFAULT_RED_ENTER_THRESHOLD
-        )
-        self.blue_alert_threshold = det_cfg.get("blue_alert_threshold", 0.5)
-        self.blue_to_red_threshold = det_cfg.get(
-            "blue_to_red_threshold", DEFAULT_RED_ENTER_THRESHOLD
-        )
-        self.red_to_blue_threshold = det_cfg.get(
-            "red_to_blue_threshold", DEFAULT_RED_EXIT_THRESHOLD
+        self.blue_color_threshold = det_cfg.get(
+            "blue_color_threshold", DEFAULT_BLUE_COLOR_THRESHOLD
         )
         self.alert_on_red = det_cfg.get("alert_on_red", True)
         self.alert_on_blue = det_cfg.get("alert_on_blue", False)
@@ -279,14 +219,6 @@ class DetectionEngine:
         self._hysteresis_margin = det_cfg.get(
             "hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN
         )
-        self._color_hysteresis_window = det_cfg.get(
-            "color_hysteresis_window",
-            self._hysteresis_window,
-        )
-        self._color_hysteresis_ratio = det_cfg.get(
-            "color_hysteresis_ratio",
-            self._hysteresis_ratio,
-        )
         self._channel_states: list[ChannelDetectionState] = []
         self._sync_channel_states(self.input_channels)
 
@@ -335,13 +267,7 @@ class DetectionEngine:
                 window=self._hysteresis_window,
                 ratio=self._hysteresis_ratio,
                 margin=self._hysteresis_margin,
-            ),
-            color_hysteresis=ColorHysteresisState(
-                enter_red_threshold=self.blue_to_red_threshold,
-                exit_red_threshold=self.red_to_blue_threshold,
-                window=self._color_hysteresis_window,
-                ratio=self._color_hysteresis_ratio,
-            ),
+            )
         )
 
     def _sync_channel_states(self, channel_count: int) -> None:
@@ -352,7 +278,6 @@ class DetectionEngine:
             del self._channel_states[channel_count:]
         self.input_channels = channel_count
         self.hysteresis = self._channel_states[0].hysteresis
-        self.color_hysteresis = self._channel_states[0].color_hysteresis
 
     def _reset_channel_states(self, channel_count: int | None = None) -> None:
         if channel_count is None:
@@ -376,25 +301,14 @@ class DetectionEngine:
         self.threshold_yes = det_cfg.get(
             "confidence_threshold_high", DEFAULT_DRONE_THRESHOLD
         )
-        self.threshold_blue = det_cfg.get(
-            "confidence_threshold_low", self.threshold_yes
-        )
         self.inference_interval = det_cfg.get(
             "inference_interval", self.inference_interval
         )
-        self.blue_red_threshold = det_cfg.get("blue_red_threshold", 0.5)
-        self.blue_red_min_detection_score = det_cfg.get(
-            "blue_red_min_detection_score", self.threshold_blue
+        self.red_color_threshold = det_cfg.get(
+            "red_color_threshold", DEFAULT_RED_COLOR_THRESHOLD
         )
-        self.red_alert_threshold = det_cfg.get(
-            "red_alert_threshold", DEFAULT_RED_ENTER_THRESHOLD
-        )
-        self.blue_alert_threshold = det_cfg.get("blue_alert_threshold", 0.5)
-        self.blue_to_red_threshold = det_cfg.get(
-            "blue_to_red_threshold", DEFAULT_RED_ENTER_THRESHOLD
-        )
-        self.red_to_blue_threshold = det_cfg.get(
-            "red_to_blue_threshold", DEFAULT_RED_EXIT_THRESHOLD
+        self.blue_color_threshold = det_cfg.get(
+            "blue_color_threshold", DEFAULT_BLUE_COLOR_THRESHOLD
         )
         self.alert_on_red = det_cfg.get("alert_on_red", True)
         self.alert_on_blue = det_cfg.get("alert_on_blue", False)
@@ -411,14 +325,6 @@ class DetectionEngine:
         )
         self._hysteresis_margin = det_cfg.get(
             "hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN
-        )
-        self._color_hysteresis_window = det_cfg.get(
-            "color_hysteresis_window",
-            self._hysteresis_window,
-        )
-        self._color_hysteresis_ratio = det_cfg.get(
-            "color_hysteresis_ratio",
-            self._hysteresis_ratio,
         )
         self._reset_channel_states()
         logger.info("Threshold profile switched to %s", profile)
@@ -497,15 +403,14 @@ class DetectionEngine:
 
     def _classify_blue_red(
         self,
-        detection_score: float,
+        detected: bool,
         color_logits: np.ndarray | None,
-        channel_state: ChannelDetectionState | None = None,
     ) -> dict:
-        """Classify a detected drone window as BLUE or RED.
+        """Classify a positive detection as RED, BLUE, or UNKNOWN.
 
         RED is the positive class. The color is reported only when the drone
-        detector score is high enough; otherwise the color head would be
-        classifying background.
+        detector is already in a positive state; otherwise the color head would
+        be classifying background.
         """
         result = {
             "drone_color": "UNKNOWN",
@@ -515,10 +420,10 @@ class DetectionEngine:
             "blue_logit": None,
             "blue_red_enabled": color_logits is not None
             and np.asarray(color_logits).size >= 2,
-            "blue_red_threshold": self.blue_red_threshold,
-            "blue_red_min_detection_score": self.blue_red_min_detection_score,
+            "red_color_threshold": self.red_color_threshold,
+            "blue_color_threshold": self.blue_color_threshold,
         }
-        if detection_score < self.blue_red_min_detection_score:
+        if not detected:
             return result
 
         if color_logits is None:
@@ -538,18 +443,16 @@ class DetectionEngine:
         probs = exp / max(float(exp.sum()), 1e-12)
         blue_conf = float(probs[0])
         red_conf = float(probs[1])
-        raw_color = "RED" if red_conf >= self.blue_red_threshold else "BLUE"
-        color_hysteresis = (
-            channel_state.color_hysteresis
-            if channel_state is not None
-            else self.color_hysteresis
-        )
-        color = color_hysteresis.add(red_conf)
+        if red_conf >= self.red_color_threshold:
+            color = "RED"
+        elif blue_conf >= self.blue_color_threshold:
+            color = "BLUE"
+        else:
+            color = "UNKNOWN"
 
         result.update(
             {
                 "drone_color": color,
-                "raw_drone_color": raw_color,
                 "red_confidence": round(red_conf, 4),
                 "blue_confidence": round(blue_conf, 4),
                 "red_logit": round(float(logits[1]), 4),
@@ -559,30 +462,16 @@ class DetectionEngine:
         return result
 
     def _resolve_alert_level(self, alarm: bool, color_result: dict) -> str:
-        """Map detector state and color confidence to an operator alert level."""
+        """Map detector state and final color state to an operator alert level."""
         if not alarm:
             return "NO"
 
-        red_conf = color_result.get("red_confidence")
-        blue_conf = color_result.get("blue_confidence")
         color = color_result.get("drone_color")
 
-        if color == "RED":
-            if (
-                self.alert_on_red
-                and red_conf is not None
-                and red_conf >= self.red_alert_threshold
-            ):
-                return "RED_ALERT"
-            return "DETECTED"
-        if color == "BLUE":
-            if (
-                self.alert_on_blue
-                and blue_conf is not None
-                and blue_conf >= self.blue_alert_threshold
-            ):
-                return "BLUE_ALERT"
-            return "DETECTED"
+        if color == "RED" and self.alert_on_red:
+            return "RED_ALERT"
+        if color == "BLUE" and self.alert_on_blue:
+            return "BLUE_ALERT"
         if color == "UNKNOWN" and self.alert_on_unknown:
             return "UNKNOWN_ALERT"
         return "DETECTED"
@@ -709,9 +598,8 @@ class DetectionEngine:
             alarm = channel_state.hysteresis.add(raw_score)
             state = "YES" if alarm else "NO"
             color_result = self._classify_blue_red(
-                raw_score,
+                alarm,
                 color_logits,
-                channel_state=channel_state,
             )
             alert_level = self._resolve_alert_level(alarm, color_result)
             alert_id = (
@@ -936,7 +824,6 @@ class DetectionEngine:
             "labels": self.labels,
             "input_channels": self.input_channels,
             "threshold_yes": self.threshold_yes,
-            "threshold_blue": self.threshold_blue,
             "inference_interval": self.inference_interval,
             "window_samples": self.window_samples,
             "stride": self.stride,
@@ -951,14 +838,8 @@ class DetectionEngine:
                 self.has_blue_red_model
                 or last.get("blue_red_enabled", False)
             ),
-            "blue_red_threshold": self.blue_red_threshold,
-            "blue_red_min_detection_score": self.blue_red_min_detection_score,
-            "red_alert_threshold": self.red_alert_threshold,
-            "blue_alert_threshold": self.blue_alert_threshold,
-            "blue_to_red_threshold": self.blue_to_red_threshold,
-            "red_to_blue_threshold": self.red_to_blue_threshold,
-            "color_hysteresis_state": self.color_hysteresis.state,
-            "color_hysteresis_confidence": self.color_hysteresis.confidence,
+            "red_color_threshold": self.red_color_threshold,
+            "blue_color_threshold": self.blue_color_threshold,
             "channels": channel_status,
             "alert_on_red": self.alert_on_red,
             "alert_on_blue": self.alert_on_blue,
