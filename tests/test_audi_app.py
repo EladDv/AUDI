@@ -97,6 +97,8 @@ class TestAudiApp:
             rtol=3e-5,
             atol=1e-3,
         )
+        assert classifier.last_mel_db is not None
+        assert classifier.last_mel_db.shape == (128, 512)
 
     def test_app_classifier_default_window_matches_deployment_model(self):
         audio_features = _import_from_audi_app("audio_features")
@@ -211,6 +213,44 @@ class TestAudiApp:
         assert manager.status["sample_rate"] == 16000
         assert manager.status["ring_buffer_capacity"] == 120
 
+    def test_audio_ring_buffer_preserves_multichannel_frames(self):
+        recorder = _import_from_audi_app("recorder")
+        ring = recorder.AudioRingBuffer(max_samples=5, channels=4)
+
+        frames = np.array(
+            [
+                [0.0, 0.1, 0.2, 0.3],
+                [1.0, 1.1, 1.2, 1.3],
+                [2.0, 2.1, 2.2, 2.3],
+            ],
+            dtype=np.float32,
+        )
+        ring.append(frames)
+
+        all_channels = ring.get_recent(2, channel=None)
+
+        assert all_channels.shape == (2, 4)
+        np.testing.assert_allclose(all_channels[:, 2], [1.2, 2.2])
+        np.testing.assert_allclose(ring.get_recent(2, channel=3), [1.3, 2.3])
+
+    def test_recorder_status_reports_per_channel_health(self, tmp_path):
+        recorder = _import_from_audi_app("recorder")
+        raw = recorder.ALSARecorder(str(tmp_path / "hot"), channels=4)
+        raw.ring_buffer.append(
+            np.tile(
+                np.array([[0.01, 0.02, 0.0, 0.5]], dtype=np.float32),
+                (1600, 1),
+            )
+        )
+        raw._last_audio_timestamp = __import__("time").time()
+
+        health = raw.channel_health()
+
+        assert [row["channel_index"] for row in health] == [0, 1, 2, 3]
+        assert health[0]["healthy"] is True
+        assert health[2]["healthy"] is False
+        assert health[3]["peak"] == 0.5
+
     def test_gpio_falls_back_to_mock_unless_required(self, monkeypatch):
         """GPIO setup failures are fatal only when REQUIRE_GPIO is set."""
         mod = _import_from_audi_app("gpio_alarm")
@@ -241,6 +281,63 @@ class TestAudiApp:
         with pytest.raises(RuntimeError):
             mod.GPIOController({"gpio": {"enabled": True}})
 
+    def test_gpio_defaults_include_field_tag_buttons(self, monkeypatch):
+        mod = _import_from_audi_app("gpio_alarm")
+
+        setups = []
+        events = {}
+        rpi_pkg = types.ModuleType("RPi")
+        gpio_mod = types.ModuleType("RPi.GPIO")
+        gpio_mod.BCM = "BCM"
+        gpio_mod.OUT = "OUT"
+        gpio_mod.IN = "IN"
+        gpio_mod.LOW = 0
+        gpio_mod.HIGH = 1
+        gpio_mod.PUD_UP = "PUD_UP"
+        gpio_mod.FALLING = "FALLING"
+        gpio_mod.setmode = lambda mode: None
+        gpio_mod.setwarnings = lambda enabled: None
+        gpio_mod.output = lambda pin, value: None
+        gpio_mod.cleanup = lambda: None
+
+        def setup(pin, mode, **kwargs):
+            setups.append((pin, mode, kwargs))
+
+        def add_event_detect(pin, edge, callback, bouncetime):
+            events[pin] = {"edge": edge, "callback": callback}
+
+        gpio_mod.setup = setup
+        gpio_mod.add_event_detect = add_event_detect
+        monkeypatch.setitem(sys.modules, "RPi", rpi_pkg)
+        monkeypatch.setitem(sys.modules, "RPi.GPIO", gpio_mod)
+
+        controller = mod.GPIOController({"gpio": {"enabled": True}})
+        tags = []
+        controller.on_field_tag = tags.append
+
+        assert controller.status()["alert_pin"] == 2
+        assert controller.status()["record_led_pin"] is None
+        assert controller.status()["record_button_pin"] is None
+        assert controller.status()["field_tag_button_pins"] == {
+            "green": 22,
+            "yellow": 27,
+            "red": 17,
+        }
+        assert (2, "OUT", {"initial": 0}) in setups
+        assert (22, "IN", {"pull_up_down": "PUD_UP"}) in setups
+        assert (27, "IN", {"pull_up_down": "PUD_UP"}) in setups
+        assert (17, "IN", {"pull_up_down": "PUD_UP"}) in setups
+        assert set(events) >= {17, 22, 27}
+        assert events[22]["edge"] == "FALLING"
+        assert events[27]["edge"] == "FALLING"
+        assert events[17]["edge"] == "FALLING"
+
+        events[22]["callback"](22)
+        events[27]["callback"](27)
+        events[17]["callback"](17)
+
+        assert tags == ["green", "yellow", "red"]
+
     def test_alarm_snapshot_writes_utc_metadata(self, tmp_path):
         """Alarm snapshots should not fail while writing UTC metadata."""
         storage = _import_from_audi_app("storage")
@@ -268,6 +365,112 @@ class TestAudiApp:
         assert meta["timestamp_iso"].endswith("+00:00")
         with wave.open(meta["files"]["full_120s"]) as wav:
             assert wav.getframerate() == 8000
+
+    def test_alarm_snapshot_saves_firing_channel_and_all_channels(self, tmp_path):
+        storage = _import_from_audi_app("storage")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=8000, channels=4)
+        ring.append(
+            np.tile(
+                np.array([[0.1, 0.2, 0.3, 0.4]], dtype=np.float32),
+                (8000, 1),
+            )
+        )
+        snapshotter = storage.AlarmSnapshotter(str(tmp_path), sample_rate=8000)
+        snapshotter._stop_event.set()
+
+        meta = snapshotter.save_snapshot(
+            ring,
+            {
+                "alert_id": "field-1",
+                "state": "YES",
+                "alert_level": "RED_ALERT",
+                "yes_confidence": 0.9,
+                "channel_index": 2,
+                "channel_name": "ch2",
+                "firing_channel_index": 2,
+                "firing_channel_name": "ch2",
+                "all_channel_results": [{"channel_index": i} for i in range(4)],
+            },
+            recorder_ref=None,
+        )
+
+        assert meta is not None
+        assert meta["firing_channel_index"] == 2
+        assert meta["channel_count"] == 4
+        assert meta["all_channel_results"] == [{"channel_index": i} for i in range(4)]
+        with wave.open(meta["files"]["full_120s"]) as wav:
+            assert wav.getnchannels() == 1
+        with wave.open(meta["files"]["full_120s_all_channels"]) as wav:
+            assert wav.getnchannels() == 4
+
+    def test_detector_runs_inference_on_all_audio_channels(self, tmp_path, monkeypatch):
+        detector = _import_from_audi_app("detector")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=24, channels=4)
+        ring.append(
+            np.tile(
+                np.array([[0.0, 1.0, 2.0, 3.0]], dtype=np.float32),
+                (6, 1),
+            )
+        )
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "model_sample_rate": 4,
+                    "window_samples": 4,
+                    "confidence_threshold_high": 0.5,
+                    "hysteresis_window": 1,
+                    "hysteresis_ratio": 1.0,
+                    "hysteresis_margin": 0.0,
+                    "color_hysteresis_window": 1,
+                    "color_hysteresis_ratio": 1.0,
+                    "blue_red_min_detection_score": 0.0,
+                    "red_alert_threshold": 0.5,
+                    "alarm_cooldown_s": 0,
+                },
+                "audio": {"sample_rate": 4, "channels": 4},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=ring,
+        )
+        snapshot_requests = []
+        alarms = []
+        engine._save_snapshot_and_alert = snapshot_requests.append
+        engine.on_alarm = alarms.append
+
+        def preprocess(audio, capture_sr):
+            engine.classifier.last_mel_db = np.full(
+                (4, 3),
+                fill_value=float(audio[0]),
+                dtype=np.float32,
+            )
+            return np.array([audio[0]], dtype=np.float32)
+
+        def predict_logits(spec):
+            channel_marker = int(spec[0])
+            if channel_marker == 2:
+                return np.array([2.0, 0.0, 4.0], dtype=np.float32)
+            return np.array([-2.0, 4.0, 0.0], dtype=np.float32)
+
+        monkeypatch.setattr(engine.classifier, "preprocess", preprocess)
+        monkeypatch.setattr(engine.classifier, "predict_logits", predict_logits)
+
+        result = engine.force_inference()
+
+        assert result["firing_channel_index"] == 2
+        assert result["alert_level"] == "RED_ALERT"
+        assert len(result["channels"]) == 4
+        assert len(result["all_channel_results"]) == 4
+        assert engine.status["total_inferences"] == 4
+        assert engine.status["channels"][2]["alert_level"] == "RED_ALERT"
+        assert len(engine.latest_mels["channels"]) == 4
+        assert engine.latest_mels["channels"][2]["mel"][0, 0] == 2.0
+        assert alarms and alarms[0]["firing_channel_index"] == 2
 
     def test_color_hysteresis_sticks_red_until_lower_exit_threshold(self):
         detector = _import_from_audi_app("detector")
@@ -481,6 +684,22 @@ detection:
         assert updated["operator_label"] == "drone_red"
         assert history.read_recent(1)[0]["operator_label"] == "drone_red"
 
+    def test_alert_history_field_tag_latest(self, tmp_path):
+        storage = _import_from_audi_app("storage")
+        history = storage.AlertHistory(str(tmp_path / "alerts.jsonl"))
+        history.append({"alert_id": "a1", "state": "YES"})
+        history.append({"alert_id": "a2", "state": "YES"})
+
+        updated = history.tag_latest("red")
+        entries = history.read_recent(2)
+
+        assert updated is not None
+        assert updated["alert_id"] == "a2"
+        assert updated["field_tag_color"] == "red"
+        assert updated["field_tag"] == "incorrect_detection"
+        assert updated["operator_label"] == "incorrect_detection"
+        assert "field_tag" not in entries[0]
+
     def test_webui_threshold_profile_endpoint(self):
         webui_server = _import_from_audi_app("webui_server")
 
@@ -607,3 +826,65 @@ detection:
         assert response.status_code == 200
         assert response.get_json()["db"] == 0.0
         assert response.get_json()["vu_percent"] == 100.0
+
+    def test_webui_mels_prefers_detector_preprocess_cache(self):
+        webui_server = _import_from_audi_app("webui_server")
+
+        class RingBuffer:
+            def get_last_n_seconds(self, *args, **kwargs):
+                raise AssertionError("ring-buffer mel recompute should not run")
+
+        class RawRecorder:
+            sample_rate = 16000
+            ring_buffer = RingBuffer()
+
+        class Recorder:
+            recorder = RawRecorder()
+
+        class Detector:
+            n_mels = 4
+            n_fft = 16
+            win_length = 16
+            hop_length = 4
+            model_sample_rate = 16000
+
+            @property
+            def status(self):
+                return {
+                    "n_mels": self.n_mels,
+                    "n_fft": self.n_fft,
+                    "win_length": self.win_length,
+                    "hop_length": self.hop_length,
+                    "model_sample_rate": self.model_sample_rate,
+                }
+
+            @property
+            def latest_mels(self):
+                return {
+                    "timestamp": 123.0,
+                    "sample_rate": 16000,
+                    "channels": [
+                        {
+                            "channel_index": 0,
+                            "mel": np.arange(16, dtype=np.float32).reshape(4, 4),
+                        }
+                    ],
+                }
+
+        webui = webui_server.WebUI({"web": {"port": 0}})
+        webui.recorder = Recorder()
+        webui.detector = Detector()
+
+        response = webui._app.test_client().get("/api/mels?columns=2")
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["source"] == "detector_cache"
+        assert payload["channels_available"] == 1
+        assert payload["channels"][0]["frames"] == 2
+        assert payload["channels"][0]["mel"] == [
+            [0.5, 2.5],
+            [4.5, 6.5],
+            [8.5, 10.5],
+            [12.5, 14.5],
+        ]

@@ -247,6 +247,7 @@ class TFLiteClassifier:
         self._preprocess_cache_hits = 0
         self._preprocess_cache_misses = 0
         self._preprocess_last_reused_frames = 0
+        self.last_mel_db: np.ndarray | None = None
 
         self._interpreter = None
         self._input_details = None
@@ -329,6 +330,7 @@ class TFLiteClassifier:
         mel = self._raw_mel_db(audio, target_frames)
         if scale > 0.0 and scale != 1.0:
             mel = mel + np.float32(20.0 * np.log10(scale))
+        self.last_mel_db = np.array(mel, dtype=np.float32, copy=True)
 
         if mel.shape[-1] < target_frames:
             raise ValueError(

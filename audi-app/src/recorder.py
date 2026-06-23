@@ -62,35 +62,50 @@ def auto_discover_device() -> str:
 class AudioRingBuffer:
     """Circular buffer of recent audio samples (float32, [-1.0, 1.0]).
 
-    Stores up to `max_samples` of mono audio. New data overwrites oldest.
+    Stores up to `max_samples` frames. Multi-channel captures are stored as
+    ``[frames, channels]`` so the UI can inspect per-channel frontend state.
     """
 
-    def __init__(self, max_samples: int):
+    def __init__(self, max_samples: int, channels: int = 1):
         self.max_samples = max_samples
-        self._buffer = np.zeros(max_samples, dtype=np.float32)
+        self.channels = max(1, int(channels))
+        self._buffer = np.zeros((max_samples, self.channels), dtype=np.float32)
         self._write_pos = 0
         self._count = 0
         self._lock = threading.Lock()
 
     def append(self, samples: np.ndarray):
         """Append float32 samples [-1, 1]. Thread-safe."""
-        n = len(samples)
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.ndim == 1:
+            if self.channels == 1:
+                samples = samples.reshape(-1, 1)
+            else:
+                if samples.size % self.channels != 0:
+                    samples = samples[: samples.size - (samples.size % self.channels)]
+                samples = samples.reshape(-1, self.channels)
+        if samples.ndim != 2 or samples.shape[1] != self.channels:
+            raise ValueError(
+                f"Expected samples with {self.channels} channels, got {samples.shape}"
+            )
+
+        n = samples.shape[0]
         if n <= 0:
             return
         with self._lock:
             if n >= self.max_samples:
-                self._buffer[:] = samples[-self.max_samples :]
+                self._buffer[:, :] = samples[-self.max_samples :]
                 self._write_pos = 0
                 self._count = self.max_samples
                 return
 
             end = self._write_pos + n
             if end <= self.max_samples:
-                self._buffer[self._write_pos : end] = samples
+                self._buffer[self._write_pos : end, :] = samples
             else:
                 first_chunk = self.max_samples - self._write_pos
-                self._buffer[self._write_pos :] = samples[:first_chunk]
-                self._buffer[: n - first_chunk] = samples[first_chunk:]
+                self._buffer[self._write_pos :, :] = samples[:first_chunk]
+                self._buffer[: n - first_chunk, :] = samples[first_chunk:]
 
             self._write_pos = end % self.max_samples
             self._count = min(self._count + n, self.max_samples)
@@ -99,8 +114,12 @@ class AudioRingBuffer:
     def total_samples(self) -> int:
         return self._count
 
-    def get_recent(self, num_samples: int) -> np.ndarray:
-        """Return the most recent `num_samples`. Ordered oldest→newest."""
+    def get_recent(self, num_samples: int, channel: int | None = 0) -> np.ndarray:
+        """Return recent frames ordered oldest to newest.
+
+        ``channel=None`` returns ``[frames, channels]``. The default returns
+        channel 0 as a mono vector to keep existing detector behavior stable.
+        """
         num_samples = int(num_samples)
         with self._lock:
             if num_samples > self._count:
@@ -108,27 +127,30 @@ class AudioRingBuffer:
 
             if self._count < self.max_samples:
                 start = max(0, self._count - num_samples)
-                return self._buffer[start : self._count].copy()
+                out = self._buffer[start : self._count].copy()
+                return self._select_channel(out, channel)
 
             idx = (self._write_pos - num_samples) % self.max_samples
             if idx + num_samples <= self.max_samples:
-                return self._buffer[idx : idx + num_samples].copy()
+                out = self._buffer[idx : idx + num_samples].copy()
             else:
                 first = self._buffer[idx:].copy()
                 second = self._buffer[: num_samples - len(first)]
-                return np.concatenate([first, second])
+                out = np.concatenate([first, second], axis=0)
+            return self._select_channel(out, channel)
 
     def get_last_n_seconds(
-        self, n_seconds: float, sample_rate: int
+        self, n_seconds: float, sample_rate: int, channel: int | None = 0
     ) -> np.ndarray:
         needed = int(n_seconds * sample_rate)
-        return self.get_recent(needed)
+        return self.get_recent(needed, channel=channel)
 
     def get_samples_at_timestamp(
         self,
         seconds_ago_start: float,
         duration_seconds: float,
         sample_rate: int,
+        channel: int | None = 0,
     ) -> np.ndarray:
         """Get a specific window of audio from the past.
 
@@ -148,7 +170,7 @@ class AudioRingBuffer:
         # To get a window starting at seconds_ago_start ago with duration:
         # total = seconds_ago_start + duration seconds ago
         total_offset = start_offset + needed
-        recent = self.get_recent(total_offset)
+        recent = self.get_recent(total_offset, channel=channel)
         if len(recent) < needed:
             return recent  # return whatever we have
         return recent[:needed]  # first `needed` samples of the recent window
@@ -158,6 +180,16 @@ class AudioRingBuffer:
             self._buffer.fill(0.0)
             self._write_pos = 0
             self._count = 0
+
+    def _select_channel(
+        self, samples: np.ndarray, channel: int | None
+    ) -> np.ndarray:
+        if channel is None:
+            return samples
+        channel = int(channel)
+        if channel < 0 or channel >= self.channels:
+            raise IndexError(f"channel {channel} outside 0..{self.channels - 1}")
+        return samples[:, channel].copy()
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +221,9 @@ class ALSARecorder:
         self.segment_duration = segment_duration
         self.on_segment = on_segment
 
-        # In-memory ring buffer — float32 mono, 120s for pre/post alarm snapshots
-        ring_samples = ring_buffer_duration * sample_rate * channels
-        self.ring_buffer = AudioRingBuffer(ring_samples)
+        # In-memory ring buffer — float32 frames, 120s for pre/post alarm snapshots
+        ring_samples = ring_buffer_duration * sample_rate
+        self.ring_buffer = AudioRingBuffer(ring_samples, channels=channels)
 
         # Audio health tracking
         self._bytes_captured_total = 0
@@ -408,7 +440,8 @@ class ALSARecorder:
         np.clip(samples, -1.0, 1.0, out=samples)
 
         if self.channels > 1:
-            samples = samples.reshape(-1, self.channels).mean(axis=1)
+            usable = samples.size - (samples.size % self.channels)
+            samples = samples[:usable].reshape(-1, self.channels)
 
         self.ring_buffer.append(samples)
         self._last_audio_timestamp = time.time()
@@ -488,6 +521,48 @@ class ALSARecorder:
             return 0.0
         return float(np.sqrt(np.mean(samples**2)))
 
+    def channel_health(self, window_seconds: float = 1.0) -> list[dict]:
+        """Return recent signal health for each captured input channel."""
+        window_seconds = max(0.05, float(window_seconds))
+        samples = self.ring_buffer.get_last_n_seconds(
+            window_seconds,
+            self.sample_rate,
+            channel=None,
+        )
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.ndim == 1:
+            samples = samples[:, np.newaxis]
+
+        channels = int(self.channels)
+        rows: list[dict] = []
+        for idx in range(channels):
+            if samples.size == 0 or idx >= samples.shape[1]:
+                ch = np.empty(0, dtype=np.float32)
+            else:
+                ch = samples[:, idx]
+            if ch.size:
+                rms = float(np.sqrt(np.mean(ch.astype(np.float64) ** 2)))
+                peak = float(np.max(np.abs(ch)))
+                clipping = float(np.mean(np.abs(ch) >= 0.98) * 100.0)
+                db = 20.0 * np.log10(max(rms, 1e-9))
+            else:
+                rms = 0.0
+                peak = 0.0
+                clipping = 0.0
+                db = -180.0
+            rows.append(
+                {
+                    "channel_index": idx,
+                    "rms": round(rms, 6),
+                    "peak": round(peak, 6),
+                    "dbfs": round(float(db), 1),
+                    "clipping_percent": round(clipping, 2),
+                    "healthy": bool(self.audio_healthy and rms > 1e-6),
+                    "frames": int(ch.size),
+                }
+            )
+        return rows
+
 
 # ---------------------------------------------------------------------------
 # Manager
@@ -529,6 +604,7 @@ class RecorderManager:
             "stopped": r.is_force_stopped,
             "device": r.device,
             "sample_rate": r.sample_rate,
+            "channels": r.channels,
             "segment_duration": r.segment_duration,
             "ring_buffer_seconds": r.ring_buffer.total_samples // r.sample_rate,
             "ring_buffer_capacity": r.ring_buffer.max_samples // r.sample_rate,
@@ -536,4 +612,5 @@ class RecorderManager:
             "segments_recorded": r._segment_count,
             "audio_healthy": r.audio_healthy,
             "rms_level": r.get_rms_level(),
+            "channel_health": r.channel_health(),
         }

@@ -85,13 +85,16 @@ detection:
 # --- GPIO Alert System ---
 gpio:
   enabled: true
-  alert_pin: 22                  # Alert output — e.g. buzzer/relay
-  strobe_pin: 24                 # Strobe/visual indicator
-  reset_pin: 23                  # Physical reset button input (pull-up)
-  record_led_pin: 27             # Recording indicator LED (on when recording)
-  record_button_pin: 17          # Toggle recording on/off (pull-up input)
+  alert_pin: 26                  # Alert output — e.g. buzzer/relay
+  strobe_pin: null               # Strobe/visual indicator
+  reset_pin: null                # Physical reset button input (pull-up)
+  record_led_pin: null           # Disabled by default; GPIO 27 is field-tag yellow
+  record_button_pin: null        # Disabled by default; GPIO 17 is field-tag red
   pause_button_pin: 18           # Pause recording for 5 minutes (pull-up input)
-  alert_duration_ms: 5000       # How long to hold alert active
+  field_tag_green_pin: 22        # Active-low button to GND; correct detection and classification
+  field_tag_yellow_pin: 27       # Active-low button to GND; correct detection, incorrect classification
+  field_tag_red_pin: 17          # Active-low button to GND; incorrect detection
+  alert_duration_ms: 5000        # How long to hold alert active
   pulse_interval_ms: 500         # Blink/pulse interval during alert
   red_buzzer_on_ms: 120          # Fast urgent pattern for RED ALERT
   red_buzzer_off_ms: 80

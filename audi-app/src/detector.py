@@ -21,6 +21,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 from audio_features import TFLiteClassifier
@@ -137,6 +138,16 @@ class ColorHysteresisState:
         return sum(self.history) / len(self.history)
 
 
+@dataclass
+class ChannelDetectionState:
+    hysteresis: HysteresisState
+    color_hysteresis: ColorHysteresisState
+    last_alarm_time: float = 0.0
+    last_inference: dict | None = None
+    score_history: list[dict] = field(default_factory=list)
+    color_trace: list[dict] = field(default_factory=list)
+
+
 # ===========================================================================
 # Detection Engine
 # ===========================================================================
@@ -228,6 +239,7 @@ class DetectionEngine:
         self.capture_sample_rate = audio_cfg.get(
             "sample_rate", DEFAULT_CAPTURE_SAMPLE_RATE
         )
+        self.input_channels = max(1, int(audio_cfg.get("channels", 4)))
 
         # Load TFLite classifier
         self.classifier = TFLiteClassifier(
@@ -258,25 +270,25 @@ class DetectionEngine:
                 self.window_samples = expected_window_samples
                 self.classifier.window_samples = expected_window_samples
 
-        # Hysteresis state tracker (Schmitt-trigger)
-        self.hysteresis = HysteresisState(
-            threshold=self.threshold_yes,
-            window=det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
-            ratio=det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
-            margin=det_cfg.get("hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN),
+        self._hysteresis_window = det_cfg.get(
+            "hysteresis_window", DEFAULT_HYSTERESIS_WINDOW
         )
-        self.color_hysteresis = ColorHysteresisState(
-            enter_red_threshold=self.blue_to_red_threshold,
-            exit_red_threshold=self.red_to_blue_threshold,
-            window=det_cfg.get(
-                "color_hysteresis_window",
-                det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
-            ),
-            ratio=det_cfg.get(
-                "color_hysteresis_ratio",
-                det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
-            ),
+        self._hysteresis_ratio = det_cfg.get(
+            "hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO
         )
+        self._hysteresis_margin = det_cfg.get(
+            "hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN
+        )
+        self._color_hysteresis_window = det_cfg.get(
+            "color_hysteresis_window",
+            self._hysteresis_window,
+        )
+        self._color_hysteresis_ratio = det_cfg.get(
+            "color_hysteresis_ratio",
+            self._hysteresis_ratio,
+        )
+        self._channel_states: list[ChannelDetectionState] = []
+        self._sync_channel_states(self.input_channels)
 
         self.snapshotter = AlarmSnapshotter(
             config.get("storage", {}).get("alerts_dir", "/data/alerts"),
@@ -292,6 +304,9 @@ class DetectionEngine:
         self._thread: threading.Thread | None = None
         self._recorder_ref = None
         self._last_inference: dict | None = None
+        self._last_channel_results: list[dict] = []
+        self._last_channel_mels: dict[int, np.ndarray] = {}
+        self._last_mel_timestamp = 0.0
         self._last_inference_time = 0.0
         self._total_inferences = 0
         self._yes_count = 0
@@ -312,6 +327,38 @@ class DetectionEngine:
         self._score_history_max = 200
         self._color_trace: list[dict] = []
         self._color_trace_max = 200
+
+    def _new_channel_state(self) -> ChannelDetectionState:
+        return ChannelDetectionState(
+            hysteresis=HysteresisState(
+                threshold=self.threshold_yes,
+                window=self._hysteresis_window,
+                ratio=self._hysteresis_ratio,
+                margin=self._hysteresis_margin,
+            ),
+            color_hysteresis=ColorHysteresisState(
+                enter_red_threshold=self.blue_to_red_threshold,
+                exit_red_threshold=self.red_to_blue_threshold,
+                window=self._color_hysteresis_window,
+                ratio=self._color_hysteresis_ratio,
+            ),
+        )
+
+    def _sync_channel_states(self, channel_count: int) -> None:
+        channel_count = max(1, int(channel_count))
+        while len(self._channel_states) < channel_count:
+            self._channel_states.append(self._new_channel_state())
+        if len(self._channel_states) > channel_count:
+            del self._channel_states[channel_count:]
+        self.input_channels = channel_count
+        self.hysteresis = self._channel_states[0].hysteresis
+        self.color_hysteresis = self._channel_states[0].color_hysteresis
+
+    def _reset_channel_states(self, channel_count: int | None = None) -> None:
+        if channel_count is None:
+            channel_count = len(self._channel_states) or self.input_channels
+        self._channel_states = []
+        self._sync_channel_states(channel_count)
 
     def _profiled_detection_config(self, profile: str | None) -> dict:
         det_cfg = dict(self._base_detection_config)
@@ -356,24 +403,24 @@ class DetectionEngine:
         self.alarm_cooldown_s = det_cfg.get(
             "alarm_cooldown_s", self.alarm_cooldown_s
         )
-        self.hysteresis = HysteresisState(
-            threshold=self.threshold_yes,
-            window=det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
-            ratio=det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
-            margin=det_cfg.get("hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN),
+        self._hysteresis_window = det_cfg.get(
+            "hysteresis_window", DEFAULT_HYSTERESIS_WINDOW
         )
-        self.color_hysteresis = ColorHysteresisState(
-            enter_red_threshold=self.blue_to_red_threshold,
-            exit_red_threshold=self.red_to_blue_threshold,
-            window=det_cfg.get(
-                "color_hysteresis_window",
-                det_cfg.get("hysteresis_window", DEFAULT_HYSTERESIS_WINDOW),
-            ),
-            ratio=det_cfg.get(
-                "color_hysteresis_ratio",
-                det_cfg.get("hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO),
-            ),
+        self._hysteresis_ratio = det_cfg.get(
+            "hysteresis_ratio", DEFAULT_HYSTERESIS_RATIO
         )
+        self._hysteresis_margin = det_cfg.get(
+            "hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN
+        )
+        self._color_hysteresis_window = det_cfg.get(
+            "color_hysteresis_window",
+            self._hysteresis_window,
+        )
+        self._color_hysteresis_ratio = det_cfg.get(
+            "color_hysteresis_ratio",
+            self._hysteresis_ratio,
+        )
+        self._reset_channel_states()
         logger.info("Threshold profile switched to %s", profile)
         return self.status
 
@@ -452,6 +499,7 @@ class DetectionEngine:
         self,
         detection_score: float,
         color_logits: np.ndarray | None,
+        channel_state: ChannelDetectionState | None = None,
     ) -> dict:
         """Classify a detected drone window as BLUE or RED.
 
@@ -491,7 +539,12 @@ class DetectionEngine:
         blue_conf = float(probs[0])
         red_conf = float(probs[1])
         raw_color = "RED" if red_conf >= self.blue_red_threshold else "BLUE"
-        color = self.color_hysteresis.add(red_conf)
+        color_hysteresis = (
+            channel_state.color_hysteresis
+            if channel_state is not None
+            else self.color_hysteresis
+        )
+        color = color_hysteresis.add(red_conf)
 
         result.update(
             {
@@ -537,29 +590,84 @@ class DetectionEngine:
     def _should_trigger_alarm(self, alert_level: str) -> bool:
         return alert_level in {"RED_ALERT", "BLUE_ALERT", "UNKNOWN_ALERT"}
 
+    def _recent_audio_by_channel(self, window_seconds: float) -> tuple[np.ndarray, list[int]]:
+        try:
+            audio = self.ring_buffer.get_last_n_seconds(
+                window_seconds,
+                self.capture_sample_rate,
+                channel=None,
+            )
+        except TypeError:
+            audio = self.ring_buffer.get_last_n_seconds(
+                window_seconds,
+                self.capture_sample_rate,
+            )
+
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim == 1:
+            return audio[:, np.newaxis], [0]
+        if audio.ndim != 2:
+            raise ValueError(f"Expected 1D or 2D ring-buffer audio, got {audio.shape}")
+        if audio.shape[1] == 0:
+            return audio.reshape(audio.shape[0], 0), []
+        return audio, list(range(audio.shape[1]))
+
+    def _select_primary_result(self, results: list[dict]) -> dict | None:
+        if not results:
+            return None
+        priority = {
+            "RED_ALERT": 50,
+            "BLUE_ALERT": 40,
+            "UNKNOWN_ALERT": 30,
+            "DETECTED": 20,
+            "NO": 0,
+        }
+        return max(
+            results,
+            key=lambda r: (
+                priority.get(r.get("alert_level", "NO"), 0),
+                r.get("raw_score", 0.0),
+            ),
+        )
+
     def _inference_cycle(self):
-        """Take latest window from ring buffer, run single inference, determine state."""
+        """Run independent inference on every captured channel."""
         t0 = time.perf_counter()
 
-        # Get exactly one window of audio from the ring buffer
         window_seconds = self.window_samples / self.model_sample_rate
-        audio = self.ring_buffer.get_last_n_seconds(
-            window_seconds,
-            self.capture_sample_rate,
-        )
-        if len(audio) < self.window_samples:
+        audio_by_channel, channel_ids = self._recent_audio_by_channel(window_seconds)
+        if len(audio_by_channel) < self.window_samples:
             logger.debug(
                 "Not enough audio: %d < %d samples",
-                len(audio),
+                len(audio_by_channel),
                 self.window_samples,
             )
             return
+        if not channel_ids:
+            logger.debug("No audio channels available for inference")
+            return
+        self._sync_channel_states(len(channel_ids))
 
-        # Single inference — no sliding windows
         t_pre = time.perf_counter()
-        spec = self.classifier.preprocess(audio, self.capture_sample_rate)
+        channel_specs = []
+        channel_mels: dict[int, np.ndarray] = {}
+        for channel_index in channel_ids:
+            spec = self.classifier.preprocess(
+                audio_by_channel[:, channel_index],
+                self.capture_sample_rate,
+            )
+            channel_specs.append(spec)
+            mel = getattr(self.classifier, "last_mel_db", None)
+            if mel is not None:
+                channel_mels[channel_index] = np.array(
+                    mel,
+                    dtype=np.float32,
+                    copy=True,
+                )
         t_mid = time.perf_counter()
-        logits = self.classifier.predict_logits(spec)
+        logits_by_channel = [
+            self.classifier.predict_logits(spec) for spec in channel_specs
+        ]
         t_post = time.perf_counter()
 
         preprocess_ms = (t_mid - t_pre) * 1000
@@ -570,79 +678,106 @@ class DetectionEngine:
             "preprocess_ms": round(preprocess_ms, 2),
             "inference_ms": round(inference_ms, 2),
             "total_ms": round(total_ms, 2),
-            "n_windows": 1,
+            "n_windows": len(channel_ids),
+            "channels": len(channel_ids),
         }
 
         if self.debug:
             logger.debug(
-                "Inference: pre=%.1fms inf=%.1fms total=%.1fms",
+                "Inference: channels=%d pre=%.1fms inf=%.1fms total=%.1fms",
+                len(channel_ids),
                 preprocess_ms,
                 inference_ms,
                 total_ms,
             )
 
-        # Hysteresis → binary YES/NO
-        det_logit = float(logits[0])
-        color_logits = logits[1:3] if logits.size >= 3 else None
-        prob = 1.0 / (1.0 + np.exp(-np.clip(det_logit, -50, 50)))
-        raw_score = float(prob)
-        alarm = self.hysteresis.add(raw_score)
-        state = "YES" if alarm else "NO"
-        color_result = self._classify_blue_red(raw_score, color_logits)
-        alert_level = self._resolve_alert_level(alarm, color_result)
-        alert_id = f"{int(time.time())}_{self._total_inferences + 1}"
+        cycle_timestamp = time.time()
+        if channel_mels:
+            self._last_channel_mels = channel_mels
+            self._last_mel_timestamp = cycle_timestamp
+        results: list[dict] = []
+        for batch_index, channel_index in enumerate(channel_ids):
+            logits = np.asarray(
+                logits_by_channel[batch_index], dtype=np.float32
+            ).flatten()
+            channel_state = self._channel_states[channel_index]
 
-        result = {
-            "timestamp": time.time(),
-            "alert_id": alert_id,
-            "state": state,
-            "alert_level": alert_level,
-            "yes_confidence": round(self.hysteresis.confidence, 4),
-            "raw_score": round(raw_score, 4),
-            "threshold_yes": self.threshold_yes,
-            "threshold_profile": self.threshold_profile,
-            **color_result,
-        }
+            det_logit = float(logits[0]) if logits.size else 0.0
+            color_logits = logits[1:3] if logits.size >= 3 else None
+            prob = 1.0 / (1.0 + np.exp(-np.clip(det_logit, -50, 50)))
+            raw_score = float(prob)
+            alarm = channel_state.hysteresis.add(raw_score)
+            state = "YES" if alarm else "NO"
+            color_result = self._classify_blue_red(
+                raw_score,
+                color_logits,
+                channel_state=channel_state,
+            )
+            alert_level = self._resolve_alert_level(alarm, color_result)
+            alert_id = (
+                f"{int(cycle_timestamp)}_ch{channel_index}_"
+                f"{self._total_inferences + batch_index + 1}"
+            )
 
-        self._last_inference = result
-        self._total_inferences += 1
+            result = {
+                "timestamp": cycle_timestamp,
+                "alert_id": alert_id,
+                "channel_index": channel_index,
+                "channel_name": f"ch{channel_index}",
+                "state": state,
+                "alert_level": alert_level,
+                "yes_confidence": round(channel_state.hysteresis.confidence, 4),
+                "raw_score": round(raw_score, 4),
+                "threshold_yes": self.threshold_yes,
+                "threshold_profile": self.threshold_profile,
+                **color_result,
+            }
+            channel_state.last_inference = result
+            results.append(result)
 
-        # Record in score history for debug UI
-        self._score_history.append(
-            {
-                "ts": time.time(),
+            score_entry = {
+                "ts": cycle_timestamp,
+                "channel_index": channel_index,
                 "raw": raw_score,
                 "state": state,
                 "red": color_result.get("red_confidence"),
                 "blue": color_result.get("blue_confidence"),
                 "color": color_result.get("drone_color"),
             }
-        )
-        if len(self._score_history) > self._score_history_max:
-            self._score_history.pop(0)
+            channel_state.score_history.append(score_entry)
+            if len(channel_state.score_history) > self._score_history_max:
+                channel_state.score_history.pop(0)
+            self._score_history.append(score_entry)
+            if len(self._score_history) > self._score_history_max:
+                self._score_history.pop(0)
 
-        trace_entry = {
-            "ts": result["timestamp"],
-            "alert_id": alert_id,
-            "state": state,
-            "alert_level": alert_level,
-            "raw_score": result["raw_score"],
-            "yes_confidence": result["yes_confidence"],
-            "det_logit": round(det_logit, 4),
-            "red_confidence": color_result.get("red_confidence"),
-            "blue_confidence": color_result.get("blue_confidence"),
-            "drone_color": color_result.get("drone_color"),
-            "red_logit": color_result.get("red_logit"),
-            "blue_logit": color_result.get("blue_logit"),
-        }
-        self._color_trace.append(trace_entry)
-        if len(self._color_trace) > self._color_trace_max:
-            self._color_trace.pop(0)
+            trace_entry = {
+                "ts": result["timestamp"],
+                "alert_id": alert_id,
+                "channel_index": channel_index,
+                "state": state,
+                "alert_level": alert_level,
+                "raw_score": result["raw_score"],
+                "yes_confidence": result["yes_confidence"],
+                "det_logit": round(det_logit, 4),
+                "red_confidence": color_result.get("red_confidence"),
+                "blue_confidence": color_result.get("blue_confidence"),
+                "drone_color": color_result.get("drone_color"),
+                "red_logit": color_result.get("red_logit"),
+                "blue_logit": color_result.get("blue_logit"),
+            }
+            channel_state.color_trace.append(trace_entry)
+            if len(channel_state.color_trace) > self._color_trace_max:
+                channel_state.color_trace.pop(0)
+            self._color_trace.append(trace_entry)
+            if len(self._color_trace) > self._color_trace_max:
+                self._color_trace.pop(0)
 
         # Rolling timing stats (log summary every N inferences)
         self._timing_window.append(total_ms)
         if len(self._timing_window) > 128:
             self._timing_window.pop(0)
+        self._total_inferences += len(results)
         if self._total_inferences % self._timing_log_interval == 0:
             import statistics
 
@@ -659,50 +794,95 @@ class DetectionEngine:
                 p99,
             )
 
-        if state == "YES":
+        self._last_channel_results = results
+        all_channel_results = [
+            {
+                "channel_index": r.get("channel_index"),
+                "channel_name": r.get("channel_name"),
+                "state": r.get("state"),
+                "alert_level": r.get("alert_level"),
+                "yes_confidence": r.get("yes_confidence"),
+                "raw_score": r.get("raw_score"),
+                "drone_color": r.get("drone_color"),
+                "red_confidence": r.get("red_confidence"),
+                "blue_confidence": r.get("blue_confidence"),
+            }
+            for r in results
+        ]
+        for result in results:
+            result["firing_channel_index"] = result["channel_index"]
+            result["firing_channel_name"] = result["channel_name"]
+            result["all_channel_results"] = all_channel_results
+
+        primary = self._select_primary_result(results)
+        if primary is not None:
+            primary_with_channels = dict(primary)
+            primary_with_channels["channels"] = results
+            primary_with_channels["channel_count"] = len(results)
+            self._last_inference = primary_with_channels
+
+        for result in results:
+            channel_state = self._channel_states[result["channel_index"]]
+            raw_score = float(result["raw_score"])
+            if result["state"] != "YES":
+                logger.debug(
+                    "NO ch%d: conf=%.2f (raw=%.2f)",
+                    result["channel_index"],
+                    result["yes_confidence"],
+                    raw_score,
+                )
+                continue
+
             self._yes_count += 1
-            if color_result.get("drone_color") == "RED":
+            if result.get("drone_color") == "RED":
                 self._red_count += 1
-            elif color_result.get("drone_color") == "BLUE":
+            elif result.get("drone_color") == "BLUE":
                 self._blue_count += 1
             now = time.time()
             in_cooldown = (
                 self.alarm_cooldown_s > 0
-                and (now - self._last_alarm_time) < self.alarm_cooldown_s
+                and (now - channel_state.last_alarm_time) < self.alarm_cooldown_s
             )
-            should_trigger_alarm = self._should_trigger_alarm(alert_level)
+            should_trigger_alarm = self._should_trigger_alarm(result["alert_level"])
             if in_cooldown:
                 logger.info(
-                    "%s suppressed (cooldown: %.1fs remaining): "
+                    "%s ch%d suppressed (cooldown: %.1fs remaining): "
                     "conf=%.2f (raw=%.2f, color=%s, red=%s)",
-                    alert_level,
-                    self.alarm_cooldown_s - (now - self._last_alarm_time),
-                    self.hysteresis.confidence,
+                    result["alert_level"],
+                    result["channel_index"],
+                    self.alarm_cooldown_s - (now - channel_state.last_alarm_time),
+                    result["yes_confidence"],
                     raw_score,
-                    color_result.get("drone_color"),
-                    color_result.get("red_confidence"),
+                    result.get("drone_color"),
+                    result.get("red_confidence"),
                 )
             elif not should_trigger_alarm:
                 logger.info(
-                    "%s observed without GPIO alert: conf=%.2f (raw=%.2f, color=%s, red=%s)",
-                    alert_level,
-                    self.hysteresis.confidence,
+                    "%s ch%d observed without GPIO alert: "
+                    "conf=%.2f (raw=%.2f, color=%s, red=%s)",
+                    result["alert_level"],
+                    result["channel_index"],
+                    result["yes_confidence"],
                     raw_score,
-                    color_result.get("drone_color"),
-                    color_result.get("red_confidence"),
+                    result.get("drone_color"),
+                    result.get("red_confidence"),
                 )
             else:
-                self._last_alarm_time = now
+                channel_state.last_alarm_time = now
+                self._last_alarm_time = max(
+                    state.last_alarm_time for state in self._channel_states
+                )
                 logger.warning(
-                    "%s: conf=%.2f (raw=%.2f, color=%s, red=%s)",
-                    alert_level,
-                    self.hysteresis.confidence,
+                    "%s ch%d: conf=%.2f (raw=%.2f, color=%s, red=%s)",
+                    result["alert_level"],
+                    result["channel_index"],
+                    result["yes_confidence"],
                     raw_score,
-                    color_result.get("drone_color"),
-                    color_result.get("red_confidence"),
+                    result.get("drone_color"),
+                    result.get("red_confidence"),
                 )
                 if self.save_color_trace:
-                    result["color_trace"] = self._color_trace[-60:]
+                    result["color_trace"] = channel_state.color_trace[-60:]
                 self.alert_history.append(result)
                 threading.Thread(
                     target=self._save_snapshot_and_alert,
@@ -711,13 +891,6 @@ class DetectionEngine:
                 ).start()
                 if self.on_alarm:
                     self.on_alarm(result)
-
-        else:
-            logger.debug(
-                "NO: conf=%.2f (raw=%.2f)",
-                self.hysteresis.confidence,
-                raw_score,
-            )
 
     def _save_snapshot_and_alert(self, detection: dict):
         self.snapshotter.save_snapshot(
@@ -731,16 +904,47 @@ class DetectionEngine:
     @property
     def status(self) -> dict:
         last = self._last_inference or {}
+        channel_status = [
+            {
+                "channel_index": idx,
+                "state": (state.last_inference or {}).get("state", "NO"),
+                "alert_level": (state.last_inference or {}).get("alert_level", "NO"),
+                "yes_confidence": (state.last_inference or {}).get(
+                    "yes_confidence", 0.0
+                ),
+                "raw_score": (state.last_inference or {}).get("raw_score", 0.0),
+                "drone_color": (state.last_inference or {}).get(
+                    "drone_color", "UNKNOWN"
+                ),
+                "red_confidence": (state.last_inference or {}).get(
+                    "red_confidence"
+                ),
+                "blue_confidence": (state.last_inference or {}).get(
+                    "blue_confidence"
+                ),
+                "in_cooldown": (
+                    self.alarm_cooldown_s > 0
+                    and (time.time() - state.last_alarm_time)
+                    < self.alarm_cooldown_s
+                ),
+            }
+            for idx, state in enumerate(self._channel_states)
+        ]
         return {
             "model_path": self.model_path,
             "model_type": self.model_type,
             "labels": self.labels,
+            "input_channels": self.input_channels,
             "threshold_yes": self.threshold_yes,
             "threshold_blue": self.threshold_blue,
             "inference_interval": self.inference_interval,
             "window_samples": self.window_samples,
             "stride": self.stride,
             "model_sample_rate": self.model_sample_rate,
+            "n_mels": self.n_mels,
+            "n_fft": self.n_fft,
+            "win_length": self.win_length,
+            "hop_length": self.hop_length,
             "threshold_profile": self.threshold_profile,
             "threshold_profiles": sorted(self.threshold_profiles.keys()),
             "blue_red_model_loaded": bool(
@@ -755,6 +959,7 @@ class DetectionEngine:
             "red_to_blue_threshold": self.red_to_blue_threshold,
             "color_hysteresis_state": self.color_hysteresis.state,
             "color_hysteresis_confidence": self.color_hysteresis.confidence,
+            "channels": channel_status,
             "alert_on_red": self.alert_on_red,
             "alert_on_blue": self.alert_on_blue,
             "alert_on_unknown": self.alert_on_unknown,
@@ -800,6 +1005,22 @@ class DetectionEngine:
     @property
     def last_inference(self) -> dict | None:
         return self._last_inference
+
+    @property
+    def latest_mels(self) -> dict:
+        return {
+            "timestamp": self._last_mel_timestamp,
+            "sample_rate": self.model_sample_rate,
+            "n_mels": self.n_mels,
+            "hop_length": self.hop_length,
+            "channels": [
+                {
+                    "channel_index": channel_index,
+                    "mel": np.array(mel, dtype=np.float32, copy=True),
+                }
+                for channel_index, mel in sorted(self._last_channel_mels.items())
+            ],
+        }
 
     @property
     def smoothed_predictions(self) -> dict:

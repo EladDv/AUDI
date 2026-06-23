@@ -58,7 +58,7 @@ scripts/deploy-pi.sh <pi-ip> <username> '<password>'
 | **Recorder** | `src/recorder.py` | Captures audio via `arecord` (ALSA) in 5-minute WAV segments. Maintains an **in-memory ring buffer** of the last 120 seconds of float32 PCM samples (60s pre-alarm + 60s post-alarm). Supports pause/resume and stop/start toggling. |
 | **Storage** | `src/storage.py` | Compresses old WAVs to FLAC (~6:1 ratio). Enforces a **32GB storage cap** — oldest files are evicted first when over budget or disk space runs low. |
 | **Detector** | `src/detector.py` | FP32 TFLite classifier with Schmitt-trigger YES/NO hysteresis (5 of 8 full-window votes), RED/BLUE typing, alert snapshot saving, and temporal confidence tracking. |
-| **GPIO** | `src/gpio_alarm.py` | Drives Pi GPIO pins: ALERT (buzzer/relay), STROBE (blinking LED), RESET (physical button to silence), REC_LED (recording indicator), REC_BTN (record toggle), PAUSE_BTN (pause 5 min). Graceful mock fallback when not on Pi hardware. |
+| **GPIO** | `src/gpio_alarm.py` | Drives Pi GPIO pins: ALERT (buzzer/relay), STROBE (blinking LED), RESET (physical button to silence), PAUSE_BTN (pause 5 min), and green/yellow/red field-tag buttons for detection review. Graceful mock fallback when not on Pi hardware. |
 | **Web UI** | `src/webui_server.py` | Flask server serving a **touch-optimized HTML UI**. Big Start/Stop buttons (green/red, mutual exclusive), Silence and Pause controls, live VU meter, YES/NO state card with RED/BLUE typing, alert history, system info panel. |
 | **Main** | `src/main.py` | Orchestrator — starts everything, wires callbacks, handles graceful shutdown on SIGTERM/SIGINT. |
 
@@ -96,12 +96,15 @@ detection:
 
 gpio:
   enabled: true
-  alert_pin: 22            # Buzzer/relay
+  alert_pin: 2             # Buzzer/relay
   strobe_pin: 24           # Visual indicator
   reset_pin: 23            # Reset button
-  record_led_pin: 27       # Recording indicator
-  record_button_pin: 17    # Record toggle
+  record_led_pin: null     # Disabled by default; GPIO 27 is field-tag yellow
+  record_button_pin: null  # Disabled by default; GPIO 17 is field-tag red
   pause_button_pin: 18     # Pause 5 min
+  field_tag_green_pin: 22  # Active-low button to GND; correct detection and classification
+  field_tag_yellow_pin: 27 # Active-low button to GND; correct detection, incorrect classification
+  field_tag_red_pin: 17    # Active-low button to GND; incorrect detection
 
 web:
   host: 0.0.0.0
@@ -210,13 +213,17 @@ The web UI will be at http://localhost:8080.
 
 | GPIO (BCM) | Physical Pin | Purpose |
 |------------|-------------|---------|
-| 22         | 15          | Alert output (buzzer/relay) |
+| 2          | 3           | Alert output (buzzer/relay) |
 | 24         | 18          | Strobe/LED output |
 | 23         | 16          | Reset button input (pull-up) |
-| 27         | 13          | Recording indicator LED |
-| 17         | 11          | Record toggle button (pull-up) |
 | 18         | 12          | Pause 5 min button (pull-up) |
+| 22         | 15          | Green field tag: correct detection and classification |
+| 27         | 13          | Yellow field tag: correct detection, incorrect classification |
+| 17         | 11          | Red field tag: incorrect detection |
 | GND        | 6, 9, 14, 20, 25, 30, 34, 39 | Ground |
+
+Field-tag buttons are active-low inputs. Wire each button between its GPIO pin
+and ground; the Pi internal pull-up holds the button input high until pressed.
 
 ## License
 

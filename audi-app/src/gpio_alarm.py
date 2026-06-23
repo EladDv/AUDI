@@ -8,6 +8,7 @@ Controls Raspberry Pi GPIO pins for:
   - REC_LED: Recording indicator (on while capturing)
   - REC_BTN: Toggle recording on/off
   - PAUSE_BTN: Pause recording for 5 minutes
+  - FIELD_TAG: Green/yellow/red operator labels for field detections
 
 Auto-detects Pi hardware vs dev machine (mock fallback).
 """
@@ -16,11 +17,20 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 
 logger = logging.getLogger("audi.gpio")
 
 # ---------------------------------------------------------------------------
+
+
+def _optional_pin(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+        return None
+    return int(value)
 
 
 class GPIOController:
@@ -31,14 +41,19 @@ class GPIOController:
         self.enabled = gpio_cfg.get("enabled", True)
 
         # Alarm pins
-        self.alert_pin = gpio_cfg.get("alert_pin", 22)
-        self.strobe_pin = gpio_cfg.get("strobe_pin", 24)
-        self.reset_pin = gpio_cfg.get("reset_pin", 23)
+        self.alert_pin = _optional_pin(gpio_cfg.get("alert_pin", 2))
+        self.strobe_pin = _optional_pin(gpio_cfg.get("strobe_pin", 24))
+        self.reset_pin = _optional_pin(gpio_cfg.get("reset_pin", 23))
 
         # Recording pins
-        self.record_led_pin = gpio_cfg.get("record_led_pin", 27)
-        self.record_button_pin = gpio_cfg.get("record_button_pin", 17)
-        self.pause_button_pin = gpio_cfg.get("pause_button_pin", 18)
+        self.record_led_pin = _optional_pin(gpio_cfg.get("record_led_pin"))
+        self.record_button_pin = _optional_pin(gpio_cfg.get("record_button_pin"))
+        self.pause_button_pin = _optional_pin(gpio_cfg.get("pause_button_pin", 18))
+        self.field_tag_button_pins = {
+            "green": _optional_pin(gpio_cfg.get("field_tag_green_pin", 22)),
+            "yellow": _optional_pin(gpio_cfg.get("field_tag_yellow_pin", 27)),
+            "red": _optional_pin(gpio_cfg.get("field_tag_red_pin", 17)),
+        }
 
         self.alert_duration_ms = gpio_cfg.get("alert_duration_ms", 5000)
         self.pulse_interval_ms = gpio_cfg.get("pulse_interval_ms", 500)
@@ -60,6 +75,7 @@ class GPIOController:
         # Callbacks (set by main.py)
         self.on_record_toggle: Callable[[], None] | None = None
         self.on_pause_5m: Callable[[], None] | None = None
+        self.on_field_tag: Callable[[str], None] | None = None
 
         self._has_gpio = False
         self._gpio = None
@@ -72,6 +88,7 @@ class GPIOController:
         self._strobe_thread: threading.Thread | None = None
         self._buzzer_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._button_events = deque(maxlen=30)
 
         self._init_gpio()
 
@@ -87,49 +104,74 @@ class GPIOController:
             GPIO.setwarnings(False)
 
             # Outputs
-            for pin in [self.alert_pin, self.strobe_pin, self.record_led_pin]:
+            for pin in [
+                self.alert_pin,
+                self.strobe_pin,
+                self.record_led_pin,
+            ]:
+                if pin is None:
+                    continue
                 logger.info("GPIO setup OUTPUT pin %d (initial LOW)", pin)
                 GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
 
-            # Inputs with pull-up
+            # Active-low button inputs: internal pull-up holds the pin HIGH;
+            # pressing the button connects the pin to GND and triggers FALLING.
             for pin in [
                 self.reset_pin,
                 self.record_button_pin,
                 self.pause_button_pin,
+                *self.field_tag_button_pins.values(),
             ]:
+                if pin is None:
+                    continue
                 logger.info("GPIO setup INPUT pin %d (pull-up)", pin)
                 GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
             # Interrupts
-            GPIO.add_event_detect(
-                self.reset_pin,
-                GPIO.FALLING,
-                callback=self._on_reset_pressed,
-                bouncetime=300,
-            )
-            GPIO.add_event_detect(
-                self.record_button_pin,
-                GPIO.FALLING,
-                callback=self._on_record_button,
-                bouncetime=500,
-            )
-            GPIO.add_event_detect(
-                self.pause_button_pin,
-                GPIO.FALLING,
-                callback=self._on_pause_button,
-                bouncetime=500,
-            )
+            if self.reset_pin is not None:
+                GPIO.add_event_detect(
+                    self.reset_pin,
+                    GPIO.FALLING,
+                    callback=self._on_reset_pressed,
+                    bouncetime=300,
+                )
+            if self.record_button_pin is not None:
+                GPIO.add_event_detect(
+                    self.record_button_pin,
+                    GPIO.FALLING,
+                    callback=self._on_record_button,
+                    bouncetime=500,
+                )
+            if self.pause_button_pin is not None:
+                GPIO.add_event_detect(
+                    self.pause_button_pin,
+                    GPIO.FALLING,
+                    callback=self._on_pause_button,
+                    bouncetime=500,
+                )
+            for tag, pin in self.field_tag_button_pins.items():
+                if pin is None:
+                    continue
+                GPIO.add_event_detect(
+                    pin,
+                    GPIO.FALLING,
+                    callback=lambda channel, tag=tag: self._on_field_tag_button(
+                        tag, channel
+                    ),
+                    bouncetime=500,
+                )
 
             self._has_gpio = True
             logger.info(
-                "GPIO initialized: ALERT=%d STROBE=%d RESET=%d "
-                "REC_LED=%d REC_BTN=%d PAUSE_BTN=%d",
+                "GPIO initialized: ALERT=%s STROBE=%s RESET=%s "
+                "REC_LED=%s REC_BTN=%s PAUSE_BTN=%s FIELD_TAGS=%s",
                 self.alert_pin,
                 self.strobe_pin,
                 self.reset_pin,
                 self.record_led_pin,
                 self.record_button_pin,
                 self.pause_button_pin,
+                self.field_tag_button_pins,
             )
         except Exception as e:
             logger.error("GPIO init FAILED: %s", e)
@@ -168,7 +210,7 @@ class GPIOController:
             )
 
         logger.warning(
-            "GPIO %s TRIGGERED (pin %d)", self._active_alert_level, self.alert_pin
+            "GPIO %s TRIGGERED (pin %s)", self._active_alert_level, self.alert_pin
         )
         self._start_buzzer()
         # self._start_strobe()
@@ -203,17 +245,35 @@ class GPIOController:
 
     def _on_reset_pressed(self, channel):
         logger.info("Reset button pressed (GPIO %d)", channel)
+        self._record_button_event("reset", channel)
         self.clear_alarm()
 
     def _on_record_button(self, channel):
         logger.info("Record button pressed (GPIO %d)", channel)
+        self._record_button_event("record", channel)
         if self.on_record_toggle:
             self.on_record_toggle()
 
     def _on_pause_button(self, channel):
         logger.info("Pause button pressed (GPIO %d)", channel)
+        self._record_button_event("pause", channel)
         if self.on_pause_5m:
             self.on_pause_5m()
+
+    def _on_field_tag_button(self, tag: str, channel):
+        logger.info("Field tag %s button pressed (GPIO %d)", tag, channel)
+        self._record_button_event(tag, channel)
+        if self.on_field_tag:
+            self.on_field_tag(tag)
+
+    def _record_button_event(self, name: str, channel: int):
+        self._button_events.append(
+            {
+                "name": name,
+                "gpio": int(channel),
+                "timestamp": time.time(),
+            }
+        )
 
     # ------------------------------------------------------------------
     # Strobe
@@ -279,6 +339,8 @@ class GPIOController:
     # ------------------------------------------------------------------
 
     def _write_pin(self, pin: int, state: bool):
+        if pin is None:
+            return
         if self._has_gpio and self._gpio:
             try:
                 value = self._gpio.HIGH if state else self._gpio.LOW
@@ -310,6 +372,8 @@ class GPIOController:
             "record_led_pin": self.record_led_pin,
             "record_button_pin": self.record_button_pin,
             "pause_button_pin": self.pause_button_pin,
+            "field_tag_button_pins": self.field_tag_button_pins,
+            "button_events": list(self._button_events),
             "active_alert_level": self._active_alert_level,
         }
 

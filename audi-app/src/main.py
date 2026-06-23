@@ -149,12 +149,15 @@ def load_config(config_path: str = None) -> dict:
         },
         "gpio": {
             "enabled": True,
-            "alert_pin": 22,
+            "alert_pin": 2,
             "strobe_pin": 24,
             "reset_pin": 23,
-            "record_led_pin": 27,
-            "record_button_pin": 17,
+            "record_led_pin": None,
+            "record_button_pin": None,
             "pause_button_pin": 18,
+            "field_tag_green_pin": 22,
+            "field_tag_yellow_pin": 27,
+            "field_tag_red_pin": 17,
             "alert_duration_ms": 5000,
             "pulse_interval_ms": 500,
             "red_buzzer_on_ms": 120,
@@ -297,6 +300,7 @@ class AudioGuardApp:
         # 5. Wire GPIO button callbacks
         self.gpio.on_record_toggle = self._on_record_toggle
         self.gpio.on_pause_5m = self._on_pause_5m
+        self.gpio.on_field_tag = self._on_field_tag
         # Turn on record LED immediately
         self.gpio.set_record_led(True)
 
@@ -396,6 +400,27 @@ class AudioGuardApp:
         # Update LED
         if self.gpio:
             self.gpio.set_record_led(not r.is_paused and not r.is_force_stopped)
+
+    def _on_field_tag(self, tag: str):
+        """Attach a field-button assessment to the most recent detection."""
+        if not self.detector:
+            self.logger.warning(
+                "Field tag %s ignored: detector history is not available", tag
+            )
+            return
+        try:
+            updated = self.detector.alert_history.tag_latest(tag)
+        except ValueError as e:
+            self.logger.warning("Field tag %s rejected: %s", tag, e)
+            return
+        if updated is None:
+            self.logger.warning("Field tag %s ignored: no detection history yet", tag)
+            return
+        self.logger.info(
+            "Field tag %s applied to alert %s",
+            tag,
+            updated.get("alert_id", "<unknown>"),
+        )
 
     def _start_led_heartbeat(self):
         """Background thread that keeps the record LED in sync with recorder state."""

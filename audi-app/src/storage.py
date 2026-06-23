@@ -22,6 +22,11 @@ from pathlib import Path
 import numpy as np
 
 logger = logging.getLogger("audi.storage")
+FIELD_TAGS = {
+    "green": "correct_detection_correct_classification",
+    "yellow": "correct_detection_incorrect_classification",
+    "red": "incorrect_detection",
+}
 
 # ---------------------------------------------------------------------------
 # FLAC compression via flac CLI
@@ -94,24 +99,49 @@ class AlarmSnapshotter:
         state = detection.get("state", "YES")
         yes_conf = detection.get("yes_confidence", 0.0)
 
-        event_dir = self.alerts_dir / f"yes_{ts}"
+        alert_id = str(detection.get("alert_id") or ts)
+        safe_alert_id = "".join(
+            c if c.isalnum() or c in {"-", "_"} else "_" for c in alert_id
+        )
+        event_dir = self.alerts_dir / f"yes_{safe_alert_id}"
         event_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            pre_samples = ring_buffer.get_last_n_seconds(60, self.sample_rate)
-            pre_path = event_dir / "pre_60s.wav"
+            channel = int(detection.get("channel_index", 0) or 0)
+            channel_name = str(detection.get("channel_name") or f"ch{channel}")
+            safe_channel_name = "".join(
+                c if c.isalnum() or c in {"-", "_"} else "_" for c in channel_name
+            )
+            pre_samples = self._get_channel_samples(
+                ring_buffer, 60, channel=channel
+            )
+            pre_all_samples = self._get_all_channel_samples(ring_buffer, 60)
+            pre_path = event_dir / f"pre_60s_{safe_channel_name}.wav"
             self._samples_to_wav(pre_samples, str(pre_path))
             pre_size = pre_path.stat().st_size
+            pre_all_path = event_dir / "pre_60s_all_channels.wav"
+            self._samples_to_wav(pre_all_samples, str(pre_all_path))
+            pre_all_size = pre_all_path.stat().st_size
 
-            post_path = event_dir / "post_60s.wav"
+            post_path = event_dir / f"post_60s_{safe_channel_name}.wav"
             self._stop_event.wait(60)
-            post_samples = ring_buffer.get_last_n_seconds(60, self.sample_rate)
+            post_samples = self._get_channel_samples(
+                ring_buffer, 60, channel=channel
+            )
+            post_all_samples = self._get_all_channel_samples(ring_buffer, 60)
             self._samples_to_wav(post_samples, str(post_path))
             post_size = post_path.stat().st_size
+            post_all_path = event_dir / "post_60s_all_channels.wav"
+            self._samples_to_wav(post_all_samples, str(post_all_path))
+            post_all_size = post_all_path.stat().st_size
             combined = np.concatenate([pre_samples, post_samples])
-            combined_path = event_dir / "full_120s.wav"
+            combined_path = event_dir / f"full_120s_{safe_channel_name}.wav"
             self._samples_to_wav(combined, str(combined_path))
             combined_size = combined_path.stat().st_size
+            combined_all = np.concatenate([pre_all_samples, post_all_samples], axis=0)
+            combined_all_path = event_dir / "full_120s_all_channels.wav"
+            self._samples_to_wav(combined_all, str(combined_all_path))
+            combined_all_size = combined_all_path.stat().st_size
 
             meta = {
                 "timestamp": ts,
@@ -124,16 +154,34 @@ class AlarmSnapshotter:
                 "drone_color": detection.get("drone_color"),
                 "red_confidence": detection.get("red_confidence"),
                 "blue_confidence": detection.get("blue_confidence"),
+                "channel_index": channel,
+                "channel_name": channel_name,
+                "firing_channel_index": detection.get(
+                    "firing_channel_index",
+                    channel,
+                ),
+                "firing_channel_name": detection.get(
+                    "firing_channel_name",
+                    channel_name,
+                ),
+                "channel_count": self._channel_count(pre_all_samples),
+                "all_channel_results": detection.get("all_channel_results"),
                 "color_trace": detection.get("color_trace"),
                 "files": {
                     "pre_60s": str(pre_path),
                     "post_60s": str(post_path),
                     "full_120s": str(combined_path),
+                    "pre_60s_all_channels": str(pre_all_path),
+                    "post_60s_all_channels": str(post_all_path),
+                    "full_120s_all_channels": str(combined_all_path),
                 },
                 "sizes_bytes": {
                     "pre_60s": pre_size,
                     "post_60s": post_size,
                     "full_120s": combined_size,
+                    "pre_60s_all_channels": pre_all_size,
+                    "post_60s_all_channels": post_all_size,
+                    "full_120s_all_channels": combined_all_size,
                 },
                 "sample_rate": self.sample_rate,
             }
@@ -152,12 +200,53 @@ class AlarmSnapshotter:
             logger.error("Failed to save alarm snapshot: %s", e)
             return None
 
+    def _get_all_channel_samples(self, ring_buffer, n_seconds: float) -> np.ndarray:
+        try:
+            samples = ring_buffer.get_last_n_seconds(
+                n_seconds,
+                self.sample_rate,
+                channel=None,
+            )
+        except TypeError:
+            samples = ring_buffer.get_last_n_seconds(n_seconds, self.sample_rate)
+        return np.asarray(samples, dtype=np.float32)
+
+    def _get_channel_samples(
+        self, ring_buffer, n_seconds: float, *, channel: int
+    ) -> np.ndarray:
+        try:
+            samples = ring_buffer.get_last_n_seconds(
+                n_seconds,
+                self.sample_rate,
+                channel=channel,
+            )
+        except TypeError:
+            samples = ring_buffer.get_last_n_seconds(n_seconds, self.sample_rate)
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.ndim == 2:
+            channel = min(max(0, int(channel)), samples.shape[1] - 1)
+            samples = samples[:, channel]
+        return samples
+
+    @staticmethod
+    def _channel_count(samples: np.ndarray) -> int:
+        samples = np.asarray(samples)
+        if samples.ndim == 2:
+            return int(samples.shape[1])
+        return 1
+
     def _samples_to_wav(self, samples: np.ndarray, filepath: str):
         import wave
 
         pcm = np.clip(samples * 32768.0, -32768, 32767).astype(np.int16)
+        if pcm.ndim == 1:
+            channels = 1
+        elif pcm.ndim == 2:
+            channels = pcm.shape[1]
+        else:
+            raise ValueError(f"Expected 1D or 2D samples, got {pcm.shape}")
         with wave.open(filepath, "wb") as wf:
-            wf.setnchannels(1)
+            wf.setnchannels(channels)
             wf.setsampwidth(2)
             wf.setframerate(self.sample_rate)
             wf.writeframes(pcm.tobytes())
@@ -178,7 +267,13 @@ class AlertHistory:
 
     def label_alert(self, alert_id: str, label: str) -> dict | None:
         """Persist an operator label onto an existing alert history entry."""
-        allowed = {"no_drone", "drone_red", "drone_blue", "unclear"}
+        allowed = {
+            "no_drone",
+            "drone_red",
+            "drone_blue",
+            "unclear",
+            *FIELD_TAGS.values(),
+        }
         if label not in allowed:
             raise ValueError(f"Unsupported label: {label}")
 
@@ -193,6 +288,27 @@ class AlertHistory:
                     break
             if updated is None:
                 return None
+            with open(self.filepath, "w") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry, default=str) + "\n")
+            return updated
+
+    def tag_latest(self, tag: str) -> dict | None:
+        """Persist a field-button assessment onto the most recent alert."""
+        normalized_tag = str(tag).strip().lower()
+        if normalized_tag not in FIELD_TAGS:
+            raise ValueError(f"Unsupported field tag: {tag}")
+
+        with self._lock:
+            entries = self._read_all_unlocked()
+            if not entries:
+                return None
+            updated = entries[-1]
+            updated["field_tag_color"] = normalized_tag
+            updated["field_tag"] = FIELD_TAGS[normalized_tag]
+            updated["field_tagged_at"] = time.time()
+            updated["operator_label"] = FIELD_TAGS[normalized_tag]
+            updated["operator_labeled_at"] = updated["field_tagged_at"]
             with open(self.filepath, "w") as f:
                 for entry in entries:
                     f.write(json.dumps(entry, default=str) + "\n")

@@ -12,6 +12,7 @@ import os
 import threading
 from pathlib import Path
 
+import numpy as np
 from flask import Flask, jsonify, request, send_file
 
 logger = logging.getLogger("audi.webui")
@@ -139,6 +140,24 @@ class WebUI:
         self._app = Flask(__name__)
         self._register_routes()
         self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _compact_mel(mel: np.ndarray, max_columns: int) -> np.ndarray:
+        mel = np.asarray(mel, dtype=np.float32)
+        if mel.ndim != 2:
+            raise ValueError(f"Expected 2D mel array, got {mel.shape}")
+        if mel.shape[1] > max_columns:
+            edges = np.linspace(0, mel.shape[1], max_columns + 1).astype(int)
+            mel = np.stack(
+                [
+                    mel[:, edges[i] : max(edges[i] + 1, edges[i + 1])].mean(
+                        axis=1
+                    )
+                    for i in range(max_columns)
+                ],
+                axis=1,
+            )
+        return mel
 
     def start(self):
         self._thread = threading.Thread(
@@ -278,6 +297,126 @@ class WebUI:
                 }
             )
 
+        @app.route("/api/mels")
+        def api_mels():
+            """Return compact recent mel frames for up to four captured channels."""
+            if not self.recorder:
+                return jsonify({"channels": [], "error": "Recorder not available"}), 503
+            try:
+                seconds = min(
+                    120.0,
+                    max(1.0, float(request.args.get("seconds", "8"))),
+                )
+                max_columns = min(
+                    80,
+                    max(2, int(request.args.get("columns", "24"))),
+                )
+                r = self.recorder.recorder
+                det_cfg = self.detector.status if self.detector else {}
+                n_mels = int(getattr(self.detector, "n_mels", det_cfg.get("n_mels", 128)))
+                n_fft = int(getattr(self.detector, "n_fft", det_cfg.get("n_fft", 1024)))
+                win_length = int(det_cfg.get("win_length", n_fft))
+                win_length = int(getattr(self.detector, "win_length", win_length))
+                hop_length = int(
+                    getattr(self.detector, "hop_length", det_cfg.get("hop_length", 160))
+                )
+                model_sr = int(
+                    getattr(
+                        self.detector,
+                        "model_sample_rate",
+                        det_cfg.get("model_sample_rate", r.sample_rate),
+                    )
+                )
+
+                cached = (
+                    getattr(self.detector, "latest_mels", None)
+                    if self.detector
+                    else None
+                )
+                if cached and cached.get("channels"):
+                    channels = []
+                    for ch in cached["channels"][:4]:
+                        mel = self._compact_mel(ch["mel"], max_columns)
+                        channels.append(
+                            {
+                                "channel_index": int(ch["channel_index"]),
+                                "frames": int(mel.shape[1]),
+                                "n_mels": int(mel.shape[0]),
+                                "min_db": round(float(np.min(mel)), 2),
+                                "max_db": round(float(np.max(mel)), 2),
+                                "mel": np.round(mel, 1).tolist(),
+                            }
+                        )
+                    return jsonify(
+                        {
+                            "timestamp": cached.get("timestamp"),
+                            "seconds": seconds,
+                            "sample_rate": r.sample_rate,
+                            "model_sample_rate": cached.get(
+                                "sample_rate",
+                                model_sr,
+                            ),
+                            "channels_available": len(cached["channels"]),
+                            "source": "detector_cache",
+                            "channels": channels,
+                        }
+                    )
+
+                from audio_features import compute_mel_spectrogram, resample_audio
+
+                try:
+                    audio = r.ring_buffer.get_last_n_seconds(
+                        seconds,
+                        r.sample_rate,
+                        channel=None,
+                    )
+                except TypeError:
+                    audio = r.ring_buffer.get_last_n_seconds(seconds, r.sample_rate)
+                audio = np.asarray(audio, dtype=np.float32)
+                if audio.ndim == 1:
+                    audio = audio[:, np.newaxis]
+
+                channels = []
+                for channel_index in range(min(4, audio.shape[1])):
+                    samples = audio[:, channel_index]
+                    if samples.size == 0:
+                        continue
+                    if r.sample_rate != model_sr:
+                        samples = resample_audio(samples, r.sample_rate, model_sr)
+                    mel = compute_mel_spectrogram(
+                        samples,
+                        model_sr,
+                        n_mels=n_mels,
+                        n_fft=n_fft,
+                        win_length=win_length,
+                        hop_length=hop_length,
+                    )
+                    mel = self._compact_mel(mel, max_columns)
+                    channels.append(
+                        {
+                            "channel_index": channel_index,
+                            "frames": int(mel.shape[1]),
+                            "n_mels": int(mel.shape[0]),
+                            "min_db": round(float(np.min(mel)), 2),
+                            "max_db": round(float(np.max(mel)), 2),
+                            "mel": np.round(mel, 1).tolist(),
+                        }
+                    )
+                return jsonify(
+                    {
+                        "timestamp": __import__("time").time(),
+                        "seconds": seconds,
+                        "sample_rate": r.sample_rate,
+                        "model_sample_rate": model_sr,
+                        "channels_available": int(audio.shape[1]),
+                        "source": "ring_buffer_fallback",
+                        "channels": channels,
+                    }
+                )
+            except Exception as e:
+                logger.error("Mel snapshot failed: %s", e)
+                return jsonify({"channels": [], "error": str(e)}), 500
+
         @app.route("/api/alert_history_persistent")
         def api_alert_history_persistent():
             """Return persistent alert history from JSON file."""
@@ -348,9 +487,14 @@ class WebUI:
                 "UNKNOWN_ALERT": ("UNKNOWN", None, None),
             }
             drone_color, red_confidence, blue_confidence = color_by_level[alert_level]
+            channel_index = int(payload.get("channel_index", 0) or 0)
             result = {
                 "timestamp": time.time(),
                 "alert_id": f"test_{int(time.time())}",
+                "channel_index": channel_index,
+                "channel_name": f"ch{channel_index}",
+                "firing_channel_index": channel_index,
+                "firing_channel_name": f"ch{channel_index}",
                 "state": "YES",
                 "alert_level": alert_level,
                 "yes_confidence": 0.95,
@@ -361,6 +505,19 @@ class WebUI:
                 "drone_color": drone_color,
                 "red_confidence": red_confidence,
                 "blue_confidence": blue_confidence,
+                "all_channel_results": [
+                    {
+                        "channel_index": i,
+                        "channel_name": f"ch{i}",
+                        "state": "YES" if i == channel_index else "NO",
+                        "alert_level": alert_level if i == channel_index else "NO",
+                        "yes_confidence": 0.95 if i == channel_index else 0.0,
+                        "drone_color": drone_color if i == channel_index else "UNKNOWN",
+                        "red_confidence": red_confidence if i == channel_index else None,
+                        "blue_confidence": blue_confidence if i == channel_index else None,
+                    }
+                    for i in range(4)
+                ],
             }
             if self.detector:
                 # Persist to alert history
