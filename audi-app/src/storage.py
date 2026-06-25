@@ -5,9 +5,9 @@ Manages a ring buffer on disk of up to 32GB of audio recordings.
 
 Strategy:
   1. New WAV segments arrive from the recorder into the data directory.
-  2. Background thread compresses old WAVs to FLAC (roughly 6:1 ratio).
+  2. Background thread compresses old WAVs to FLAC or WavPack.
   3. When disk usage exceeds the cap, deletes oldest files first
-     (FLAC-compressed segments deleted before WAVs).
+     (compressed segments deleted before WAVs).
   4. Filesystem is checked on a 30-second heartbeat.
 """
 
@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 logger = logging.getLogger("audi.storage")
+FLAC_MAX_CHANNELS = 8
 FIELD_TAGS = {
     "green": "correct_detection_correct_classification",
     "yellow": "correct_detection_incorrect_classification",
@@ -29,22 +30,37 @@ FIELD_TAGS = {
 }
 
 # ---------------------------------------------------------------------------
-# FLAC compression via flac CLI
+# Lossless compression
 # ---------------------------------------------------------------------------
 
 class FlacCompressor:
-    """Compress WAV files to FLAC in-place, then remove the WAV."""
+    """Compress WAV files losslessly in-place, then remove the WAV.
+
+    FLAC is used for channel counts it supports. Wider multichannel captures
+    are encoded as WavPack through ffmpeg because FLAC is limited to 8 channels.
+    """
 
     def __init__(self, compression_level: int = 5):
         self.level = compression_level  # 0 (fast) to 8 (best)
 
     def compress(self, wav_path: str) -> str | None:
-        """Compress a WAV to FLAC. Returns the FLAC path, or None on failure."""
+        """Compress a WAV. Returns the compressed path, or None on failure."""
         import subprocess
+        import wave
 
         wav = Path(wav_path)
         if wav.suffix.lower() != ".wav":
             return None
+
+        try:
+            with wave.open(str(wav), "rb") as wf:
+                channels = wf.getnchannels()
+        except wave.Error as e:
+            logger.warning("Could not inspect WAV channels for %s: %s", wav.name, e)
+            return None
+
+        if channels > FLAC_MAX_CHANNELS:
+            return self._compress_wavpack_with_ffmpeg(wav, channels)
 
         flac_path = wav.with_suffix(".flac")
 
@@ -69,18 +85,103 @@ class FlacCompressor:
                             wav.stat().st_size / (1024 * 1024),
                             flac_path.stat().st_size / (1024 * 1024))
                 return str(flac_path)
-            else:
-                stderr = result.stderr.decode(errors="replace")
-                logger.warning("FLAC compression failed for %s: %s",
-                               wav.name, stderr[:200])
-                # Restore WAV if it was deleted
-                return None
+            stderr = result.stderr.decode(errors="replace")
+            logger.warning("FLAC compression failed for %s: %s",
+                           wav.name, stderr[:200])
+            return self._compress_flac_with_ffmpeg(wav, flac_path)
         except FileNotFoundError:
-            logger.error("flac not found — install with: apt install flac")
-            return None
+            logger.warning("flac not found; trying ffmpeg fallback")
+            return self._compress_flac_with_ffmpeg(wav, flac_path)
         except Exception as e:
             logger.error("FLAC exception for %s: %s", wav.name, e)
             return None
+
+    def _compress_flac_with_ffmpeg(self, wav: Path, flac_path: Path) -> str | None:
+        import subprocess
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(wav),
+            "-c:a",
+            "flac",
+            str(flac_path),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=600)
+        except FileNotFoundError:
+            logger.error("ffmpeg not found — install ffmpeg or flac")
+            return None
+        except Exception as e:
+            logger.error("FFmpeg FLAC exception for %s: %s", wav.name, e)
+            return None
+
+        if result.returncode == 0 and flac_path.exists():
+            try:
+                wav.unlink()
+            except OSError as e:
+                logger.warning("Could not delete source WAV %s: %s", wav.name, e)
+            logger.info(
+                "Compressed with ffmpeg: %s → %s",
+                wav.name,
+                flac_path.name,
+            )
+            return str(flac_path)
+
+        stderr = result.stderr.decode(errors="replace")
+        logger.warning("FFmpeg FLAC compression failed for %s: %s",
+                       wav.name, stderr[:200])
+        return None
+
+    def _compress_wavpack_with_ffmpeg(self, wav: Path, channels: int) -> str | None:
+        import subprocess
+
+        wv_path = wav.with_suffix(".wv")
+        if wv_path.exists():
+            wv_path.unlink()
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(wav),
+            "-c:a",
+            "wavpack",
+            str(wv_path),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=600)
+        except FileNotFoundError:
+            logger.error("ffmpeg not found — install ffmpeg for WavPack compression")
+            return None
+        except Exception as e:
+            logger.error("FFmpeg WavPack exception for %s: %s", wav.name, e)
+            return None
+
+        if result.returncode == 0 and wv_path.exists():
+            try:
+                wav.unlink()
+            except OSError as e:
+                logger.warning("Could not delete source WAV %s: %s", wav.name, e)
+            logger.info(
+                "Compressed with WavPack: %s → %s (%d channels)",
+                wav.name,
+                wv_path.name,
+                channels,
+            )
+            return str(wv_path)
+
+        stderr = result.stderr.decode(errors="replace")
+        logger.warning("FFmpeg WavPack compression failed for %s: %s",
+                       wav.name, stderr[:200])
+        return None
 
 
 class AlarmSnapshotter:
@@ -476,7 +577,7 @@ class StorageManager:
     def _evict_oldest(self, target: int):
         """Delete oldest files until total size ≤ target.
 
-        Deletes FLAC files first (they're compressed originals), then
+        Deletes compressed files first (they're archived originals), then
         any remaining WAVs. Always deletes oldest by mtime.
         """
         if target <= 0:
@@ -484,7 +585,7 @@ class StorageManager:
 
         # Gather files oldest-first
         all_files = []
-        for ext in ("*.flac", "*.wav"):
+        for ext in ("*.flac", "*.wv", "*.wav"):
             all_files.extend(self.data_dir.glob(ext))
         all_files.sort(key=lambda p: p.stat().st_mtime)
 
@@ -501,9 +602,9 @@ class StorageManager:
                 logger.warning("Could not delete %s: %s", f.name, e)
 
     def _total_size_bytes(self) -> int:
-        """Sum of all WAV + FLAC files in data_dir."""
+        """Sum of all tracked audio files in data_dir."""
         total = 0
-        for ext in ("*.wav", "*.flac"):
+        for ext in ("*.wav", "*.flac", "*.wv"):
             for f in self.data_dir.glob(ext):
                 try:
                     total += f.stat().st_size
@@ -532,6 +633,7 @@ class StorageManager:
         alerts_total = self._alerts_size_bytes()
         wav_count = len(list(self.data_dir.glob("*.wav")))
         flac_count = len(list(self.data_dir.glob("*.flac")))
+        wv_count = len(list(self.data_dir.glob("*.wv")))
         return {
             "data_dir": str(self.data_dir),
             "max_size_gb": round(self.max_size_bytes / (1024 ** 3), 1),
@@ -539,6 +641,7 @@ class StorageManager:
             "free_gb": round(free / (1024 ** 3), 2),
             "wav_files": wav_count,
             "flac_files": flac_count,
+            "wavpack_files": wv_count,
             "compress_enabled": self.compress_enabled,
             "over_budget": total > self.max_size_bytes,
             "low_disk": free < self.min_free_bytes,

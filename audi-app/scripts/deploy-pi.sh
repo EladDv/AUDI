@@ -14,6 +14,8 @@ Options:
   --password PASSWORD    SSH/sudo password
   --staging-dir PATH     Remote staging directory (default: /home/<user>/audi-app-deploy)
   --keep-radios          Pass through to scripts/install-pi.sh
+  --audio-channels N     Set capture channel count in config.yaml (default: installer default)
+  --detector-channels L  Set inference channels: all, null, or comma-separated indexes
   --no-verify            Skip post-install HTTP/container checks
   --no-reboot            Do not reboot the Pi after deployment
   -h, --help             Show this help
@@ -48,6 +50,8 @@ PI_USER="pi"
 PI_PASSWORD="${AUDI_PI_PASSWORD:-}"
 REMOTE_STAGING=""
 KEEP_RADIOS=false
+INSTALL_AUDIO_CHANNELS="${AUDI_AUDIO_CHANNELS:-}"
+INSTALL_DETECTOR_CHANNELS="${AUDI_DETECTOR_CHANNELS:-}"
 VERIFY=true
 REBOOT=true
 POSITIONAL=()
@@ -73,6 +77,14 @@ while [[ $# -gt 0 ]]; do
         --keep-radios)
             KEEP_RADIOS=true
             shift
+            ;;
+        --audio-channels|--channels)
+            INSTALL_AUDIO_CHANNELS="${2:-}"
+            shift 2
+            ;;
+        --detector-channels|--inference-channels)
+            INSTALL_DETECTOR_CHANNELS="${2:-}"
+            shift 2
             ;;
         --no-verify)
             VERIFY=false
@@ -155,6 +167,12 @@ remote_sudo_bash() {
 INSTALL_ARGS=()
 if [[ "$KEEP_RADIOS" == "true" ]]; then
     INSTALL_ARGS+=(--keep-radios)
+fi
+if [[ -n "$INSTALL_AUDIO_CHANNELS" ]]; then
+    INSTALL_ARGS+=(--audio-channels "$(shell_quote "$INSTALL_AUDIO_CHANNELS")")
+fi
+if [[ -n "$INSTALL_DETECTOR_CHANNELS" ]]; then
+    INSTALL_ARGS+=(--detector-channels "$(shell_quote "$INSTALL_DETECTOR_CHANNELS")")
 fi
 
 echo ""

@@ -1,6 +1,7 @@
 """Smoke tests for audi-app (RPi deployment)."""
 
 import importlib
+import subprocess
 import sys
 import types
 import wave
@@ -426,6 +427,32 @@ class TestAudiApp:
         with wave.open(meta["files"]["full_120s_all_channels"]) as wav:
             assert wav.getnchannels() == 4
 
+    def test_storage_compresses_16_channel_wav_as_wavpack(
+        self, tmp_path, monkeypatch
+    ):
+        storage = _import_from_audi_app("storage")
+        wav_path = tmp_path / "seg_16ch.wav"
+        with wave.open(str(wav_path), "wb") as wav:
+            wav.setnchannels(16)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(np.zeros((160, 16), dtype=np.int16).tobytes())
+
+        calls = []
+
+        def fake_run(cmd, capture_output, timeout):
+            calls.append(cmd)
+            Path(cmd[-1]).write_bytes(b"wv")
+            return subprocess.CompletedProcess(cmd, 0, stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        compressed = storage.FlacCompressor().compress(str(wav_path))
+
+        assert compressed == str(wav_path.with_suffix(".wv"))
+        assert not wav_path.exists()
+        assert calls[0][-2:] == ["wavpack", str(wav_path.with_suffix(".wv"))]
+
     def test_detector_runs_inference_on_all_audio_channels(self, tmp_path, monkeypatch):
         detector = _import_from_audi_app("detector")
         recorder = _import_from_audi_app("recorder")
@@ -560,6 +587,41 @@ class TestAudiApp:
         assert engine.status["channels"][2]["detector_enabled"] is False
         assert result["all_channel_results"][2]["detector_enabled"] is False
         np.testing.assert_allclose(ring.get_recent(1, channel=None)[0], [0, 1, 2, 3])
+
+    def test_detector_defaults_to_all_capture_channels(self, tmp_path):
+        detector = _import_from_audi_app("detector")
+
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                },
+                "audio": {"sample_rate": 16000, "channels": 16},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=None,
+        )
+
+        assert engine.status["enabled_channels"] == list(range(16))
+
+    def test_detector_accepts_comma_separated_enabled_channels(self, tmp_path):
+        detector = _import_from_audi_app("detector")
+
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "enabled_channels": "1,3,7,8",
+                },
+                "audio": {"sample_rate": 16000, "channels": 16},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=None,
+        )
+
+        assert engine.status["enabled_channels"] == [1, 3, 7, 8]
 
     def test_color_typing_returns_red_blue_or_unknown(self, tmp_path):
         detector = _import_from_audi_app("detector")

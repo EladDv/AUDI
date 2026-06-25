@@ -18,10 +18,21 @@ Or for a fully automated install:
 sudo bash scripts/install-pi.sh
 ```
 
+Install-time channel selection:
+
+```bash
+# 4-channel capture, infer on all captured channels
+sudo bash scripts/install-pi.sh --audio-channels 4 --detector-channels all
+
+# 16-channel capture, infer only on channels 1, 3, 7, and 8
+sudo bash scripts/install-pi.sh --audio-channels 16 --detector-channels 1,3,7,8
+```
+
 To deploy from your workstation to a Pi over SSH:
 
 ```bash
 scripts/deploy-pi.sh <pi-ip> <username> '<password>'
+scripts/deploy-pi.sh --host <pi-ip> --user pi --audio-channels 16 --detector-channels 1,3,7,8
 ```
 
 ## Architecture
@@ -70,6 +81,7 @@ Edit `config.yaml`:
 audio:
   device: "auto"                     # Auto-discovers a USB mic, or use an ALSA device from arecord -l
   sample_rate: 16000
+  channels: 4                        # Use --audio-channels 16 at install time for 16-channel capture
   segment_duration: 300              # 5-minute segments
   ring_buffer_seconds: 120           # 60s pre + 60s post alarm
   device_retry_min: 2                # Min seconds between retries
@@ -77,7 +89,7 @@ audio:
 
 storage:
   max_size_gb: 32
-  compress: true
+  compress: true                     # FLAC up to 8 channels; WavPack for 9+ channels
   data_dir: /data/recordings
   alerts_dir: /data/alerts
   max_alerts_gb: 2
@@ -87,7 +99,7 @@ detection:
   inference_interval: 0.320
   active_threshold_profile: mn10_p90
   threshold_profiles_file: ./threshold_profiles.yaml
-  enabled_channels: [0, 1, 2, 3]  # Detector channels; disabled channels are still recorded
+  enabled_channels: null             # null/all = every captured channel; e.g. [1, 3, 7, 8]
   mel_mean: 10.430418
   mel_std: 5.288271
   confidence_threshold_high: 0.6550  # YES detector state

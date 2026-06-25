@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
     alsa-utils \
+    ffmpeg \
     flac \
     libasound2-dev \
     build-essential \

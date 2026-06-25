@@ -122,7 +122,7 @@ def load_config(config_path: str = None) -> dict:
             "hop_length": 160,
             "window_samples": 81920,
             "stride": 0.0625,
-            "enabled_channels": [0, 1, 2, 3],
+            "enabled_channels": None,
             "num_threads": 2,
             "active_threshold_profile": "mn10_p90",
             "threshold_profiles_file": "/app/threshold_profiles.yaml",
@@ -504,6 +504,15 @@ def main():
             )
         except FileNotFoundError:
             logger.warning("  flac: NOT FOUND (install flac)")
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-version"], capture_output=True, timeout=5
+            )
+            logger.info(
+                "  ffmpeg: %s", r.stdout.decode(errors="replace").splitlines()[0][:80]
+            )
+        except FileNotFoundError:
+            logger.warning("  ffmpeg: NOT FOUND (install ffmpeg for 9+ channels)")
         try:
             import_module("RPi.GPIO")
             logger.info("  RPi.GPIO: available")

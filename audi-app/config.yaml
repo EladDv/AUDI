@@ -17,7 +17,7 @@ audio:
 # --- Storage Ring Buffer ---
 storage:
   max_size_gb: 96                # Max storage to use for audio (main recordings)
-  compress: true                 # Compress old segments to FLAC
+  compress: true                 # Compress old segments to FLAC or WavPack
   data_dir: "./data/recordings"   # Where audio lives (bind mount for persistence)
   min_free_gb: 1                 # Trigger cleanup when disk free drops below this
   cleanup_watermark_gb: 2        # Free up until this much is available
@@ -37,7 +37,7 @@ detection:
   hop_length: 160                # Hop length in samples
   window_samples: 81920          # 16000 Hz × 5.12s → 512 frames (librosa center=True)
   stride: 0.0625                 # Sliding window stride (0.0625 = 6.25% step size)
-  enabled_channels: [0, 1, 2, 3] # Detector channels; disabled channels are still recorded
+  enabled_channels: null         # null = infer on every captured channel; disabled channels are still recorded
 
   # Debug mode — logs per-window timing at DEBUG level
   debug: true

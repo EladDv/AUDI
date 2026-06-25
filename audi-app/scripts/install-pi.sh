@@ -23,6 +23,7 @@
 # =============================================================================
 
 set -euo pipefail
+ORIGINAL_ARGS=("$@")
 
 # ---- Color output ----
 RED='\033[0;31m'
@@ -48,11 +49,21 @@ HOTSPOT_SSID="audi-hotspot"
 HOTSPOT_PASSWORD="${AUDI_HOTSPOT_PASSWORD:-12345678}"
 HOTSPOT_IP="10.42.0.1/24"
 HOTSPOT_URL="http://10.42.0.1:8080"
+AUDIO_CHANNELS="${AUDI_AUDIO_CHANNELS:-4}"
+DETECTOR_CHANNELS="${AUDI_DETECTOR_CHANNELS:-all}"
 
 # Parse args
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-radios) DISABLE_RADIOS=false; shift ;;
+        --audio-channels|--channels)
+            AUDIO_CHANNELS="${2:-}"
+            shift 2
+            ;;
+        --detector-channels|--inference-channels)
+            DETECTOR_CHANNELS="${2:-}"
+            shift 2
+            ;;
         *) shift ;;
     esac
 done
@@ -75,7 +86,11 @@ fi
 # Check root/sudo
 if [ "$EUID" -ne 0 ]; then
     info "Some steps need root — re-running with sudo..."
-    exec sudo bash "$0" "$@"
+    exec sudo \
+        AUDI_AUDIO_CHANNELS="$AUDIO_CHANNELS" \
+        AUDI_DETECTOR_CHANNELS="$DETECTOR_CHANNELS" \
+        AUDI_HOTSPOT_PASSWORD="$HOTSPOT_PASSWORD" \
+        bash "$0" "${ORIGINAL_ARGS[@]}"
 fi
 
 # ---- 1. System Dependencies ----
@@ -109,6 +124,119 @@ set_config_key() {
     else
         echo "${key}=${value}" >> "$file"
     fi
+}
+
+validate_audio_channels() {
+    if ! [[ "$AUDIO_CHANNELS" =~ ^[0-9]+$ ]]; then
+        err "--audio-channels must be a positive integer, got: $AUDIO_CHANNELS"
+        exit 2
+    fi
+    if [ "$AUDIO_CHANNELS" -lt 1 ] || [ "$AUDIO_CHANNELS" -gt 64 ]; then
+        err "--audio-channels must be between 1 and 64, got: $AUDIO_CHANNELS"
+        exit 2
+    fi
+}
+
+detector_channels_yaml() {
+    local raw
+    raw="$(printf '%s' "$DETECTOR_CHANNELS" | tr '[:upper:]' '[:lower:]' | xargs)"
+    case "$raw" in
+        ""|"all"|"*"|"null"|"none")
+            echo "null"
+            return
+            ;;
+    esac
+
+    local out=""
+    local item
+    IFS=',' read -ra items <<< "$DETECTOR_CHANNELS"
+    for item in "${items[@]}"; do
+        item="$(printf '%s' "$item" | xargs)"
+        if ! [[ "$item" =~ ^[0-9]+$ ]]; then
+            err "--detector-channels must be 'all' or comma-separated indexes, got: $DETECTOR_CHANNELS"
+            exit 2
+        fi
+        if [ "$item" -ge "$AUDIO_CHANNELS" ]; then
+            err "Detector channel $item is outside configured audio channels 0..$((AUDIO_CHANNELS - 1))"
+            exit 2
+        fi
+        if [ -z "$out" ]; then
+            out="$item"
+        else
+            out="${out}, ${item}"
+        fi
+    done
+    echo "[$out]"
+}
+
+set_yaml_section_key() {
+    local file="$1"
+    local section="$2"
+    local key="$3"
+    local value="$4"
+
+    python3 - "$file" "$section" "$key" "$value" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+section = sys.argv[2]
+key = sys.argv[3]
+value = sys.argv[4]
+lines = path.read_text().splitlines()
+
+section_re = re.compile(rf"^{re.escape(section)}:\s*(?:#.*)?$")
+key_re = re.compile(rf"^(\s*){re.escape(key)}\s*:")
+
+section_idx = None
+for idx, line in enumerate(lines):
+    if section_re.match(line):
+        section_idx = idx
+        break
+
+if section_idx is None:
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.extend([f"{section}:", f"  {key}: {value}"])
+else:
+    end_idx = len(lines)
+    for idx in range(section_idx + 1, len(lines)):
+        line = lines[idx]
+        if line and not line.startswith((" ", "\t")) and not line.lstrip().startswith("#"):
+            end_idx = idx
+            break
+
+    replaced = False
+    for idx in range(section_idx + 1, end_idx):
+        match = key_re.match(lines[idx])
+        if match:
+            indent = match.group(1) or "  "
+            lines[idx] = f"{indent}{key}: {value}"
+            replaced = True
+            break
+
+    if not replaced:
+        lines.insert(section_idx + 1, f"  {key}: {value}")
+
+path.write_text("\n".join(lines) + "\n")
+PY
+}
+
+configure_app_channels() {
+    local config_file="${INSTALL_DIR}/config.yaml"
+    if [ ! -f "$config_file" ]; then
+        warn "No config.yaml at $config_file; skipping channel configuration"
+        return
+    fi
+
+    validate_audio_channels
+    local detector_yaml
+    detector_yaml="$(detector_channels_yaml)"
+
+    set_yaml_section_key "$config_file" "audio" "channels" "$AUDIO_CHANNELS"
+    set_yaml_section_key "$config_file" "detection" "enabled_channels" "$detector_yaml"
+    ok "App channels configured: audio.channels=${AUDIO_CHANNELS}, detection.enabled_channels=${detector_yaml}"
 }
 
 install_hotspot_fallback() {
@@ -308,6 +436,8 @@ else
         exit 1
     fi
 fi
+
+configure_app_channels
 
 # ---- 5. Create Data Directories ----
 info "Creating data directories..."

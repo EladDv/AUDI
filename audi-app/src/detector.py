@@ -293,6 +293,11 @@ class DetectionEngine:
     def _normalize_enabled_channels(value, channel_count: int) -> set[int]:
         if value is None:
             return set(range(max(1, int(channel_count))))
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "all", "*", "null", "none"}:
+                return set(range(max(1, int(channel_count))))
+            value = [part.strip() for part in normalized.split(",")]
         enabled: set[int] = set()
         for item in value:
             idx = int(item)
