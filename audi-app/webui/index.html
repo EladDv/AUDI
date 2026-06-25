@@ -610,6 +610,27 @@
       font-size: 0.72rem;
     }
 
+    .channel-detect-toggle {
+      min-height: 30px;
+      margin-top: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #4b5563;
+      font-size: 0.68rem;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    body.dark-mode .channel-detect-toggle {
+      color: #cbd5e1;
+    }
+
+    .channel-disabled .channel-score,
+    .channel-disabled .value {
+      color: #64748b !important;
+    }
+
     .mel-canvas {
       width: 100%;
       height: 120px;
@@ -617,6 +638,49 @@
       border-radius: 6px;
       background: #090d14;
       image-rendering: pixelated;
+    }
+
+    .mel-plot {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 34px;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .mel-scale {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 4px;
+      min-height: 120px;
+    }
+
+    .mel-colorbar {
+      width: 16px;
+      height: 120px;
+      border-radius: 4px;
+      border: 1px solid rgba(15, 23, 42, 0.18);
+      background: #090d14;
+      display: block;
+      image-rendering: pixelated;
+    }
+
+    body.dark-mode .mel-colorbar {
+      border-color: rgba(203, 213, 225, 0.18);
+    }
+
+    .mel-scale-labels {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      color: #64748b;
+      font-size: 0.54rem;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    body.dark-mode .mel-scale-labels {
+      color: #94a3b8;
     }
 
     .button-strip {
@@ -1034,10 +1098,10 @@
   <div class="view-panel" id="melsView">
     <div class="score-history-label">Processed Mel Views - last 120s in browser</div>
     <div class="channel-grid" id="melGrid">
-      <div class="channel-card"><div class="title"><span>CH 0</span><span class="channel-score" id="melScore0">--</span></div><canvas class="mel-canvas" id="melCanvas0" width="320" height="128"></canvas></div>
-      <div class="channel-card"><div class="title"><span>CH 1</span><span class="channel-score" id="melScore1">--</span></div><canvas class="mel-canvas" id="melCanvas1" width="320" height="128"></canvas></div>
-      <div class="channel-card"><div class="title"><span>CH 2</span><span class="channel-score" id="melScore2">--</span></div><canvas class="mel-canvas" id="melCanvas2" width="320" height="128"></canvas></div>
-      <div class="channel-card"><div class="title"><span>CH 3</span><span class="channel-score" id="melScore3">--</span></div><canvas class="mel-canvas" id="melCanvas3" width="320" height="128"></canvas></div>
+      <div class="channel-card"><div class="title"><span>CH 0</span><span class="channel-score" id="melScore0">--</span></div><div class="mel-plot"><canvas class="mel-canvas" id="melCanvas0" width="320" height="128"></canvas><div class="mel-scale"><canvas class="mel-colorbar" id="melColorbar0" width="16" height="128"></canvas><div class="mel-scale-labels"><span>0</span><span>-40</span><span>-80</span></div></div></div></div>
+      <div class="channel-card"><div class="title"><span>CH 1</span><span class="channel-score" id="melScore1">--</span></div><div class="mel-plot"><canvas class="mel-canvas" id="melCanvas1" width="320" height="128"></canvas><div class="mel-scale"><canvas class="mel-colorbar" id="melColorbar1" width="16" height="128"></canvas><div class="mel-scale-labels"><span>0</span><span>-40</span><span>-80</span></div></div></div></div>
+      <div class="channel-card"><div class="title"><span>CH 2</span><span class="channel-score" id="melScore2">--</span></div><div class="mel-plot"><canvas class="mel-canvas" id="melCanvas2" width="320" height="128"></canvas><div class="mel-scale"><canvas class="mel-colorbar" id="melColorbar2" width="16" height="128"></canvas><div class="mel-scale-labels"><span>0</span><span>-40</span><span>-80</span></div></div></div></div>
+      <div class="channel-card"><div class="title"><span>CH 3</span><span class="channel-score" id="melScore3">--</span></div><div class="mel-plot"><canvas class="mel-canvas" id="melCanvas3" width="320" height="128"></canvas><div class="mel-scale"><canvas class="mel-colorbar" id="melColorbar3" width="16" height="128"></canvas><div class="mel-scale-labels"><span>0</span><span>-40</span><span>-80</span></div></div></div></div>
     </div>
   </div>
 
@@ -1052,6 +1116,7 @@
     let alertRoutingSyncing = false;
     let currentView = localStorage.getItem('audiView') || 'live';
     const melHistory = [[], [], [], []];
+    const lastMelKeys = [null, null, null, null];
     const melHistoryMaxAgeMs = 120000;
 
     function applyUiPrefs() {
@@ -1117,6 +1182,14 @@
           alert_on_blue: document.getElementById('blueAlertToggle').checked,
           alert_on_unknown: document.getElementById('unknownAlertToggle').checked
         })
+      }).then(() => update()).catch(() => {});
+    }
+
+    function setDetectorChannel(channelIndex, enabled) {
+      fetch('/api/detector_channel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_index: channelIndex, enabled })
       }).then(() => update()).catch(() => {});
     }
 
@@ -1248,9 +1321,12 @@
           btn.className = 'btn btn-start';
         }
 
-        // Score history sparkline (debug mode only)
-        if (det.debug && det.score_history) {
-          drawScoreHistory(det.score_history, det.threshold_yes || 0.51);
+        // Score history: each channel is an independent detector stream.
+        if (det.channel_score_history || det.score_history) {
+          drawScoreHistory(
+            det.channel_score_history || det.score_history,
+            det.threshold_yes || 0.51
+          );
         } else {
           document.getElementById('scoreHistorySection').style.display = 'none';
         }
@@ -1363,6 +1439,7 @@
         const ch = (channels || []).find(c => Number(c.channel_index) === i) || { channel_index: i };
         const health = (healthRows || []).find(c => Number(c.channel_index) === i) || {};
         const alertLevel = ch.alert_level || ch.state || 'NO';
+        const detectorEnabled = ch.detector_enabled !== false;
         const yes = Number(ch.yes_confidence || ch.raw_score || 0);
         const color = ch.drone_color || 'UNKNOWN';
         const dbfs = Number(health.dbfs);
@@ -1371,19 +1448,23 @@
           : 'No frames';
         const clip = Number(health.clipping_percent || 0);
         const healthClass = health.healthy ? (clip > 1 ? 'amber' : 'green') : 'red';
-        rows.push(`<div class="channel-card">
-          <div class="title"><span>CH ${i}</span><span class="channel-score">${alertLabel(alertLevel)}</span></div>
+        rows.push(`<div class="channel-card ${detectorEnabled ? '' : 'channel-disabled'}">
+          <div class="title"><span>CH ${i}</span><span class="channel-score">${detectorEnabled ? alertLabel(alertLevel) : 'DISABLED'}</span></div>
           <div class="status-card" style="padding:6px;border-radius:6px">
             <div class="label">Score</div>
-            <div class="value ${alertLevel === 'NO' ? 'white' : alertLevel === 'RED_ALERT' ? 'red' : 'green'}">${yes.toFixed(2)} ${escapeHtml(color)}</div>
+            <div class="value ${alertLevel === 'NO' ? 'white' : alertLevel === 'RED_ALERT' ? 'red' : 'green'}">${detectorEnabled ? `${yes.toFixed(2)} ${escapeHtml(color)}` : 'Skipped'}</div>
           </div>
           <div class="status-card" style="padding:6px;border-radius:6px;margin-top:6px">
             <div class="label">Input</div>
             <div class="value ${healthClass}">${healthLabel} P ${Number(health.peak || 0).toFixed(2)}</div>
           </div>
+          <label class="channel-detect-toggle">
+            <input type="checkbox" ${detectorEnabled ? 'checked' : ''} onchange="setDetectorChannel(${i}, this.checked)">
+            Detect
+          </label>
         </div>`);
         const score = document.getElementById(`melScore${i}`);
-        if (score) score.textContent = `${alertLabel(alertLevel)} ${yes.toFixed(2)}`;
+        if (score) score.textContent = detectorEnabled ? `${alertLabel(alertLevel)} ${yes.toFixed(2)}` : 'DISABLED';
       }
       grid.innerHTML = rows.join('');
     }
@@ -1488,18 +1569,82 @@
     }
 
     function updateMels() {
-      fetch('/api/mels?seconds=8&columns=24').then(r => r.json()).then(d => {
+      fetch('/api/mels?source=ring_buffer&seconds=2.5&columns=12').then(r => r.json()).then(d => {
         const nowMs = Date.now();
+        for (let i = 0; i < 4; i++) {
+          while (melHistory[i].length && nowMs - melHistory[i][0].ts > melHistoryMaxAgeMs) {
+            melHistory[i].shift();
+          }
+        }
         (d.channels || []).forEach(ch => {
           const idx = Number(ch.channel_index);
           if (idx < 0 || idx > 3) return;
+          const apiKey = `${d.source || 'unknown'}:${d.timestamp || nowMs}:${ch.frames || 0}`;
+          if (lastMelKeys[idx] === apiKey) return;
+          lastMelKeys[idx] = apiKey;
           melHistory[idx].push({ ts: nowMs, mel: ch.mel || [] });
-          while (melHistory[idx].length && nowMs - melHistory[idx][0].ts > melHistoryMaxAgeMs) {
-            melHistory[idx].shift();
-          }
         });
         for (let i = 0; i < 4; i++) drawMelCanvas(i);
       }).catch(() => {});
+    }
+
+    function clamp01(v) {
+      return Math.max(0, Math.min(1, v));
+    }
+
+    function jetColor(v) {
+      v = clamp01(v);
+      const r = Math.round(255 * clamp01(1.5 - Math.abs(4 * v - 3)));
+      const g = Math.round(255 * clamp01(1.5 - Math.abs(4 * v - 2)));
+      const b = Math.round(255 * clamp01(1.5 - Math.abs(4 * v - 1)));
+      return `rgb(${r},${g},${b})`;
+    }
+
+    function melDbToJet(db, minDb, maxDb) {
+      const span = Math.max(1e-6, maxDb - minDb);
+      return jetColor((Number(db) - minDb) / span);
+    }
+
+    function formatDbLabel(db) {
+      const rounded = Math.round(db);
+      return `${rounded > 0 ? '+' : ''}${rounded}`;
+    }
+
+    function melDisplayRange(matrices) {
+      const vals = [];
+      matrices.forEach(mel => {
+        mel.forEach(row => {
+          row.forEach(v => {
+            const n = Number(v);
+            if (Number.isFinite(n)) vals.push(n);
+          });
+        });
+      });
+      if (!vals.length) return { min: -80, max: 0 };
+      vals.sort((a, b) => a - b);
+      const lo = vals[Math.floor((vals.length - 1) * 0.02)];
+      const hi = vals[Math.floor((vals.length - 1) * 0.98)];
+      const mid = (lo + hi) / 2;
+      const span = Math.max(20, hi - lo);
+      return { min: mid - span / 2, max: mid + span / 2 };
+    }
+
+    function drawMelColorbar(channelIndex, minDb, maxDb) {
+      const canvas = document.getElementById(`melColorbar${channelIndex}`);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      for (let y = 0; y < H; y++) {
+        const v = 1 - y / Math.max(1, H - 1);
+        ctx.fillStyle = jetColor(v);
+        ctx.fillRect(0, y, W, 1);
+      }
+      const labels = canvas.parentElement?.querySelectorAll('.mel-scale-labels span') || [];
+      if (labels.length >= 3) {
+        labels[0].textContent = formatDbLabel(maxDb);
+        labels[1].textContent = formatDbLabel((minDb + maxDb) / 2);
+        labels[2].textContent = formatDbLabel(minDb);
+      }
     }
 
     function drawMelCanvas(channelIndex) {
@@ -1518,6 +1663,8 @@
       }
       const matrices = chunks.map(c => c.mel).filter(m => m && m.length && m[0].length);
       if (!matrices.length) return;
+      const range = melDisplayRange(matrices);
+      drawMelColorbar(channelIndex, range.min, range.max);
       const nMels = matrices[0].length;
       const cols = matrices.reduce((sum, m) => sum + (m[0] ? m[0].length : 0), 0);
       const colW = Math.max(1, W / Math.max(1, cols));
@@ -1528,10 +1675,7 @@
         for (let c = 0; c < localCols; c++) {
           for (let r = 0; r < nMels; r++) {
             const db = Number(mel[r][c]);
-            const v = Math.max(0, Math.min(1, (db + 80) / 80));
-            const hue = 220 - v * 190;
-            const light = 14 + v * 58;
-            ctx.fillStyle = `hsl(${hue}, 88%, ${light}%)`;
+            ctx.fillStyle = melDbToJet(db, range.min, range.max);
             ctx.fillRect(x, H - (r + 1) * rowH, Math.ceil(colW), Math.ceil(rowH));
           }
           x += colW;
@@ -1540,6 +1684,27 @@
     }
 
     // --- Score history sparkline (canvas) ---
+    function normalizeScoreSeries(history) {
+      if (!history || !history.length) return [];
+      if (history[0] && Array.isArray(history[0].history)) {
+        return history.map(series => ({
+          channelIndex: Number(series.channel_index),
+          points: (series.history || []).filter(point => point && point.raw != null)
+        })).filter(series => series.points.length);
+      }
+
+      const byChannel = new Map();
+      history.forEach(point => {
+        if (!point || point.raw == null) return;
+        const idx = Number(point.channel_index || 0);
+        if (!byChannel.has(idx)) byChannel.set(idx, []);
+        byChannel.get(idx).push(point);
+      });
+      return Array.from(byChannel.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([channelIndex, points]) => ({ channelIndex, points }));
+    }
+
     function drawScoreHistory(history, threshold) {
       const section = document.getElementById('scoreHistorySection');
       section.style.display = 'block';
@@ -1558,7 +1723,8 @@
         scoreGlow: 'rgba(45,212,191,0.26)',
         fill: 'rgba(45,212,191,0.12)',
         threshold: '#ff5a5f',
-        thresholdBg: 'rgba(255,90,95,0.18)'
+        thresholdBg: 'rgba(255,90,95,0.18)',
+        channelColors: ['#2dd4bf', '#60a5fa', '#f59e0b', '#f472b6']
       } : {
         bg: '#f8fafc',
         gridStrong: 'rgba(30,41,59,0.32)',
@@ -1569,23 +1735,37 @@
         scoreGlow: 'rgba(0,140,115,0.20)',
         fill: 'rgba(0,140,115,0.12)',
         threshold: '#c92a2a',
-        thresholdBg: 'rgba(201,42,42,0.12)'
+        thresholdBg: 'rgba(201,42,42,0.12)',
+        channelColors: ['#008c73', '#2563eb', '#d97706', '#db2777']
       };
 
       ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = theme.bg;
       ctx.fillRect(0, 0, W, H);
 
-      if (!history || history.length < 2) return;
+      const series = normalizeScoreSeries(history);
+      const allPoints = series.flatMap(s => s.points);
+      if (allPoints.length < 2) {
+        document.getElementById('scoreStats').innerHTML = '';
+        return;
+      }
 
-      const scores = history.map(h => h.raw);
-      const n = scores.length;
       const plotW = W - pad.left - pad.right;
       const plotH = H - pad.top - pad.bottom;
       const yMin = 0;
       const yMax = 1;
+      const times = allPoints.map(point => Number(point.ts || 0)).filter(Number.isFinite);
+      const tMin = Math.min(...times);
+      const tMax = Math.max(...times);
+      const hasTimeRange = Number.isFinite(tMin) && Number.isFinite(tMax) && tMax > tMin;
 
-      const xOf = i => pad.left + (i / (n - 1)) * plotW;
+      const xOf = (point, index, n) => {
+        const ts = Number(point.ts || 0);
+        if (hasTimeRange && Number.isFinite(ts)) {
+          return pad.left + ((ts - tMin) / (tMax - tMin)) * plotW;
+        }
+        return pad.left + (index / Math.max(1, n - 1)) * plotW;
+      };
       const yOf = v => pad.top + (1 - (v - yMin) / (yMax - yMin)) * plotH;
 
       // Fixed 0.0-1.0 grid: operators need threshold context more than zoom.
@@ -1633,43 +1813,41 @@
       ctx.textBaseline = 'middle';
       ctx.fillText(thresholdLabel, labelX + 6, labelY + 9);
 
-      // Score line
-      ctx.strokeStyle = theme.scoreGlow;
-      ctx.lineWidth = 5;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      for (let i = 0; i < n; i++) {
-        const sx = xOf(i), sy = yOf(scores[i]);
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      }
-      ctx.stroke();
+      series.forEach(s => {
+        if (s.points.length < 2) return;
+        const color = theme.channelColors[s.channelIndex % theme.channelColors.length];
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
 
-      ctx.strokeStyle = theme.score;
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      for (let i = 0; i < n; i++) {
-        const sx = xOf(i), sy = yOf(scores[i]);
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      }
-      ctx.stroke();
+        ctx.strokeStyle = color + '44';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        s.points.forEach((point, i) => {
+          const sx = xOf(point, i, s.points.length);
+          const sy = yOf(Number(point.raw || 0));
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        });
+        ctx.stroke();
 
-      // Fill under curve
-      ctx.lineTo(xOf(n - 1), yOf(yMin));
-      ctx.lineTo(xOf(0), yOf(yMin));
-      ctx.closePath();
-      ctx.fillStyle = theme.fill;
-      ctx.fill();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        s.points.forEach((point, i) => {
+          const sx = xOf(point, i, s.points.length);
+          const sy = yOf(Number(point.raw || 0));
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        });
+        ctx.stroke();
+      });
 
       // Stats
-      const avg = scores.reduce((a, b) => a + b, 0) / n;
-      const max = Math.max(...scores);
-      const min = Math.min(...scores);
-      document.getElementById('scoreStats').innerHTML =
-        '<span>min=' + min.toFixed(3) + '</span>' +
-        '<span>avg=' + avg.toFixed(3) + '</span>' +
-        '<span>max=' + max.toFixed(3) + '</span>' +
-        '<span>n=' + n + '</span>';
+      document.getElementById('scoreStats').innerHTML = series.map(s => {
+        const vals = s.points.map(point => Number(point.raw || 0));
+        const latest = vals[vals.length - 1] || 0;
+        const max = Math.max(...vals);
+        const color = theme.channelColors[s.channelIndex % theme.channelColors.length];
+        return `<span style="color:${color}">CH${s.channelIndex} ${latest.toFixed(2)} max ${max.toFixed(2)}</span>`;
+      }).join('');
     }
 
     setInterval(update, 1500);

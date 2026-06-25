@@ -198,7 +198,25 @@ class TestAudiApp:
         raw = recorder.ALSARecorder(str(tmp_path / "hot"))
 
         assert raw.sample_rate == 16000
+        assert raw.bit_depth == 32
         assert raw.ring_buffer.max_samples == 120 * 16000
+
+    def test_recorder_auto_discover_uses_alsa_plug_device(self, monkeypatch):
+        recorder = _import_from_audi_app("recorder")
+
+        def fake_run(*args, **kwargs):
+            return types.SimpleNamespace(
+                stdout=(
+                    "card 2: US4x4HR [US-4x4HR], "
+                    "device 0: USB Audio [USB Audio]\n"
+                ),
+                stderr="",
+                returncode=0,
+            )
+
+        monkeypatch.setattr(recorder.subprocess, "run", fake_run)
+
+        assert recorder.auto_discover_device() == "plughw:2,0"
 
     def test_recorder_manager_fallback_sample_rate_matches_deployment(self, tmp_path):
         recorder = _import_from_audi_app("recorder")
@@ -212,6 +230,7 @@ class TestAudiApp:
 
         assert manager.status["sample_rate"] == 16000
         assert manager.status["ring_buffer_capacity"] == 120
+        assert manager.recorder.bit_depth == 32
 
     def test_audio_ring_buffer_preserves_multichannel_frames(self):
         recorder = _import_from_audi_app("recorder")
@@ -318,6 +337,7 @@ class TestAudiApp:
         assert controller.status()["alert_pin"] == 2
         assert controller.status()["record_led_pin"] is None
         assert controller.status()["record_button_pin"] is None
+        assert controller.status()["pause_button_pin"] is None
         assert controller.status()["field_tag_button_pins"] == {
             "green": 22,
             "yellow": 27,
@@ -328,6 +348,7 @@ class TestAudiApp:
         assert (27, "IN", {"pull_up_down": "PUD_UP"}) in setups
         assert (17, "IN", {"pull_up_down": "PUD_UP"}) in setups
         assert set(events) >= {17, 22, 27}
+        assert 18 not in events
         assert events[22]["edge"] == "FALLING"
         assert events[27]["edge"] == "FALLING"
         assert events[17]["edge"] == "FALLING"
@@ -466,9 +487,79 @@ class TestAudiApp:
         assert len(result["all_channel_results"]) == 4
         assert engine.status["total_inferences"] == 4
         assert engine.status["channels"][2]["alert_level"] == "RED_ALERT"
+        assert len(engine.status["channel_score_history"]) == 4
+        assert engine.status["channel_score_history"][2]["history"][-1][
+            "channel_index"
+        ] == 2
         assert len(engine.latest_mels["channels"]) == 4
         assert engine.latest_mels["channels"][2]["mel"][0, 0] == 2.0
         assert alarms and alarms[0]["firing_channel_index"] == 2
+
+    def test_detector_disabled_channel_is_recorded_but_not_inferred(
+        self, tmp_path, monkeypatch
+    ):
+        detector = _import_from_audi_app("detector")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=24, channels=4)
+        ring.append(
+            np.tile(
+                np.array([[0.0, 1.0, 2.0, 3.0]], dtype=np.float32),
+                (6, 1),
+            )
+        )
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "model_sample_rate": 4,
+                    "window_samples": 4,
+                    "enabled_channels": [0, 1, 3],
+                    "confidence_threshold_high": 0.5,
+                    "hysteresis_window": 1,
+                    "hysteresis_ratio": 1.0,
+                    "hysteresis_margin": 0.0,
+                    "red_color_threshold": 0.5,
+                    "alarm_cooldown_s": 0,
+                },
+                "audio": {"sample_rate": 4, "channels": 4},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=ring,
+        )
+        alarms = []
+        seen = []
+        engine.on_alarm = alarms.append
+
+        def preprocess(audio, capture_sr):
+            seen.append(int(audio[0]))
+            engine.classifier.last_mel_db = np.full(
+                (4, 3),
+                fill_value=float(audio[0]),
+                dtype=np.float32,
+            )
+            return np.array([audio[0]], dtype=np.float32)
+
+        def predict_logits(spec):
+            channel_marker = int(spec[0])
+            if channel_marker == 2:
+                return np.array([2.0, 0.0, 4.0], dtype=np.float32)
+            return np.array([-2.0, 4.0, 0.0], dtype=np.float32)
+
+        monkeypatch.setattr(engine.classifier, "preprocess", preprocess)
+        monkeypatch.setattr(engine.classifier, "predict_logits", predict_logits)
+
+        result = engine.force_inference()
+
+        assert seen == [0, 1, 3]
+        assert result["alert_level"] == "NO"
+        assert alarms == []
+        assert engine.status["total_inferences"] == 3
+        assert engine.status["enabled_channels"] == [0, 1, 3]
+        assert engine.status["channels"][2]["detector_enabled"] is False
+        assert result["all_channel_results"][2]["detector_enabled"] is False
+        np.testing.assert_allclose(ring.get_recent(1, channel=None)[0], [0, 1, 2, 3])
 
     def test_color_typing_returns_red_blue_or_unknown(self, tmp_path):
         detector = _import_from_audi_app("detector")
@@ -769,6 +860,26 @@ detection:
             "alert_on_unknown": False,
         }
 
+    def test_webui_detector_channel_endpoint(self):
+        webui_server = _import_from_audi_app("webui_server")
+
+        class Detector:
+            def set_channel_enabled(self, channel_index, enabled):
+                assert channel_index == 2
+                assert enabled is False
+                return {"enabled_channels": [0, 1, 3]}
+
+        webui = webui_server.WebUI({"web": {"port": 0}})
+        webui.detector = Detector()
+
+        response = webui._app.test_client().post(
+            "/api/detector_channel",
+            json={"channel_index": 2, "enabled": False},
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["detector"] == {"enabled_channels": [0, 1, 3]}
+
     def test_webui_test_alert_accepts_color_alert_level(self):
         webui_server = _import_from_audi_app("webui_server")
 
@@ -844,7 +955,62 @@ detection:
         assert response.get_json()["db"] == 0.0
         assert response.get_json()["vu_percent"] == 100.0
 
-    def test_webui_mels_prefers_detector_preprocess_cache(self):
+    def test_webui_mels_uses_ring_buffer_by_default(self):
+        webui_server = _import_from_audi_app("webui_server")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=160, channels=4)
+        ring.append(np.ones((160, 4), dtype=np.float32) * 0.01)
+        class RawRecorder:
+            sample_rate = 16000
+            ring_buffer = ring
+
+        class Recorder:
+            recorder = RawRecorder()
+
+        class Detector:
+            n_mels = 4
+            n_fft = 16
+            win_length = 16
+            hop_length = 4
+            model_sample_rate = 16000
+
+            @property
+            def status(self):
+                return {
+                    "n_mels": self.n_mels,
+                    "n_fft": self.n_fft,
+                    "win_length": self.win_length,
+                    "hop_length": self.hop_length,
+                    "model_sample_rate": self.model_sample_rate,
+                }
+
+            @property
+            def latest_mels(self):
+                return {
+                    "timestamp": 123.0,
+                    "sample_rate": 16000,
+                    "channels": [
+                        {
+                            "channel_index": 0,
+                            "mel": np.arange(16, dtype=np.float32).reshape(4, 4),
+                        }
+                    ],
+                }
+
+        webui = webui_server.WebUI({"web": {"port": 0}})
+        webui.recorder = Recorder()
+        webui.detector = Detector()
+
+        response = webui._app.test_client().get("/api/mels?columns=2")
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["source"] == "ring_buffer_fallback"
+        assert payload["channels_available"] == 4
+        assert [ch["channel_index"] for ch in payload["channels"]] == [0, 1, 2, 3]
+
+    def test_webui_mels_can_return_detector_preprocess_cache(self):
         webui_server = _import_from_audi_app("webui_server")
 
         class RingBuffer:
@@ -892,7 +1058,9 @@ detection:
         webui.recorder = Recorder()
         webui.detector = Detector()
 
-        response = webui._app.test_client().get("/api/mels?columns=2")
+        response = webui._app.test_client().get(
+            "/api/mels?source=detector_cache&columns=2"
+        )
 
         assert response.status_code == 200
         payload = response.get_json()

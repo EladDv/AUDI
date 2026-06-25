@@ -27,7 +27,7 @@ logger = logging.getLogger("audi.recorder")
 def auto_discover_device() -> str:
     """Find the first USB audio capture device via arecord -l.
 
-    Returns the ALSA hardware device string (e.g. 'hw:2,0') or 'default'
+    Returns the ALSA plug device string (e.g. 'plughw:2,0') or 'default'
     if no USB capture device is found.
     """
     try:
@@ -47,7 +47,7 @@ def auto_discover_device() -> str:
             continue
         m = re.match(r"card\s+(\d+):.*device\s+(\d+):", line)
         if m:
-            dev = f"hw:{m.group(1)},{m.group(2)}"
+            dev = f"plughw:{m.group(1)},{m.group(2)}"
             logger.info("Auto-discovered USB audio device: %s", dev)
             return dev
 
@@ -206,7 +206,7 @@ class ALSARecorder:
         device: str = "default",
         sample_rate: int = 16000,
         channels: int = 1,
-        bit_depth: int = 16,
+        bit_depth: int = 32,
         segment_duration: int = 300,
         ring_buffer_duration: int = 120,
         on_segment: Callable[[str], None] | None = None,
@@ -583,7 +583,7 @@ class RecorderManager:
             device=device,
             sample_rate=audio_cfg.get("sample_rate", 16000),
             channels=audio_cfg.get("channels", 1),
-            bit_depth=audio_cfg.get("bit_depth", 16),
+            bit_depth=audio_cfg.get("bit_depth", 32),
             segment_duration=audio_cfg.get("segment_duration", 300),
             ring_buffer_duration=buf_sec,
         )

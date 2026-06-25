@@ -4,9 +4,9 @@
 
 # --- Audio Recording ---
 audio:
-  device: "auto"                 # ALSA device name: 'auto' discovers a USB mic, or use 'hw:2,0'
+  device: "auto"                 # 'auto' discovers USB via plughw for 16 kHz capture
   sample_rate: 16000             # Hz — 16 kHz matches the deployed detector
-  bit_depth: 16                  # 16-bit PCM
+  bit_depth: 32                  # US-4x4HR exposes S32_LE capture
   channels: 4                    # Capture device channels; detector/classifier run per app config
   segment_duration: 300          # Seconds (5 minutes) per recording segment
   ring_buffer_seconds: 120       # In-memory buffer: 60s pre-alarm + 60s post-alarm
@@ -16,7 +16,7 @@ audio:
 
 # --- Storage Ring Buffer ---
 storage:
-  max_size_gb: 32                # Max storage to use for audio (main recordings)
+  max_size_gb: 96                # Max storage to use for audio (main recordings)
   compress: true                 # Compress old segments to FLAC
   data_dir: "./data/recordings"   # Where audio lives (bind mount for persistence)
   min_free_gb: 1                 # Trigger cleanup when disk free drops below this
@@ -37,6 +37,7 @@ detection:
   hop_length: 160                # Hop length in samples
   window_samples: 81920          # 16000 Hz × 5.12s → 512 frames (librosa center=True)
   stride: 0.0625                 # Sliding window stride (0.0625 = 6.25% step size)
+  enabled_channels: [0, 1, 2, 3] # Detector channels; disabled channels are still recorded
 
   # Debug mode — logs per-window timing at DEBUG level
   debug: true
@@ -83,7 +84,7 @@ gpio:
   reset_pin: null                # Physical reset button input (pull-up)
   record_led_pin: null           # Disabled by default; GPIO 27 is field-tag yellow
   record_button_pin: null        # Disabled by default; GPIO 17 is field-tag red
-  pause_button_pin: 18           # Pause recording for 5 minutes (pull-up input)
+  pause_button_pin: null         # Disabled by default; pause remains available in the UI
   field_tag_green_pin: 22        # Active-low button to GND; correct detection and classification
   field_tag_yellow_pin: 27       # Active-low button to GND; correct detection, incorrect classification
   field_tag_red_pin: 17          # Active-low button to GND; incorrect detection

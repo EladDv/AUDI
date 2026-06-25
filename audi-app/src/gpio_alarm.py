@@ -48,7 +48,7 @@ class GPIOController:
         # Recording pins
         self.record_led_pin = _optional_pin(gpio_cfg.get("record_led_pin"))
         self.record_button_pin = _optional_pin(gpio_cfg.get("record_button_pin"))
-        self.pause_button_pin = _optional_pin(gpio_cfg.get("pause_button_pin", 18))
+        self.pause_button_pin = _optional_pin(gpio_cfg.get("pause_button_pin"))
         self.field_tag_button_pins = {
             "green": _optional_pin(gpio_cfg.get("field_tag_green_pin", 22)),
             "yellow": _optional_pin(gpio_cfg.get("field_tag_yellow_pin", 27)),

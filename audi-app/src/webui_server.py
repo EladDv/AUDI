@@ -259,6 +259,23 @@ class WebUI:
             )
             return jsonify({"status": "alert_routing_updated", "detector": status})
 
+        @app.route("/api/detector_channel", methods=["POST"])
+        def api_detector_channel():
+            """Enable or disable detector inference for one captured channel."""
+            if not self.detector:
+                return jsonify({"error": "Detector not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            if "channel_index" not in payload or "enabled" not in payload:
+                return jsonify({"error": "channel_index and enabled are required"}), 400
+            try:
+                status = self.detector.set_channel_enabled(
+                    int(payload["channel_index"]),
+                    bool(payload["enabled"]),
+                )
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            return jsonify({"status": "detector_channel_updated", "detector": status})
+
         @app.route("/api/clear_alarm", methods=["POST"])
         def api_clear_alarm():
             """Manually clear the GPIO alert from UI."""
@@ -311,6 +328,7 @@ class WebUI:
                     80,
                     max(2, int(request.args.get("columns", "24"))),
                 )
+                source = request.args.get("source", "ring_buffer")
                 r = self.recorder.recorder
                 det_cfg = self.detector.status if self.detector else {}
                 n_mels = int(getattr(self.detector, "n_mels", det_cfg.get("n_mels", 128)))
@@ -333,7 +351,7 @@ class WebUI:
                     if self.detector
                     else None
                 )
-                if cached and cached.get("channels"):
+                if source == "detector_cache" and cached and cached.get("channels"):
                     channels = []
                     for ch in cached["channels"][:4]:
                         mel = self._compact_mel(ch["mel"], max_columns)

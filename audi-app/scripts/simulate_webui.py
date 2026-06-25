@@ -416,7 +416,7 @@ class SimGPIO:
             "reset_pin": 23,
             "record_led_pin": None,
             "record_button_pin": None,
-            "pause_button_pin": 18,
+            "pause_button_pin": None,
             "field_tag_button_pins": {"green": 22, "yellow": 27, "red": 17},
             "button_events": self._events,
             "active_alert_level": "RED_ALERT",

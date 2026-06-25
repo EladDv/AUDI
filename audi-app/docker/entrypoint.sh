@@ -17,7 +17,9 @@ if arecord -l 2>/dev/null | grep -q "card"; then
     arecord -l
     if [ "$AUDIO_DEVICE" = "default" ] || [ "$AUDIO_DEVICE" = "auto" ]; then
         # Extract first USB device: "card N: ... [USB ...], device M: ..."
-        USB_DEV=$(arecord -l 2>/dev/null | grep "USB" | head -1 | sed -n 's/.*card \([0-9]*\):.*device \([0-9]*\):.*/hw:\1,\2/p' || true)
+        # Use plughw so ALSA delivers the configured app rate instead of the
+        # hardware's native rate when the interface cannot do 16 kHz directly.
+        USB_DEV=$(arecord -l 2>/dev/null | grep "USB" | head -1 | sed -n 's/.*card \([0-9]*\):.*device \([0-9]*\):.*/plughw:\1,\2/p' || true)
         if [ -n "$USB_DEV" ]; then
             AUDIO_DEVICE="$USB_DEV"
             echo "Auto-discovered USB device: $AUDIO_DEVICE"

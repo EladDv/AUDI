@@ -87,6 +87,7 @@ detection:
   inference_interval: 0.320
   active_threshold_profile: mn10_p90
   threshold_profiles_file: ./threshold_profiles.yaml
+  enabled_channels: [0, 1, 2, 3]  # Detector channels; disabled channels are still recorded
   mel_mean: 10.430418
   mel_std: 5.288271
   confidence_threshold_high: 0.6550  # YES detector state
@@ -103,7 +104,7 @@ gpio:
   reset_pin: 23            # Reset button
   record_led_pin: null     # Disabled by default; GPIO 27 is field-tag yellow
   record_button_pin: null  # Disabled by default; GPIO 17 is field-tag red
-  pause_button_pin: 18     # Pause 5 min
+  pause_button_pin: null   # Disabled by default; pause remains available in the UI
   field_tag_green_pin: 22  # Active-low button to GND; correct detection and classification
   field_tag_yellow_pin: 27 # Active-low button to GND; correct detection, incorrect classification
   field_tag_red_pin: 17    # Active-low button to GND; incorrect detection
@@ -219,7 +220,6 @@ The web UI will be at http://localhost:8080.
 | 2          | 3           | Alert output (buzzer/relay) |
 | 24         | 18          | Strobe/LED output |
 | 23         | 16          | Reset button input (pull-up) |
-| 18         | 12          | Pause 5 min button (pull-up) |
 | 22         | 15          | Green field tag: correct detection and classification |
 | 27         | 13          | Yellow field tag: correct detection, incorrect classification |
 | 17         | 11          | Red field tag: incorrect detection |

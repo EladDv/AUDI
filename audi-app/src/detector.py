@@ -180,6 +180,10 @@ class DetectionEngine:
             "sample_rate", DEFAULT_CAPTURE_SAMPLE_RATE
         )
         self.input_channels = max(1, int(audio_cfg.get("channels", 4)))
+        self.enabled_channel_indices = self._normalize_enabled_channels(
+            det_cfg.get("enabled_channels"),
+            self.input_channels,
+        )
 
         # Load TFLite classifier
         self.classifier = TFLiteClassifier(
@@ -284,6 +288,32 @@ class DetectionEngine:
             channel_count = len(self._channel_states) or self.input_channels
         self._channel_states = []
         self._sync_channel_states(channel_count)
+
+    @staticmethod
+    def _normalize_enabled_channels(value, channel_count: int) -> set[int]:
+        if value is None:
+            return set(range(max(1, int(channel_count))))
+        enabled: set[int] = set()
+        for item in value:
+            idx = int(item)
+            if 0 <= idx < channel_count:
+                enabled.add(idx)
+        return enabled
+
+    def set_channel_enabled(self, channel_index: int, enabled: bool) -> dict:
+        channel_index = int(channel_index)
+        if channel_index < 0 or channel_index >= self.input_channels:
+            raise ValueError(
+                f"channel_index must be between 0 and {self.input_channels - 1}"
+            )
+        self._sync_channel_states(self.input_channels)
+        if enabled:
+            self.enabled_channel_indices.add(channel_index)
+        else:
+            self.enabled_channel_indices.discard(channel_index)
+            self._channel_states[channel_index].hysteresis.clear()
+            self._channel_states[channel_index].last_inference = None
+        return self.status
 
     def _profiled_detection_config(self, profile: str | None) -> dict:
         det_cfg = dict(self._base_detection_config)
@@ -536,11 +566,23 @@ class DetectionEngine:
             logger.debug("No audio channels available for inference")
             return
         self._sync_channel_states(len(channel_ids))
+        enabled_channel_ids = [
+            idx for idx in channel_ids if idx in self.enabled_channel_indices
+        ]
+        if not enabled_channel_ids:
+            self._last_timing = {
+                "preprocess_ms": 0.0,
+                "inference_ms": 0.0,
+                "total_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "n_windows": 0,
+                "channels": 0,
+            }
+            return
 
         t_pre = time.perf_counter()
         channel_specs = []
         channel_mels: dict[int, np.ndarray] = {}
-        for channel_index in channel_ids:
+        for channel_index in enabled_channel_ids:
             spec = self.classifier.preprocess(
                 audio_by_channel[:, channel_index],
                 self.capture_sample_rate,
@@ -567,14 +609,14 @@ class DetectionEngine:
             "preprocess_ms": round(preprocess_ms, 2),
             "inference_ms": round(inference_ms, 2),
             "total_ms": round(total_ms, 2),
-            "n_windows": len(channel_ids),
-            "channels": len(channel_ids),
+            "n_windows": len(enabled_channel_ids),
+            "channels": len(enabled_channel_ids),
         }
 
         if self.debug:
             logger.debug(
                 "Inference: channels=%d pre=%.1fms inf=%.1fms total=%.1fms",
-                len(channel_ids),
+                len(enabled_channel_ids),
                 preprocess_ms,
                 inference_ms,
                 total_ms,
@@ -585,7 +627,7 @@ class DetectionEngine:
             self._last_channel_mels = channel_mels
             self._last_mel_timestamp = cycle_timestamp
         results: list[dict] = []
-        for batch_index, channel_index in enumerate(channel_ids):
+        for batch_index, channel_index in enumerate(enabled_channel_ids):
             logits = np.asarray(
                 logits_by_channel[batch_index], dtype=np.float32
             ).flatten()
@@ -683,20 +725,43 @@ class DetectionEngine:
             )
 
         self._last_channel_results = results
-        all_channel_results = [
-            {
-                "channel_index": r.get("channel_index"),
-                "channel_name": r.get("channel_name"),
-                "state": r.get("state"),
-                "alert_level": r.get("alert_level"),
-                "yes_confidence": r.get("yes_confidence"),
-                "raw_score": r.get("raw_score"),
-                "drone_color": r.get("drone_color"),
-                "red_confidence": r.get("red_confidence"),
-                "blue_confidence": r.get("blue_confidence"),
-            }
-            for r in results
-        ]
+        results_by_channel = {r.get("channel_index"): r for r in results}
+        all_channel_results = []
+        for idx, state in enumerate(self._channel_states):
+            r = results_by_channel.get(idx)
+            if r is None:
+                last_for_channel = state.last_inference or {}
+                all_channel_results.append(
+                    {
+                        "channel_index": idx,
+                        "channel_name": f"ch{idx}",
+                        "detector_enabled": idx in self.enabled_channel_indices,
+                        "state": "NO",
+                        "alert_level": "NO",
+                        "yes_confidence": 0.0,
+                        "raw_score": 0.0,
+                        "drone_color": last_for_channel.get(
+                            "drone_color", "UNKNOWN"
+                        ),
+                        "red_confidence": None,
+                        "blue_confidence": None,
+                    }
+                )
+                continue
+            all_channel_results.append(
+                {
+                    "channel_index": r.get("channel_index"),
+                    "channel_name": r.get("channel_name"),
+                    "detector_enabled": True,
+                    "state": r.get("state"),
+                    "alert_level": r.get("alert_level"),
+                    "yes_confidence": r.get("yes_confidence"),
+                    "raw_score": r.get("raw_score"),
+                    "drone_color": r.get("drone_color"),
+                    "red_confidence": r.get("red_confidence"),
+                    "blue_confidence": r.get("blue_confidence"),
+                }
+            )
         for result in results:
             result["firing_channel_index"] = result["channel_index"]
             result["firing_channel_name"] = result["channel_name"]
@@ -795,6 +860,7 @@ class DetectionEngine:
         channel_status = [
             {
                 "channel_index": idx,
+                "detector_enabled": idx in self.enabled_channel_indices,
                 "state": (state.last_inference or {}).get("state", "NO"),
                 "alert_level": (state.last_inference or {}).get("alert_level", "NO"),
                 "yes_confidence": (state.last_inference or {}).get(
@@ -823,6 +889,7 @@ class DetectionEngine:
             "model_type": self.model_type,
             "labels": self.labels,
             "input_channels": self.input_channels,
+            "enabled_channels": sorted(self.enabled_channel_indices),
             "threshold_yes": self.threshold_yes,
             "inference_interval": self.inference_interval,
             "window_samples": self.window_samples,
@@ -880,6 +947,13 @@ class DetectionEngine:
                 else 0
             ),
             "score_history": (self._score_history if self.debug else None),
+            "channel_score_history": [
+                {
+                    "channel_index": idx,
+                    "history": state.score_history[-self._score_history_max :],
+                }
+                for idx, state in enumerate(self._channel_states)
+            ],
             "color_trace": self._color_trace[-80:],
         }
 
