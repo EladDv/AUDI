@@ -57,7 +57,7 @@ scripts/deploy-pi.sh --host <pi-ip> --user pi --audio-channels 16 --detector-cha
                     └──────┬───────┘     └───────────────┘
                            │YES
                     ┌──────▼───────┐
-                    │  MUSIC DOA   │
+                    │ Pyroom DOA   │
                     │  (on demand) │
                     └──────┬───────┘
                            │
@@ -74,7 +74,7 @@ scripts/deploy-pi.sh --host <pi-ip> --user pi --audio-channels 16 --detector-cha
 | **Recorder** | `src/recorder.py` | Captures audio via `arecord` (ALSA) in 5-minute WAV segments. Maintains an **in-memory ring buffer** of the last 120 seconds of float32 PCM samples (60s pre-alarm + 60s post-alarm). Supports pause/resume and stop/start toggling. |
 | **Storage** | `src/storage.py` | Compresses old WAVs to FLAC (~6:1 ratio). Enforces a **32GB storage cap** — oldest files are evicted first when over budget or disk space runs low. |
 | **Detector** | `src/detector.py` | FP32 TFLite classifier with Schmitt-trigger YES/NO hysteresis (5 of 8 full-window votes), RED/BLUE typing, alert snapshot saving, and temporal confidence tracking. |
-| **DOA Estimator** | `src/doa_estimator.py` | Event-driven MUSIC azimuth estimator. Uses configured mic channels, HPS/CFAR peak picking, and harmonic STFT bins, and runs only after model-positive drone detections. |
+| **DOA Estimator** | `src/doa_estimator.py` | Event-driven Pyroomacoustics DOA estimator. Uses configured mic channels, HPS/CFAR peak picking, harmonic STFT bins, runtime-selectable MUSIC/NormMUSIC/SRP-PHAT profiles, smoothing, and confidence scoring. Runs only after model-positive drone detections. |
 | **GPIO** | `src/gpio_alarm.py` | Drives Pi GPIO pins: ALERT (buzzer/relay), STROBE (blinking LED), RESET (physical button to silence), PAUSE_BTN (pause 5 min), and green/yellow/red field-tag buttons for detection review. Graceful mock fallback when not on Pi hardware. |
 | **Web UI** | `src/webui_server.py` | Flask server serving a **touch-optimized HTML UI**. Big Start/Stop buttons (green/red, mutual exclusive), Silence and Pause controls, live VU meter, YES/NO state card with RED/BLUE typing, alert history, system info panel. |
 | **Main** | `src/main.py` | Orchestrator — starts everything, wires callbacks, handles graceful shutdown on SIGTERM/SIGINT. |
@@ -117,8 +117,8 @@ detection:
 
 doa:
   enabled: true                       # Computed only when the detector reaches YES
-  active_profile: triangle_3          # Runtime-switchable from the web UI
-  disabled_channels: []               # Runtime bad-mic exclusions for DOA only
+  active_profile: music_triangle_3    # Runtime-switchable from the web UI
+  disabled_channels: [4, 8, 10]       # Runtime bad-mic exclusions for DOA only
   mic_indices: [0, 7, 14]             # Fallback when no profiles are configured
   n_fft: 2048
   hop_length: 256
@@ -132,7 +132,8 @@ doa:
       guard_bins: 4
       ref_bins: 20
   music:
-    window_s: 1.0
+    window_s: 1.28
+    context_padding_s: 0.32
     azimuth_step_deg: 1.0
     half_bins: 1
     n_sources: 1
@@ -140,14 +141,30 @@ doa:
     smoothing_predictions: 5          # Circular smoothing across recent estimates
     confidence_jump_deg: 45.0         # Larger jumps lower DOA confidence
   profiles:
-    triangle_3:
+    music_triangle_3:
       mic_indices: [0, 7, 14]
-    corners_4:
-      mic_indices: [1, 7, 8, 14]
-    perimeter_8:
-      mic_indices: [1, 3, 7, 8, 10, 12, 14, 15]
-    all_16:
-      mic_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      music:
+        algorithm: MUSIC
+    normmusic_triangle_3:
+      mic_indices: [0, 7, 14]
+      music:
+        algorithm: NormMUSIC
+    srp_triangle_3:
+      mic_indices: [0, 7, 14]
+      music:
+        algorithm: SRP-PHAT
+    normmusic_perimeter_8:
+      mic_indices: [1, 3, 5, 7, 9, 12, 14, 15]
+      music:
+        algorithm: NormMUSIC
+    srp_perimeter_8:
+      mic_indices: [1, 3, 5, 7, 9, 12, 14, 15]
+      music:
+        algorithm: SRP-PHAT
+    normmusic_healthy_13:
+      mic_indices: [0, 1, 2, 3, 5, 6, 7, 9, 11, 12, 13, 14, 15]
+      music:
+        algorithm: NormMUSIC
 
 gpio:
   enabled: true

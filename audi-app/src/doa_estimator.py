@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
+import pyroomacoustics as pra
 from scipy import signal
 
 logger = logging.getLogger("audi.doa")
@@ -45,7 +46,8 @@ UMA16_MIC_POSITIONS_M = np.array(
 class DOASettings:
     name: str = "default"
     mic_indices: tuple[int, ...] = (0, 7, 14)
-    window_s: float = 1.0
+    window_s: float = 1.28
+    context_padding_s: float = 0.32
     azimuth_step_deg: float = 1.0
     elevation_deg: float = 0.0
     n_sources: int = 1
@@ -61,6 +63,7 @@ class DOASettings:
     diagonal_loading: float = 1e-3
     smoothing_predictions: int = 5
     confidence_jump_deg: float = 45.0
+    algorithm: str = "MUSIC"
 
 
 @dataclass(frozen=True)
@@ -191,8 +194,11 @@ class DOAEstimator:
                 "mic_indices": list(active_mics),
                 "profile_mic_indices": list(settings.mic_indices),
                 "disabled_channels": sorted(config.disabled_channels),
+                "algorithm": settings.algorithm,
                 "hps_harmonics": settings.hps_harmonics,
                 "window_s": settings.window_s,
+                "context_padding_s": settings.context_padding_s,
+                "analysis_window_s": analysis_window_s(settings),
                 "azimuth_step_deg": settings.azimuth_step_deg,
                 "smoothing_predictions": settings.smoothing_predictions,
                 "confidence_jump_deg": settings.confidence_jump_deg,
@@ -223,7 +229,7 @@ class DOAEstimator:
 
         requested_samples = max(
             settings.n_fft,
-            int(round(settings.window_s * self.sample_rate)),
+            int(round(analysis_window_s(settings) * self.sample_rate)),
         )
         audio = np.asarray(
             self.ring_buffer.get_recent(requested_samples, channel=None),
@@ -252,15 +258,14 @@ class DOAEstimator:
         if not harmonic_freqs:
             return self._not_ready("no usable MUSIC frequency bins")
 
-        covariance = self._covariance(stft, freqs, harmonic_freqs, settings)
         azimuths = np.arange(-180.0, 180.0, settings.azimuth_step_deg)
-        spectrum = music_azimuth_spectrum(
-            covariance,
-            UMA16_MIC_POSITIONS_M[np.array(active_mics)],
-            harmonic_freqs,
-            azimuths,
-            elevation_deg=settings.elevation_deg,
-            n_sources=settings.n_sources,
+        spectrum = pyroom_azimuth_spectrum(
+            stft=stft,
+            stft_freqs=freqs,
+            mic_indices=active_mics,
+            target_freqs_hz=harmonic_freqs,
+            azimuths_deg=azimuths,
+            settings=settings,
         )
         peak_index = int(np.argmax(spectrum))
         raw_azimuth = float(azimuths[peak_index])
@@ -287,6 +292,8 @@ class DOAEstimator:
             "music_frequencies_hz": [round(float(freq), 1) for freq in harmonic_freqs],
             "mic_indices": list(active_mics),
             "window_s": settings.window_s,
+            "context_padding_s": settings.context_padding_s,
+            "analysis_window_s": analysis_window_s(settings),
         }
 
     def _validate_startup(self) -> None:
@@ -521,7 +528,46 @@ def cfar_normalize_frequency(
     return values / (noise + eps)
 
 
-def music_azimuth_spectrum(
+def pyroom_azimuth_spectrum(
+    stft: np.ndarray,
+    stft_freqs: np.ndarray,
+    mic_indices: tuple[int, ...],
+    target_freqs_hz: list[float],
+    azimuths_deg: np.ndarray,
+    settings: DOASettings,
+) -> np.ndarray:
+    """Run the configured Pyroomacoustics DOA algorithm on selected bins."""
+    algorithm_cls = _pyroom_doa_class(settings.algorithm)
+    mic_positions = UMA16_MIC_POSITIONS_M[np.array(mic_indices), :2].T
+    azimuth_math_rad = np.deg2rad(90.0 - azimuths_deg)
+    sample_rate = float(stft_freqs[1] * settings.n_fft) if len(stft_freqs) > 1 else 0.0
+    doa = algorithm_cls(
+        mic_positions,
+        fs=sample_rate,
+        nfft=settings.n_fft,
+        c=SPEED_OF_SOUND_M_S,
+        num_src=settings.n_sources,
+        mode="far",
+        azimuth=azimuth_math_rad,
+    )
+    freq_bins = []
+    for freq in target_freqs_hz:
+        idx = int(np.searchsorted(stft_freqs, freq))
+        if 0 <= idx < stft.shape[1]:
+            freq_bins.append(idx)
+    if not freq_bins:
+        raise ValueError("no Pyroomacoustics frequency bins selected")
+    doa.locate_sources(stft, freq_bins=sorted(set(freq_bins)))
+    spectrum = np.asarray(doa.grid.values, dtype=np.float64)
+    spectrum = np.nan_to_num(spectrum, nan=0.0, posinf=0.0, neginf=0.0)
+    spectrum = mirror_compass_spectrum(spectrum, azimuths_deg)
+    peak = float(np.max(spectrum))
+    if peak > 0.0:
+        spectrum = spectrum / peak
+    return spectrum
+
+
+def legacy_music_azimuth_spectrum(
     covariance: np.ndarray,
     mic_positions_m: np.ndarray,
     frequencies_hz: list[float],
@@ -530,7 +576,7 @@ def music_azimuth_spectrum(
     n_sources: int = 1,
     speed_of_sound_m_s: float = SPEED_OF_SOUND_M_S,
 ) -> np.ndarray:
-    """Return a normalized MUSIC pseudo-spectrum over compass azimuths."""
+    """Comparison-only legacy MUSIC pseudo-spectrum over compass azimuths."""
     _, eigenvectors = np.linalg.eigh(covariance)
     noise_vectors = eigenvectors[:, : -int(n_sources)]
     noise_projector = noise_vectors @ noise_vectors.conj().T
@@ -558,6 +604,17 @@ def music_azimuth_spectrum(
     spectrum /= max(len(frequencies_hz), 1)
     spectrum /= np.max(spectrum) + 1e-30
     return spectrum
+
+
+def mirror_compass_spectrum(spectrum: np.ndarray, azimuths_deg: np.ndarray) -> np.ndarray:
+    """Map Pyroom's mirrored phase convention back to AUDI compass bearings."""
+    mirrored = np.empty_like(spectrum, dtype=np.float64)
+    for idx, angle in enumerate(azimuths_deg):
+        target = normalize_signed_deg(-float(angle))
+        distances = np.abs(((azimuths_deg - target + 180.0) % 360.0) - 180.0)
+        source_idx = int(np.argmin(distances))
+        mirrored[idx] = spectrum[source_idx]
+    return mirrored
 
 
 def circular_mean_deg(angles_deg: list[float], weights: list[float]) -> float:
@@ -596,7 +653,11 @@ def _parse_doa_settings(name: str, cfg: dict[str, Any]) -> DOASettings:
     return DOASettings(
         name=name,
         mic_indices=_parse_int_tuple(cfg.get("mic_indices", (0, 7, 14))),
-        window_s=_positive_float(music_cfg.get("window_s", cfg.get("window_s", 1.0)), 0.1),
+        window_s=_positive_float(music_cfg.get("window_s", cfg.get("window_s", 1.28)), 0.1),
+        context_padding_s=max(
+            0.0,
+            float(music_cfg.get("context_padding_s", cfg.get("context_padding_s", 0.32))),
+        ),
         azimuth_step_deg=_positive_float(music_cfg.get("azimuth_step_deg", 1.0), 0.1),
         elevation_deg=float(music_cfg.get("elevation_deg", 0.0)),
         n_sources=max(1, int(music_cfg.get("n_sources", 1))),
@@ -612,6 +673,7 @@ def _parse_doa_settings(name: str, cfg: dict[str, Any]) -> DOASettings:
         diagonal_loading=max(0.0, float(music_cfg.get("diagonal_loading", 1e-3))),
         smoothing_predictions=max(1, int(music_cfg.get("smoothing_predictions", 5))),
         confidence_jump_deg=_positive_float(music_cfg.get("confidence_jump_deg", 45.0), 1.0),
+        algorithm=str(music_cfg.get("algorithm", cfg.get("algorithm", "MUSIC"))),
     )
 
 
@@ -629,3 +691,18 @@ def _positive_float(value: Any, minimum: float) -> float:
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
     return max(lower, min(upper, float(value)))
+
+
+def analysis_window_s(settings: DOASettings) -> float:
+    return settings.window_s + 2.0 * settings.context_padding_s
+
+
+def _pyroom_doa_class(name: str):
+    normalized = name.strip().lower().replace("_", "").replace("-", "")
+    if normalized == "music":
+        return pra.doa.MUSIC
+    if normalized == "normmusic":
+        return pra.doa.NormMUSIC
+    if normalized in {"srp", "srpphat"}:
+        return pra.doa.SRP
+    raise ValueError(f"unknown DOA algorithm: {name}")

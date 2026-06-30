@@ -47,6 +47,9 @@ uv run audi-eval calibrate checkpoints/<sweep_dir>/<run_name>
 # Run attack evaluation on all checkpoints
 uv run audi-eval --noise-path data/my_background --drone-path data/my_drone attack-runs
 
+# Compare DOA algorithms on the FPV flyover recording
+uv run audi-eval doa-compare data/FPV_flyover_with_attacks.wav
+
 # Launch the eval dashboard
 uv run --extra eval streamlit run eval_app/
 

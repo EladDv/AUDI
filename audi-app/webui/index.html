@@ -1304,9 +1304,10 @@
           M${Number(ch.channel_index)}
         </label>
       `).join('');
+      const algorithm = doa.algorithm || '--';
       panel.innerHTML = `
         <div class="doa-row"><strong>DOA</strong>${doaProfileControl(doa)}</div>
-        <div class="doa-row">Smooth ${smooth} Raw ${raw} Conf ${confidence}</div>
+        <div class="doa-row">${escapeHtml(algorithm)} Smooth ${smooth} Raw ${raw} Conf ${confidence}</div>
         <div class="doa-channel-list">${channels || '<span>No profile mics</span>'}</div>
       `;
     }

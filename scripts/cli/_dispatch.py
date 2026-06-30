@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Mapping
 from importlib import import_module
 from pathlib import Path
-import sys
 
 CommandSpec = tuple[str, str]
 
@@ -24,6 +24,7 @@ EVAL_SUBCOMMANDS: dict[str, CommandSpec] = {
     "field": ("scripts.cli.eval.field", "run"),
     "postprocess": ("scripts.cli.eval.postprocess", "run"),
     "calibrate": ("scripts.cli.eval.calibrate", "run"),
+    "doa-compare": ("scripts.cli.eval.doa_compare", "run"),
 }
 
 
