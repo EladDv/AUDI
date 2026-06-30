@@ -7,7 +7,7 @@ audio:
   device: "auto"                 # 'auto' discovers USB via plughw for 16 kHz capture
   sample_rate: 16000             # Hz — 16 kHz matches the deployed detector
   bit_depth: 32                  # US-4x4HR exposes S32_LE capture
-  channels: 4                    # Capture device channels; detector/classifier run per app config
+  channels: 16                    # Capture device channels; detector/classifier run per app config
   segment_duration: 300          # Seconds (5 minutes) per recording segment
   ring_buffer_seconds: 120       # In-memory buffer: 60s pre-alarm + 60s post-alarm
   format: "wav"                  # Raw capture format (wav before compression)
@@ -37,7 +37,7 @@ detection:
   hop_length: 160                # Hop length in samples
   window_samples: 81920          # 16000 Hz × 5.12s → 512 frames (librosa center=True)
   stride: 0.0625                 # Sliding window stride (0.0625 = 6.25% step size)
-  enabled_channels: null         # null = infer on every captured channel; disabled channels are still recorded
+  enabled_channels: 0         # null = infer on every captured channel; disabled channels are still recorded
 
   # Debug mode — logs per-window timing at DEBUG level
   debug: true
@@ -75,6 +75,43 @@ detection:
 
   labels: ["drone"]                  # Detection class label
   alert_history_file: "./data/alerts/alert_history.json"
+
+# --- Direction of Arrival (MUSIC) ---
+# DOA is event-driven: it is computed only after the detector reaches YES for a
+# channel, then attached to that detection and exposed via /api/status.
+doa:
+  enabled: true
+  active_profile: triangle_3
+  disabled_channels: []          # Runtime bad-mic exclusions for DOA only
+  mic_indices: [0, 7, 14]        # Fallback when no profiles are configured
+  n_fft: 2048                    # STFT size for HPS peak picking + MUSIC
+  hop_length: 256                # STFT hop in samples
+  hps:
+    harmonics: 3                 # HPS(f) = S(f) + S(2f) + S(3f) in CFAR-dB
+    fmin_hz: 100                 # Ignore HPS bins below wind/noise floor
+    peak_search:
+      fmin_hz: 100               # Dominant fundamental search range
+      fmax_hz: 600
+    cfar:
+      guard_bins: 4
+      ref_bins: 20
+  music:
+    window_s: 1.0                # Recent ring-buffer window used after detection
+    azimuth_step_deg: 1.0        # Output grid resolution
+    half_bins: 1                 # Include +/- STFT bins around each harmonic
+    n_sources: 1
+    elevation_deg: 0.0           # 0 = horizontal plane
+    smoothing_predictions: 5     # Circular smoothing across recent DOA estimates
+    confidence_jump_deg: 45.0    # Larger jumps reduce DOA confidence
+  profiles:
+    triangle_3:
+      mic_indices: [0, 7, 14]
+    corners_4:
+      mic_indices: [1, 7, 8, 14]
+    perimeter_8:
+      mic_indices: [1, 3, 7, 8, 10, 12, 14, 15]
+    all_16:
+      mic_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 
 # --- GPIO Alert System ---
 gpio:

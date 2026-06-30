@@ -893,6 +893,38 @@
       gap: 8px;
     }
 
+    .doa-controls {
+      width: 100%;
+      display: grid;
+      gap: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(148, 163, 184, 0.35);
+    }
+
+    .doa-row,
+    .doa-channel-list {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .doa-channel-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-height: 32px;
+      padding: 5px 7px;
+      border-radius: 6px;
+      background: rgba(15, 23, 42, 0.08);
+      font-size: 0.75rem;
+      font-weight: 800;
+    }
+
+    body.dark-mode .doa-channel-chip {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
     .advanced-test-btn {
       min-height: 44px;
       border: 1px solid transparent;
@@ -1017,6 +1049,7 @@
     <label><input type="checkbox" id="labelingToggle" onchange="setLabeling(this.checked)"> Labeling buttons</label>
     <label><input type="checkbox" id="blueAlertToggle" onchange="setAlertRouting()"> Alert on blue</label>
     <label><input type="checkbox" id="unknownAlertToggle" onchange="setAlertRouting()"> Alert on unknown</label>
+    <div class="doa-controls" id="doaControls"></div>
     <div class="advanced-actions">
       <button class="advanced-test-btn red" onclick="testAlert('RED_ALERT')">Test Red</button>
       <button class="advanced-test-btn blue" onclick="testAlert('BLUE_ALERT')">Test Blue</button>
@@ -1193,6 +1226,22 @@
       }).then(() => update()).catch(() => {});
     }
 
+    function setDOAProfile(profile) {
+      fetch('/api/doa_profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile })
+      }).then(() => update()).catch(() => {});
+    }
+
+    function setDOAChannel(channelIndex, enabled) {
+      fetch('/api/doa_channel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_index: channelIndex, enabled })
+      }).then(() => update()).catch(() => {});
+    }
+
     function alertLabel(level) {
       if (level === 'RED_ALERT') return 'RED ALERT';
       if (level === 'BLUE_ALERT') return 'BLUE ALERT';
@@ -1229,14 +1278,49 @@
       </select>`;
     }
 
+    function doaProfileControl(doa) {
+      const profiles = doa.profiles || [];
+      const active = doa.active_profile || 'default';
+      if (!doa.enabled) return '<span class="value white">Disabled</span>';
+      if (!profiles.length) return `<span>${escapeHtml(active)}</span>`;
+      return `<select class="profile-select" id="doaProfileSelect" onchange="setDOAProfile(this.value)">
+        ${profiles.map(profile => `
+          <option value="${escapeHtml(profile)}" ${profile === active ? 'selected' : ''}>
+            ${escapeHtml(profile)}
+          </option>
+        `).join('')}
+      </select>`;
+    }
+
+    function drawDOAControls(doa) {
+      const panel = document.getElementById('doaControls');
+      if (!panel) return;
+      const confidence = doa.confidence == null ? '--' : Number(doa.confidence).toFixed(2);
+      const raw = doa.raw_azimuth_deg == null ? '--' : `${Number(doa.raw_azimuth_deg).toFixed(0)}deg`;
+      const smooth = doa.azimuth_deg == null ? '--' : `${Number(doa.azimuth_deg).toFixed(0)}deg`;
+      const channels = (doa.channels || []).map(ch => `
+        <label class="doa-channel-chip">
+          <input type="checkbox" ${ch.enabled ? 'checked' : ''} onchange="setDOAChannel(${Number(ch.channel_index)}, this.checked)">
+          M${Number(ch.channel_index)}
+        </label>
+      `).join('');
+      panel.innerHTML = `
+        <div class="doa-row"><strong>DOA</strong>${doaProfileControl(doa)}</div>
+        <div class="doa-row">Smooth ${smooth} Raw ${raw} Conf ${confidence}</div>
+        <div class="doa-channel-list">${channels || '<span>No profile mics</span>'}</div>
+      `;
+    }
+
     function update() {
       // --- Status poll ---
       fetch('/api/status').then(r => r.json()).then(d => {
         const rec = d.recorder || {};
         const st = d.storage || {};
         const det = d.detector || {};
+        const doa = d.doa || {};
         const gp = d.gpio || {};
         applyDetectorPrefs(det);
+        drawDOAControls(doa);
 
         const alarming = gp.alarming || false;
         const recording = rec.running && !rec.stopped;
@@ -1279,6 +1363,12 @@
       <div class="status-card">
         <div class="label">Profile</div>
         ${profileControl(det)}
+      </div>
+      <div class="status-card">
+        <div class="label">Direction</div>
+        <div class="value ${doa.azimuth_deg == null ? 'white' : 'green'}">
+          ${doa.azimuth_deg == null ? 'Idle' : `${Number(doa.azimuth_deg).toFixed(0)}deg ${doa.confidence == null ? '' : Number(doa.confidence).toFixed(2)}`}
+        </div>
       </div>
     `;
         drawChannelStatus(det.channels || [], rec.channel_health || []);

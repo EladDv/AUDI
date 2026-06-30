@@ -588,6 +588,202 @@ class TestAudiApp:
         assert result["all_channel_results"][2]["detector_enabled"] is False
         np.testing.assert_allclose(ring.get_recent(1, channel=None)[0], [0, 1, 2, 3])
 
+    def test_detector_runs_doa_only_after_positive_model_detection(
+        self, tmp_path, monkeypatch
+    ):
+        detector = _import_from_audi_app("detector")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=24, channels=2)
+        ring.append(np.tile(np.array([[0.0, 1.0]], dtype=np.float32), (6, 1)))
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "model_sample_rate": 4,
+                    "window_samples": 4,
+                    "confidence_threshold_high": 0.5,
+                    "hysteresis_window": 1,
+                    "hysteresis_ratio": 1.0,
+                    "hysteresis_margin": 0.0,
+                    "alarm_cooldown_s": 0,
+                },
+                "audio": {"sample_rate": 4, "channels": 2},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=ring,
+        )
+
+        class DOA:
+            def __init__(self):
+                self.calls = 0
+
+            @property
+            def status(self):
+                return {"enabled": True}
+
+            def force_estimate(self):
+                self.calls += 1
+                return {"ok": True, "azimuth_deg": 45.0}
+
+        doa = DOA()
+        engine.doa_estimator = doa
+
+        def preprocess(audio, capture_sr):
+            return np.array([audio[0]], dtype=np.float32)
+
+        def predict_logits(spec):
+            return np.array([2.0 if int(spec[0]) == 1 else -2.0], dtype=np.float32)
+
+        monkeypatch.setattr(engine.classifier, "preprocess", preprocess)
+        monkeypatch.setattr(engine.classifier, "predict_logits", predict_logits)
+
+        result = engine.force_inference()
+
+        assert doa.calls == 1
+        assert result["firing_channel_index"] == 1
+        assert result["doa"] == {"ok": True, "azimuth_deg": 45.0}
+
+    def test_detector_skips_doa_when_model_does_not_detect_drone(
+        self, tmp_path, monkeypatch
+    ):
+        detector = _import_from_audi_app("detector")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=24, channels=2)
+        ring.append(np.zeros((6, 2), dtype=np.float32))
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "model_sample_rate": 4,
+                    "window_samples": 4,
+                    "confidence_threshold_high": 0.5,
+                    "hysteresis_window": 1,
+                    "hysteresis_ratio": 1.0,
+                    "hysteresis_margin": 0.0,
+                },
+                "audio": {"sample_rate": 4, "channels": 2},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=ring,
+        )
+
+        class DOA:
+            @property
+            def status(self):
+                return {"enabled": True}
+
+            def force_estimate(self):
+                raise AssertionError("DOA should not run for all-NO cycles")
+
+        engine.doa_estimator = DOA()
+        monkeypatch.setattr(
+            engine.classifier,
+            "preprocess",
+            lambda audio, capture_sr: np.array([0.0], dtype=np.float32),
+        )
+        monkeypatch.setattr(
+            engine.classifier,
+            "predict_logits",
+            lambda spec: np.array([-2.0], dtype=np.float32),
+        )
+
+        result = engine.force_inference()
+
+        assert result["alert_level"] == "NO"
+        assert "doa" not in result
+
+    def test_doa_profiles_and_channel_disable_are_runtime_configurable(self):
+        doa_mod = _import_from_audi_app("doa_estimator")
+
+        class Ring:
+            def get_recent(self, *args, **kwargs):
+                return np.zeros((2048, 16), dtype=np.float32)
+
+        estimator = doa_mod.DOAEstimator(
+            {
+                "audio": {"sample_rate": 16000, "channels": 16},
+                "doa": {
+                    "enabled": True,
+                    "active_profile": "triangle_3",
+                    "profiles": {
+                        "triangle_3": {"mic_indices": [0, 7, 14]},
+                        "corners_4": {"mic_indices": [1, 7, 8, 14]},
+                    },
+                },
+            },
+            Ring(),
+        )
+
+        assert estimator.status["active_profile"] == "triangle_3"
+        assert estimator.status["mic_indices"] == [0, 7, 14]
+
+        status = estimator.set_profile("corners_4")
+        assert status["active_profile"] == "corners_4"
+        assert status["mic_indices"] == [1, 7, 8, 14]
+
+        status = estimator.set_channel_enabled(7, False)
+        assert status["mic_indices"] == [1, 8, 14]
+        assert status["disabled_channels"] == [7]
+
+        status = estimator.set_channel_enabled(7, True)
+        assert status["mic_indices"] == [1, 7, 8, 14]
+        assert status["disabled_channels"] == []
+
+    def test_doa_rejects_disabling_below_two_active_mics(self):
+        doa_mod = _import_from_audi_app("doa_estimator")
+
+        class Ring:
+            def get_recent(self, *args, **kwargs):
+                return np.zeros((2048, 16), dtype=np.float32)
+
+        estimator = doa_mod.DOAEstimator(
+            {
+                "audio": {"sample_rate": 16000, "channels": 16},
+                "doa": {
+                    "enabled": True,
+                    "mic_indices": [0, 7],
+                },
+            },
+            Ring(),
+        )
+
+        with pytest.raises(ValueError, match="at least two"):
+            estimator.set_channel_enabled(7, False)
+
+    def test_doa_smoothing_lowers_confidence_on_large_jump(self):
+        doa_mod = _import_from_audi_app("doa_estimator")
+
+        class Ring:
+            def get_recent(self, *args, **kwargs):
+                return np.zeros((2048, 16), dtype=np.float32)
+
+        estimator = doa_mod.DOAEstimator(
+            {
+                "audio": {"sample_rate": 16000, "channels": 16},
+                "doa": {
+                    "enabled": True,
+                    "music": {
+                        "smoothing_predictions": 3,
+                        "confidence_jump_deg": 45,
+                    },
+                },
+            },
+            Ring(),
+        )
+        settings = estimator._active_settings()
+        spectrum = np.array([0.1, 0.2, 1.0, 0.2, 0.1], dtype=np.float64)
+
+        first = estimator._smooth_azimuth(10.0, spectrum, 12.0, settings)
+        jumped = estimator._smooth_azimuth(130.0, spectrum, 12.0, settings)
+
+        assert jumped["jump_deg"] == pytest.approx(120.0)
+        assert jumped["confidence"] < first["confidence"]
+        assert doa_mod.angular_distance_deg(jumped["azimuth_deg"], 130.0) > 1.0
+
     def test_detector_defaults_to_all_capture_channels(self, tmp_path):
         detector = _import_from_audi_app("detector")
 
@@ -941,6 +1137,62 @@ detection:
 
         assert response.status_code == 200
         assert response.get_json()["detector"] == {"enabled_channels": [0, 1, 3]}
+
+    def test_webui_status_includes_latest_doa_without_triggering_estimate(self):
+        webui_server = _import_from_audi_app("webui_server")
+
+        class DOA:
+            @property
+            def status(self):
+                return {
+                    "enabled": True,
+                    "azimuth_deg": 45.0,
+                    "last_result": {"ok": True, "azimuth_deg": 45.0},
+                }
+
+        webui = webui_server.WebUI({"web": {"port": 0}})
+        webui.doa = DOA()
+
+        response = webui._app.test_client().get("/api/status")
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["doa"]["azimuth_deg"] == 45.0
+
+    def test_webui_doa_profile_and_channel_endpoints(self):
+        webui_server = _import_from_audi_app("webui_server")
+
+        class DOA:
+            @property
+            def status(self):
+                return {"active_profile": "triangle_3"}
+
+            def set_profile(self, profile):
+                assert profile == "corners_4"
+                return {"active_profile": profile}
+
+            def set_channel_enabled(self, channel_index, enabled):
+                assert channel_index == 7
+                assert enabled is False
+                return {"mic_indices": [1, 8, 14], "disabled_channels": [7]}
+
+        webui = webui_server.WebUI({"web": {"port": 0}})
+        webui.doa = DOA()
+        client = webui._app.test_client()
+
+        profile_response = client.post(
+            "/api/doa_profile",
+            json={"profile": "corners_4"},
+        )
+        channel_response = client.post(
+            "/api/doa_channel",
+            json={"channel_index": 7, "enabled": False},
+        )
+
+        assert profile_response.status_code == 200
+        assert profile_response.get_json()["doa"] == {"active_profile": "corners_4"}
+        assert channel_response.status_code == 200
+        assert channel_response.get_json()["doa"]["disabled_channels"] == [7]
 
     def test_webui_test_alert_accepts_color_alert_level(self):
         webui_server = _import_from_audi_app("webui_server")

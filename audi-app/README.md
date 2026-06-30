@@ -1,6 +1,6 @@
 # AUDI — Type A
 
-**Continuous audio recording + drone detection for Raspberry Pi.** Records audio in 5-minute segments to a 32GB ring buffer on disk, keeps the last 120 seconds of PCM in memory for ML inference and alarm snapshots, and drives GPIO outputs for configured alert levels. The default deployment alerts on RED detections and records BLUE/UNKNOWN detections without firing the alarm. Touch-friendly web UI on port 8080.
+**Continuous audio recording + drone detection for Raspberry Pi.** Records audio in 5-minute segments to a 32GB ring buffer on disk, keeps the last 120 seconds of PCM in memory for ML inference, MUSIC direction-of-arrival estimates, and alarm snapshots, and drives GPIO outputs for configured alert levels. DOA is event-driven: it runs only after the detector reaches a positive drone state. The default deployment alerts on RED detections and records BLUE/UNKNOWN detections without firing the alarm. Touch-friendly web UI on port 8080.
 
 Open http://raspberry-pi-ip:8080 from any browser on your local network.
 
@@ -55,6 +55,11 @@ scripts/deploy-pi.sh --host <pi-ip> --user pi --audio-channels 16 --detector-cha
                     │  YES / NO +  │     │  + LEDs +     │
                     │  RED / BLUE  │     │  Buttons      │
                     └──────┬───────┘     └───────────────┘
+                           │YES
+                    ┌──────▼───────┐
+                    │  MUSIC DOA   │
+                    │  (on demand) │
+                    └──────┬───────┘
                            │
                     ┌──────▼───────┐
                     │  Web UI      │
@@ -69,6 +74,7 @@ scripts/deploy-pi.sh --host <pi-ip> --user pi --audio-channels 16 --detector-cha
 | **Recorder** | `src/recorder.py` | Captures audio via `arecord` (ALSA) in 5-minute WAV segments. Maintains an **in-memory ring buffer** of the last 120 seconds of float32 PCM samples (60s pre-alarm + 60s post-alarm). Supports pause/resume and stop/start toggling. |
 | **Storage** | `src/storage.py` | Compresses old WAVs to FLAC (~6:1 ratio). Enforces a **32GB storage cap** — oldest files are evicted first when over budget or disk space runs low. |
 | **Detector** | `src/detector.py` | FP32 TFLite classifier with Schmitt-trigger YES/NO hysteresis (5 of 8 full-window votes), RED/BLUE typing, alert snapshot saving, and temporal confidence tracking. |
+| **DOA Estimator** | `src/doa_estimator.py` | Event-driven MUSIC azimuth estimator. Uses configured mic channels, HPS/CFAR peak picking, and harmonic STFT bins, and runs only after model-positive drone detections. |
 | **GPIO** | `src/gpio_alarm.py` | Drives Pi GPIO pins: ALERT (buzzer/relay), STROBE (blinking LED), RESET (physical button to silence), PAUSE_BTN (pause 5 min), and green/yellow/red field-tag buttons for detection review. Graceful mock fallback when not on Pi hardware. |
 | **Web UI** | `src/webui_server.py` | Flask server serving a **touch-optimized HTML UI**. Big Start/Stop buttons (green/red, mutual exclusive), Silence and Pause controls, live VU meter, YES/NO state card with RED/BLUE typing, alert history, system info panel. |
 | **Main** | `src/main.py` | Orchestrator — starts everything, wires callbacks, handles graceful shutdown on SIGTERM/SIGINT. |
@@ -108,6 +114,40 @@ detection:
   alert_on_red: true                 # RED detections fire GPIO by default
   alert_on_blue: false
   alert_on_unknown: false
+
+doa:
+  enabled: true                       # Computed only when the detector reaches YES
+  active_profile: triangle_3          # Runtime-switchable from the web UI
+  disabled_channels: []               # Runtime bad-mic exclusions for DOA only
+  mic_indices: [0, 7, 14]             # Fallback when no profiles are configured
+  n_fft: 2048
+  hop_length: 256
+  hps:
+    harmonics: 3
+    fmin_hz: 100
+    peak_search:
+      fmin_hz: 100
+      fmax_hz: 600
+    cfar:
+      guard_bins: 4
+      ref_bins: 20
+  music:
+    window_s: 1.0
+    azimuth_step_deg: 1.0
+    half_bins: 1
+    n_sources: 1
+    elevation_deg: 0.0
+    smoothing_predictions: 5          # Circular smoothing across recent estimates
+    confidence_jump_deg: 45.0         # Larger jumps lower DOA confidence
+  profiles:
+    triangle_3:
+      mic_indices: [0, 7, 14]
+    corners_4:
+      mic_indices: [1, 7, 8, 14]
+    perimeter_8:
+      mic_indices: [1, 3, 7, 8, 10, 12, 14, 15]
+    all_16:
+      mic_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 
 gpio:
   enabled: true

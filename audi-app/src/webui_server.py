@@ -135,6 +135,7 @@ class WebUI:
         self.recorder = None
         self.storage = None
         self.detector = None
+        self.doa = None
         self.gpio = None
 
         self._app = Flask(__name__)
@@ -197,9 +198,49 @@ class WebUI:
                 "recorder": self.recorder and self.recorder.status or {},
                 "storage": self.storage and self.storage.status or {},
                 "detector": self.detector and self.detector.status or {},
+                "doa": self.doa and self.doa.status or {},
                 "gpio": self.gpio and self.gpio.status() or {},
             }
             return jsonify(data)
+
+        @app.route("/api/doa")
+        def api_doa():
+            """Return the latest DOA estimate. Estimation runs only on detections."""
+            if not self.doa:
+                return jsonify({"enabled": False, "last_result": {}})
+            return jsonify(self.doa.status)
+
+        @app.route("/api/doa_profile", methods=["POST"])
+        def api_doa_profile():
+            """Switch the active DOA profile without restarting the app."""
+            if not self.doa:
+                return jsonify({"error": "DOA estimator not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            profile = str(payload.get("profile", ""))
+            if not profile:
+                return jsonify({"error": "profile is required"}), 400
+            try:
+                status = self.doa.set_profile(profile)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            return jsonify({"status": "doa_profile_updated", "doa": status})
+
+        @app.route("/api/doa_channel", methods=["POST"])
+        def api_doa_channel():
+            """Enable or disable one captured channel for DOA."""
+            if not self.doa:
+                return jsonify({"error": "DOA estimator not running"}), 503
+            payload = request.get_json(silent=True) or {}
+            if "channel_index" not in payload or "enabled" not in payload:
+                return jsonify({"error": "channel_index and enabled are required"}), 400
+            try:
+                status = self.doa.set_channel_enabled(
+                    int(payload["channel_index"]),
+                    bool(payload["enabled"]),
+                )
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            return jsonify({"status": "doa_channel_updated", "doa": status})
 
         @app.route("/api/alarm_history")
         def api_alarm_history():

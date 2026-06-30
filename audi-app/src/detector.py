@@ -239,6 +239,7 @@ class DetectionEngine:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._recorder_ref = None
+        self.doa_estimator = None
         self._last_inference: dict | None = None
         self._last_channel_results: list[dict] = []
         self._last_channel_mels: dict[int, np.ndarray] = {}
@@ -767,10 +768,16 @@ class DetectionEngine:
                     "blue_confidence": r.get("blue_confidence"),
                 }
             )
+        doa_result = None
         for result in results:
             result["firing_channel_index"] = result["channel_index"]
             result["firing_channel_name"] = result["channel_name"]
             result["all_channel_results"] = all_channel_results
+            if result["state"] == "YES":
+                if doa_result is None:
+                    doa_result = self._compute_doa_estimate()
+                if doa_result is not None:
+                    result["doa"] = doa_result
 
         primary = self._select_primary_result(results)
         if primary is not None:
@@ -849,6 +856,23 @@ class DetectionEngine:
                 ).start()
                 if self.on_alarm:
                     self.on_alarm(result)
+
+    def _compute_doa_estimate(self) -> dict | None:
+        """Compute DOA only after the model reports a drone."""
+        if not self.doa_estimator:
+            return None
+        try:
+            status = self.doa_estimator.status
+            if not status.get("enabled"):
+                return None
+            return self.doa_estimator.force_estimate()
+        except Exception as exc:
+            logger.warning("DOA estimate failed for detection: %s", exc)
+            return {
+                "ok": False,
+                "timestamp": time.time(),
+                "error": str(exc),
+            }
 
     def _save_snapshot_and_alert(self, detection: dict):
         self.snapshotter.save_snapshot(

@@ -488,4 +488,5 @@ uv run --extra export audi-export-blue-red-tflite \
 
 ## License
 
-MIT
+GNU AGPLv3
+GNU Affero General Public License v3.0

@@ -141,6 +141,54 @@ def load_config(config_path: str = None) -> dict:
             "labels": ["drone"],
             "alert_history_file": "/data/alerts/alert_history.json",
         },
+        "doa": {
+            "enabled": False,
+            "active_profile": "triangle_3",
+            "disabled_channels": [],
+            "mic_indices": [0, 7, 14],
+            "n_fft": 2048,
+            "hop_length": 256,
+            "hps": {
+                "harmonics": 3,
+                "fmin_hz": 100,
+                "peak_search": {"fmin_hz": 100, "fmax_hz": 600},
+                "cfar": {"guard_bins": 4, "ref_bins": 20},
+            },
+            "music": {
+                "window_s": 1.0,
+                "azimuth_step_deg": 1.0,
+                "half_bins": 1,
+                "n_sources": 1,
+                "elevation_deg": 0.0,
+                "smoothing_predictions": 5,
+                "confidence_jump_deg": 45.0,
+            },
+            "profiles": {
+                "triangle_3": {"mic_indices": [0, 7, 14]},
+                "corners_4": {"mic_indices": [1, 7, 8, 14]},
+                "perimeter_8": {"mic_indices": [1, 3, 7, 8, 10, 12, 14, 15]},
+                "all_16": {
+                    "mic_indices": [
+                        0,
+                        1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7,
+                        8,
+                        9,
+                        10,
+                        11,
+                        12,
+                        13,
+                        14,
+                        15,
+                    ]
+                },
+            },
+        },
         "gpio": {
             "enabled": True,
             "alert_pin": 2,
@@ -229,6 +277,7 @@ class AudioGuardApp:
         self.recorder = None
         self.storage = None
         self.detector = None
+        self.doa = None
         self.gpio = None
         self.webui = None
 
@@ -262,19 +311,29 @@ class AudioGuardApp:
             // self.recorder.recorder.sample_rate,
         )
 
-        # 3. Storage Manager (FLAC compression, 32GB ring buffer, alerts management)
+        # 3. DOA estimator (armed here, run only after detector positives)
+        from doa_estimator import DOAEstimator
+
+        self.doa = DOAEstimator(self.config, self.recorder.ring_buffer)
+        self.doa.start()
+        self.logger.info(
+            "[3/6] DOA: %s",
+            "armed on detector positives" if self.doa.status["enabled"] else "disabled",
+        )
+
+        # 4. Storage Manager (FLAC compression, 32GB ring buffer, alerts management)
         from storage import StorageManager
 
         self.storage = StorageManager(self.config)
         self.storage.start()
         self.logger.info(
-            "[3/5] Storage: %.1f GB max (recordings), %.1f GB max (alerts), compress=%s",
+            "[4/6] Storage: %.1f GB max (recordings), %.1f GB max (alerts), compress=%s",
             self.config["storage"]["max_size_gb"],
             self.config["storage"].get("max_alerts_gb", 2),
             self.config["storage"]["compress"],
         )
 
-        # 4. Detection Engine (TFLite + alarm snapshots)
+        # 5. Detection Engine (TFLite + alarm snapshots)
         from detector import DetectionEngine
 
         self.detector = DetectionEngine(
@@ -284,14 +343,15 @@ class AudioGuardApp:
         )
         # Wire recorder reference for post-alarm audio capture
         self.detector.recorder = self.recorder
+        self.detector.doa_estimator = self.doa
         self.detector.start()
         self.logger.info(
-            "[4/5] Detector: YES≥%.2f interval=%.3fs",
+            "[5/6] Detector: YES≥%.2f interval=%.3fs",
             self.detector.threshold_yes,
             self.detector.inference_interval,
         )
 
-        # 5. Wire GPIO button callbacks
+        # 6. Wire GPIO button callbacks
         self.gpio.on_record_toggle = self._on_record_toggle
         self.gpio.on_pause_5m = self._on_pause_5m
         self.gpio.on_field_tag = self._on_field_tag
@@ -305,10 +365,11 @@ class AudioGuardApp:
         self.webui.recorder = self.recorder
         self.webui.storage = self.storage
         self.webui.detector = self.detector
+        self.webui.doa = self.doa
         self.webui.gpio = self.gpio
         self.webui.start()
         self.logger.info(
-            "[5/5] Web UI: http://%s:%s",
+            "[6/6] Web UI: http://%s:%s",
             self.config["web"]["host"],
             self.config["web"]["port"],
         )
@@ -348,6 +409,8 @@ class AudioGuardApp:
             self.webui.stop()
         if self.detector:
             self.detector.stop()
+        if self.doa:
+            self.doa.stop()
         if self.storage:
             self.storage.stop()
         if self.recorder:
