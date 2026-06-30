@@ -514,15 +514,18 @@ if [ -f "$BOOT_CONFIG" ]; then
         cp "$BOOT_CONFIG" "${BOOT_CONFIG}.audi-install-bak" || true
     fi
 
-    # Restore the deployed full-performance display/CPU defaults and keep the
-    # Pi 5 USB current override needed for wired/non-PD field power.
+    # Use a conservative field-power profile. This keeps the Pi responsive while
+    # reducing peak current draw on weak/non-PD 5V feeds.
     sed -i \
-        -e '/^# AUDI field power stability profile for weak\/non-PD 5V feeds\.$/,/^usb_max_current_enable=1$/d' \
+        -e '/^# AUDI conservative field-power profile\.$/,/^usb_max_current_enable=1$/d' \
         "$BOOT_CONFIG"
     set_config_key "$BOOT_CONFIG" "max_framebuffers" "2"
-    set_config_key "$BOOT_CONFIG" "arm_boost" "1"
+    set_config_key "$BOOT_CONFIG" "arm_boost" "0"
+    set_config_key "$BOOT_CONFIG" "force_turbo" "0"
+    set_config_key "$BOOT_CONFIG" "arm_freq" "1500"
+    set_config_key "$BOOT_CONFIG" "gpu_freq" "500"
     set_config_key "$BOOT_CONFIG" "usb_max_current_enable" "1"
-    ok "Boot config set: max_framebuffers=2, arm_boost=1, usb_max_current_enable=1"
+    ok "Boot config set: max_framebuffers=2, arm_boost=0, arm_freq=1500, gpu_freq=500, usb_max_current_enable=1"
 
     # if [ "$DISABLE_RADIOS" = true ]; then
     #     # Permanently disable WiFi and Bluetooth at the kernel level

@@ -35,7 +35,57 @@ fi
 # Override device in config.yaml
 if [ "$AUDIO_DEVICE" != "default" ]; then
     echo "Setting audio device to $AUDIO_DEVICE in config.yaml"
-    sed -i "s/device:.*/device: \"$AUDIO_DEVICE\"/" /app/config.yaml
+    python3 - "$AUDIO_DEVICE" <<'PY'
+import sys
+import yaml
+from pathlib import Path
+
+path = Path("/app/config.yaml")
+cfg = yaml.safe_load(path.read_text()) or {}
+cfg.setdefault("audio", {})["device"] = sys.argv[1]
+path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+PY
+fi
+
+# Decrypt a device-bound model when a secure payload is present.
+SECURE_APP_MANIFEST="${AUDI_SECURE_APP_MANIFEST:-/app/secure/app.tar.gz.enc.json}"
+SECURE_APP_CIPHERTEXT="${AUDI_SECURE_APP_CIPHERTEXT:-/app/secure/app.tar.gz.enc}"
+SECURE_APP_ARCHIVE="${AUDI_SECURE_APP_ARCHIVE:-/dev/shm/audi-secure/app.tar.gz}"
+SECURE_APP_ROOT="${AUDI_SECURE_APP_ROOT:-/dev/shm/audi-secure/app}"
+APP_MAIN="/app/src/main.py"
+if [ -f "$SECURE_APP_MANIFEST" ] && [ -f "$SECURE_APP_CIPHERTEXT" ]; then
+    echo "Secure app payload found; decrypting for this Pi"
+    rm -rf "$SECURE_APP_ROOT"
+    mkdir -p "$SECURE_APP_ROOT"
+    python3 -m secure_payload decrypt-file \
+        --manifest "$SECURE_APP_MANIFEST" \
+        --ciphertext "$SECURE_APP_CIPHERTEXT" \
+        --output "$SECURE_APP_ARCHIVE"
+    tar -xzf "$SECURE_APP_ARCHIVE" -C "$SECURE_APP_ROOT"
+    rm -f "$SECURE_APP_ARCHIVE"
+    APP_MAIN="$SECURE_APP_ROOT/src/main.py"
+    export PYTHONPATH="$SECURE_APP_ROOT/src:/app/src:/usr/lib/python3/dist-packages"
+fi
+
+SECURE_MANIFEST="${AUDI_SECURE_MODEL_MANIFEST:-/app/secure/model.tflite.enc.json}"
+SECURE_CIPHERTEXT="${AUDI_SECURE_MODEL_CIPHERTEXT:-/app/secure/model.tflite.enc}"
+SECURE_MODEL_PATH="${AUDI_SECURE_MODEL_PATH:-/dev/shm/audi-secure/model.tflite}"
+if [ -f "$SECURE_MANIFEST" ] && [ -f "$SECURE_CIPHERTEXT" ]; then
+    echo "Secure model payload found; decrypting for this Pi"
+    python3 -m secure_payload decrypt-model \
+        --manifest "$SECURE_MANIFEST" \
+        --ciphertext "$SECURE_CIPHERTEXT" \
+        --output "$SECURE_MODEL_PATH"
+    python3 - "$SECURE_MODEL_PATH" <<'PY'
+import sys
+import yaml
+from pathlib import Path
+
+path = Path("/app/config.yaml")
+cfg = yaml.safe_load(path.read_text()) or {}
+cfg.setdefault("detection", {})["model_path"] = sys.argv[1]
+path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+PY
 fi
 
 # Check GPIO access. Pi deployments require this so alarms and LEDs work.
@@ -68,4 +118,4 @@ echo "Starting AUDI..."
 echo ""
 
 # Launch the main app
-exec python3 -u /app/src/main.py "$@"
+exec python3 -u "$APP_MAIN" "$@"

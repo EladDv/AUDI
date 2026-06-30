@@ -143,8 +143,8 @@ def load_config(config_path: str = None) -> dict:
         },
         "doa": {
             "enabled": False,
-            "active_profile": "triangle_3",
-            "disabled_channels": [],
+            "active_profile": "music_triangle_3",
+            "disabled_channels": [4, 8, 10],
             "mic_indices": [0, 7, 14],
             "n_fft": 2048,
             "hop_length": 256,
@@ -155,7 +155,8 @@ def load_config(config_path: str = None) -> dict:
                 "cfar": {"guard_bins": 4, "ref_bins": 20},
             },
             "music": {
-                "window_s": 1.0,
+                "window_s": 1.28,
+                "context_padding_s": 0.32,
                 "azimuth_step_deg": 1.0,
                 "half_bins": 1,
                 "n_sources": 1,
@@ -164,28 +165,47 @@ def load_config(config_path: str = None) -> dict:
                 "confidence_jump_deg": 45.0,
             },
             "profiles": {
-                "triangle_3": {"mic_indices": [0, 7, 14]},
-                "corners_4": {"mic_indices": [1, 7, 8, 14]},
-                "perimeter_8": {"mic_indices": [1, 3, 7, 8, 10, 12, 14, 15]},
-                "all_16": {
+                "music_triangle_3": {
+                    "mic_indices": [0, 7, 14],
+                    "music": {"algorithm": "MUSIC"},
+                },
+                "normmusic_triangle_3": {
+                    "mic_indices": [0, 7, 14],
+                    "music": {"algorithm": "NormMUSIC"},
+                },
+                "srp_triangle_3": {
+                    "mic_indices": [0, 7, 14],
+                    "music": {"algorithm": "SRP-PHAT"},
+                },
+                "normmusic_corners_4": {
+                    "mic_indices": [1, 7, 12, 14],
+                    "music": {"algorithm": "NormMUSIC"},
+                },
+                "normmusic_perimeter_8": {
+                    "mic_indices": [1, 3, 5, 7, 9, 12, 14, 15],
+                    "music": {"algorithm": "NormMUSIC"},
+                },
+                "srp_perimeter_8": {
+                    "mic_indices": [1, 3, 5, 7, 9, 12, 14, 15],
+                    "music": {"algorithm": "SRP-PHAT"},
+                },
+                "normmusic_healthy_13": {
                     "mic_indices": [
                         0,
                         1,
                         2,
                         3,
-                        4,
                         5,
                         6,
                         7,
-                        8,
                         9,
-                        10,
                         11,
                         12,
                         13,
                         14,
                         15,
-                    ]
+                    ],
+                    "music": {"algorithm": "NormMUSIC"},
                 },
             },
         },

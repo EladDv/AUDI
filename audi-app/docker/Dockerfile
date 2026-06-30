@@ -67,6 +67,7 @@ RUN mkdir -p /data/recordings /var/log
 COPY src/ /app/src/
 COPY scripts/ /app/scripts/
 COPY models/ /app/models/
+COPY secure/ /app/secure/
 COPY webui/ /app/webui/
 COPY config.yaml /app/config.yaml
 COPY threshold_profiles.yaml /app/threshold_profiles.yaml

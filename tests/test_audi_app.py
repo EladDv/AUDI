@@ -733,6 +733,73 @@ class TestAudiApp:
         assert status["mic_indices"] == [1, 7, 8, 14]
         assert status["disabled_channels"] == []
 
+    def test_doa_hps_peak_search_defaults_to_600_hz_ceiling(self):
+        doa_mod = _import_from_audi_app("doa_estimator")
+
+        config = doa_mod.parse_doa_config({"doa": {"enabled": True}})
+        settings = config.profiles[config.active_profile]
+
+        assert settings.peak_fmax_hz == 600.0
+        assert settings.window_s == 1.28
+        assert settings.context_padding_s == 0.32
+        assert doa_mod.analysis_window_s(settings) == pytest.approx(1.92)
+
+    def test_doa_estimate_reads_padded_analysis_window(self, monkeypatch):
+        doa_mod = _import_from_audi_app("doa_estimator")
+
+        class Ring:
+            def __init__(self):
+                self.requested_samples = None
+
+            def get_recent(self, samples, channel=None):
+                assert channel is None
+                self.requested_samples = samples
+                return np.zeros((samples, 16), dtype=np.float32)
+
+        ring = Ring()
+        estimator = doa_mod.DOAEstimator(
+            {
+                "audio": {"sample_rate": 16000, "channels": 16},
+                "doa": {"enabled": True},
+            },
+            ring,
+        )
+        freqs = np.fft.rfftfreq(2048, d=1.0 / 16000)
+
+        monkeypatch.setattr(
+            estimator,
+            "_dominant_hps_frequency",
+            lambda samples, settings: (445.3125, 12.0),
+        )
+        monkeypatch.setattr(
+            estimator,
+            "_stft_channels",
+            lambda samples, settings: (
+                freqs,
+                np.zeros((samples.shape[0], len(freqs), 2), dtype=np.complex128),
+            ),
+        )
+        monkeypatch.setattr(
+            estimator,
+            "_music_frequencies",
+            lambda freqs, dominant_f0, settings: [445.3125],
+        )
+
+        def fake_spectrum(*args, **kwargs):
+            spectrum = np.zeros(360, dtype=np.float64)
+            spectrum[190] = 1.0
+            return spectrum
+
+        monkeypatch.setattr(doa_mod, "pyroom_azimuth_spectrum", fake_spectrum)
+
+        result = estimator.force_estimate()
+
+        assert result["ok"] is True
+        assert ring.requested_samples == 30720
+        assert result["window_s"] == 1.28
+        assert result["context_padding_s"] == 0.32
+        assert result["analysis_window_s"] == pytest.approx(1.92)
+
     def test_doa_rejects_disabling_below_two_active_mics(self):
         doa_mod = _import_from_audi_app("doa_estimator")
 
@@ -783,6 +850,84 @@ class TestAudiApp:
         assert jumped["jump_deg"] == pytest.approx(120.0)
         assert jumped["confidence"] < first["confidence"]
         assert doa_mod.angular_distance_deg(jumped["azimuth_deg"], 130.0) > 1.0
+
+    def test_doa_algorithm_names_map_to_pyroomacoustics(self):
+        doa_mod = _import_from_audi_app("doa_estimator")
+        pra = pytest.importorskip("pyroomacoustics")
+
+        assert doa_mod._pyroom_doa_class("MUSIC") is pra.doa.MUSIC
+        assert doa_mod._pyroom_doa_class("NormMUSIC") is pra.doa.NormMUSIC
+        assert doa_mod._pyroom_doa_class("SRP-PHAT") is pra.doa.SRP
+        assert doa_mod._pyroom_doa_class("srp") is pra.doa.SRP
+
+        with pytest.raises(ValueError, match="unknown DOA algorithm"):
+            doa_mod._pyroom_doa_class("bad-doa")
+
+    def test_pyroom_music_matches_legacy_music_on_synthetic_snapshots(self):
+        doa_mod = _import_from_audi_app("doa_estimator")
+        pytest.importorskip("pyroomacoustics")
+
+        settings = doa_mod.DOASettings(n_fft=2048, algorithm="MUSIC")
+        mic_indices = (0, 7, 14)
+        mic_positions = doa_mod.UMA16_MIC_POSITIONS_M[np.array(mic_indices)]
+        azimuths = np.arange(-180.0, 180.0, 1.0)
+        stft_freqs = np.fft.rfftfreq(settings.n_fft, d=1.0 / 16000)
+        target_freqs = [296.875, 304.6875, 593.75, 601.5625, 890.625, 898.4375]
+        source_azimuth = 40.0
+        stft = np.zeros((len(mic_indices), len(stft_freqs), 16), dtype=np.complex128)
+        rng = np.random.default_rng(4)
+        azimuth_math_rad = np.deg2rad(90.0 - source_azimuth)
+        direction = np.array(
+            [np.cos(azimuth_math_rad), np.sin(azimuth_math_rad), 0.0],
+            dtype=np.float64,
+        )
+        for freq_hz in target_freqs:
+            freq_idx = int(np.searchsorted(stft_freqs, freq_hz))
+            phase = (
+                2.0
+                * np.pi
+                * freq_hz
+                / doa_mod.SPEED_OF_SOUND_M_S
+                * (mic_positions @ direction)
+            )
+            steering = np.exp(1j * phase)
+            frame_signal = np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, stft.shape[2]))
+            stft[:, freq_idx, :] = steering[:, np.newaxis] * frame_signal[np.newaxis, :]
+        stft += rng.normal(0.0, 0.005, stft.shape)
+        stft += 1j * rng.normal(0.0, 0.005, stft.shape)
+
+        class Ring:
+            def get_recent(self, *args, **kwargs):
+                return np.zeros((2048, 16), dtype=np.float32)
+
+        estimator = doa_mod.DOAEstimator(
+            {
+                "audio": {"sample_rate": 16000, "channels": 16},
+                "doa": {"enabled": True},
+            },
+            Ring(),
+        )
+        covariance = estimator._covariance(stft, stft_freqs, target_freqs, settings)
+        legacy_spectrum = doa_mod.legacy_music_azimuth_spectrum(
+            covariance,
+            mic_positions,
+            target_freqs,
+            azimuths,
+        )
+        pyroom_spectrum = doa_mod.pyroom_azimuth_spectrum(
+            stft,
+            stft_freqs,
+            mic_indices,
+            target_freqs,
+            azimuths,
+            settings,
+        )
+
+        legacy_peak = float(azimuths[int(np.argmax(legacy_spectrum))])
+        pyroom_peak = float(azimuths[int(np.argmax(pyroom_spectrum))])
+
+        assert legacy_peak == pytest.approx(source_azimuth)
+        assert doa_mod.angular_distance_deg(legacy_peak, pyroom_peak) <= 2.0
 
     def test_detector_defaults_to_all_capture_channels(self, tmp_path):
         detector = _import_from_audi_app("detector")
