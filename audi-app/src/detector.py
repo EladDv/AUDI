@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from audio_features import TFLiteClassifier
+from mvdr_beamformer import MVDRBeamformer, MVDRBeamformerConfig
 from storage import AlarmSnapshotter, AlertHistory
 
 logger = logging.getLogger("audi.detector")
@@ -184,6 +185,73 @@ class DetectionEngine:
             det_cfg.get("enabled_channels"),
             self.input_channels,
         )
+        beamforming_cfg = dict(det_cfg.get("input_beamforming", {}) or {})
+        self.input_beamforming_enabled = bool(beamforming_cfg.get("enabled", False))
+        self._beamformer: MVDRBeamformer | None = None
+        self._beam_metadata: list[dict] = []
+        self._mvdr_covariance_update_interval_s = float(
+            beamforming_cfg.get("covariance_update_interval_seconds", 300.0)
+        )
+        self._mvdr_covariance_no_drone_threshold = float(
+            beamforming_cfg.get("covariance_no_drone_threshold", 0.25)
+        )
+        self._last_mvdr_covariance_update_time = 0.0
+        self._last_mvdr_covariance_update_reason: str | None = None
+        self._last_mvdr_covariance_error: str | None = None
+        if self.input_beamforming_enabled:
+            mic_indices = beamforming_cfg.get("mic_indices")
+            if isinstance(mic_indices, str):
+                mic_indices = [
+                    int(part.strip())
+                    for part in mic_indices.split(",")
+                    if part.strip()
+                ]
+            self._beamformer = MVDRBeamformer(
+                MVDRBeamformerConfig(
+                    beam_count=int(beamforming_cfg.get("beam_count", 36)),
+                    elevation_count=int(beamforming_cfg.get("elevation_count", 3)),
+                    min_elevation_deg=float(
+                        beamforming_cfg.get("min_elevation_deg", 5.0)
+                    ),
+                    max_elevation_deg=float(
+                        beamforming_cfg.get("max_elevation_deg", 70.0)
+                    ),
+                    n_fft=int(beamforming_cfg.get("n_fft", 512)),
+                    hop_length=int(beamforming_cfg.get("hop_length", 160)),
+                    diagonal_loading=float(
+                        beamforming_cfg.get("diagonal_loading", 1e-2)
+                    ),
+                    mic_indices=tuple(mic_indices) if mic_indices else None,
+                    deglitch_enabled=bool(
+                        beamforming_cfg.get("deglitch_enabled", True)
+                    ),
+                    deglitch_threshold=float(
+                        beamforming_cfg.get("deglitch_threshold", 0.001)
+                    ),
+                    deglitch_loudness_ratio=float(
+                        beamforming_cfg.get("deglitch_loudness_ratio", 8.0)
+                    ),
+                    deglitch_diff_ratio=float(
+                        beamforming_cfg.get("deglitch_diff_ratio", 12.0)
+                    ),
+                    deglitch_window_samples=int(
+                        beamforming_cfg.get("deglitch_window_samples", 64)
+                    ),
+                )
+            )
+            self._beam_metadata = [
+                {
+                    "channel_index": beam.index,
+                    "channel_name": beam.name,
+                    "azimuth_deg": beam.azimuth_deg,
+                    "elevation_deg": beam.elevation_deg,
+                }
+                for beam in self._beamformer.beams
+            ]
+            self.enabled_channel_indices = self._normalize_enabled_channels(
+                beamforming_cfg.get("enabled_beams", det_cfg.get("enabled_channels")),
+                len(self._beam_metadata),
+            )
 
         # Load TFLite classifier
         self.classifier = TFLiteClassifier(
@@ -224,7 +292,12 @@ class DetectionEngine:
             "hysteresis_margin", DEFAULT_HYSTERESIS_MARGIN
         )
         self._channel_states: list[ChannelDetectionState] = []
-        self._sync_channel_states(self.input_channels)
+        self._detector_input_count = (
+            len(self._beam_metadata)
+            if self.input_beamforming_enabled
+            else self.input_channels
+        )
+        self._sync_channel_states(self._detector_input_count)
 
         self.snapshotter = AlarmSnapshotter(
             config.get("storage", {}).get("alerts_dir", "/data/alerts"),
@@ -281,7 +354,7 @@ class DetectionEngine:
             self._channel_states.append(self._new_channel_state())
         if len(self._channel_states) > channel_count:
             del self._channel_states[channel_count:]
-        self.input_channels = channel_count
+        self._detector_input_count = channel_count
         self.hysteresis = self._channel_states[0].hysteresis
 
     def _reset_channel_states(self, channel_count: int | None = None) -> None:
@@ -308,11 +381,12 @@ class DetectionEngine:
 
     def set_channel_enabled(self, channel_index: int, enabled: bool) -> dict:
         channel_index = int(channel_index)
-        if channel_index < 0 or channel_index >= self.input_channels:
+        if channel_index < 0 or channel_index >= self._detector_input_count:
             raise ValueError(
-                f"channel_index must be between 0 and {self.input_channels - 1}"
+                "channel_index must be between 0 and "
+                f"{self._detector_input_count - 1}"
             )
-        self._sync_channel_states(self.input_channels)
+        self._sync_channel_states(self._detector_input_count)
         if enabled:
             self.enabled_channel_indices.add(channel_index)
         else:
@@ -403,6 +477,10 @@ class DetectionEngine:
     def has_blue_red_model(self) -> bool:
         return self.classifier.is_loaded and self.classifier.output_size >= 3
 
+    @property
+    def input_mode(self) -> str:
+        return "mvdr_beam" if self.input_beamforming_enabled else "channel"
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -423,15 +501,16 @@ class DetectionEngine:
 
     def _run(self):
         while not self._stop_event.is_set():
-            now = time.time()
-            elapsed = now - self._last_inference_time
+            pass_started_at = time.time()
+            elapsed = pass_started_at - self._last_inference_time
             if elapsed >= self.inference_interval:
+                self._last_inference_time = pass_started_at
                 try:
                     self._inference_cycle()
-                    self._last_inference_time = time.time()
                 except Exception as e:
                     logger.error("Inference cycle failed: %s", e)
-            # Sleep remaining time, min 10ms to avoid busy-wait
+            # inference_interval is start-to-start spacing. If inference is
+            # slower than the interval, only yield the loop briefly.
             remaining = self.inference_interval - (
                 time.time() - self._last_inference_time
             )
@@ -515,7 +594,9 @@ class DetectionEngine:
     def _should_trigger_alarm(self, alert_level: str) -> bool:
         return alert_level in {"RED_ALERT", "BLUE_ALERT", "UNKNOWN_ALERT"}
 
-    def _recent_audio_by_channel(self, window_seconds: float) -> tuple[np.ndarray, list[int]]:
+    def _recent_audio_by_channel(
+        self, window_seconds: float
+    ) -> tuple[np.ndarray, list[int]]:
         try:
             audio = self.ring_buffer.get_last_n_seconds(
                 window_seconds,
@@ -536,6 +617,106 @@ class DetectionEngine:
         if audio.shape[1] == 0:
             return audio.reshape(audio.shape[0], 0), []
         return audio, list(range(audio.shape[1]))
+
+    def _detector_inputs_from_audio(
+        self,
+        audio_by_channel: np.ndarray,
+        channel_ids: list[int],
+    ) -> tuple[list[dict], dict[int, dict]]:
+        if not self.input_beamforming_enabled:
+            inputs = [
+                {
+                    "channel_index": idx,
+                    "channel_name": f"ch{idx}",
+                    "audio": audio_by_channel[:, idx],
+                    "detector_enabled": idx in self.enabled_channel_indices,
+                }
+                for idx in channel_ids
+            ]
+            return inputs, {}
+
+        if self._beamformer is None:
+            return [], {}
+        if not self._beamformer.has_covariance:
+            self._refresh_mvdr_covariance(audio_by_channel, reason="startup")
+        beams = self._beamformer.beamform(audio_by_channel, self.capture_sample_rate)
+        inputs = []
+        for beam in beams:
+            idx = int(beam["index"])
+            inputs.append(
+                {
+                    "channel_index": idx,
+                    "channel_name": beam["name"],
+                    "audio": beam["audio"],
+                    "detector_enabled": idx in self.enabled_channel_indices,
+                    "beam_azimuth_deg": beam["azimuth_deg"],
+                    "beam_elevation_deg": beam["elevation_deg"],
+                    "beam_mic_indices": beam["mic_indices"],
+                }
+            )
+        beam_lookup = {
+            int(item["channel_index"]): {
+                "channel_index": int(item["channel_index"]),
+                "channel_name": str(item["channel_name"]),
+                "beam_azimuth_deg": float(item["beam_azimuth_deg"]),
+                "beam_elevation_deg": float(item["beam_elevation_deg"]),
+            }
+            for item in inputs
+        }
+        return inputs, beam_lookup
+
+    def _refresh_mvdr_covariance(self, audio_by_channel: np.ndarray, reason: str) -> bool:
+        if not self.input_beamforming_enabled or self._beamformer is None:
+            return False
+        try:
+            ok = self._beamformer.update_covariance(
+                audio_by_channel,
+                self.capture_sample_rate,
+            )
+        except Exception as exc:
+            self._last_mvdr_covariance_error = str(exc)
+            logger.warning("MVDR covariance update failed (%s): %s", reason, exc)
+            return False
+        if not ok:
+            self._last_mvdr_covariance_error = "not_enough_audio_or_channels"
+            return False
+        self._last_mvdr_covariance_update_time = time.time()
+        self._last_mvdr_covariance_update_reason = reason
+        self._last_mvdr_covariance_error = None
+        logger.info("MVDR covariance updated (%s)", reason)
+        return True
+
+    def _maybe_refresh_mvdr_covariance(
+        self,
+        audio_by_channel: np.ndarray,
+        results: list[dict],
+        cycle_timestamp: float,
+    ) -> None:
+        if (
+            not self.input_beamforming_enabled
+            or self._beamformer is None
+            or self._mvdr_covariance_update_interval_s <= 0
+        ):
+            return
+        if (
+            cycle_timestamp - self._last_mvdr_covariance_update_time
+            < self._mvdr_covariance_update_interval_s
+        ):
+            return
+        enabled_results = [
+            result
+            for result in results
+            if int(result.get("channel_index", -1)) in self.enabled_channel_indices
+        ]
+        if not enabled_results:
+            return
+        max_raw_score = max(
+            float(result.get("raw_score", 1.0)) for result in enabled_results
+        )
+        any_positive_state = any(result.get("state") == "YES" for result in enabled_results)
+        if any_positive_state or max_raw_score > self._mvdr_covariance_no_drone_threshold:
+            return
+        self._refresh_mvdr_covariance(audio_by_channel, reason="periodic_no_drone")
 
     def _select_primary_result(self, results: list[dict]) -> dict | None:
         if not results:
@@ -571,26 +752,35 @@ class DetectionEngine:
         if not channel_ids:
             logger.debug("No audio channels available for inference")
             return
-        self._sync_channel_states(len(channel_ids))
-        enabled_channel_ids = [
-            idx for idx in channel_ids if idx in self.enabled_channel_indices
+        detector_inputs, detector_metadata = self._detector_inputs_from_audio(
+            audio_by_channel,
+            channel_ids,
+        )
+        if not detector_inputs:
+            logger.debug("No detector inputs available for inference")
+            return
+        self._sync_channel_states(len(detector_inputs))
+        enabled_inputs = [
+            item for item in detector_inputs if item["detector_enabled"]
         ]
-        if not enabled_channel_ids:
+        if not enabled_inputs:
             self._last_timing = {
                 "preprocess_ms": 0.0,
                 "inference_ms": 0.0,
                 "total_ms": round((time.perf_counter() - t0) * 1000, 2),
                 "n_windows": 0,
                 "channels": 0,
+                "input_mode": self.input_mode,
             }
             return
 
         t_pre = time.perf_counter()
         channel_specs = []
         channel_mels: dict[int, np.ndarray] = {}
-        for channel_index in enabled_channel_ids:
+        for item in enabled_inputs:
+            channel_index = int(item["channel_index"])
             spec = self.classifier.preprocess(
-                audio_by_channel[:, channel_index],
+                item["audio"],
                 self.capture_sample_rate,
             )
             channel_specs.append(spec)
@@ -615,14 +805,15 @@ class DetectionEngine:
             "preprocess_ms": round(preprocess_ms, 2),
             "inference_ms": round(inference_ms, 2),
             "total_ms": round(total_ms, 2),
-            "n_windows": len(enabled_channel_ids),
-            "channels": len(enabled_channel_ids),
+            "n_windows": len(enabled_inputs),
+            "channels": len(enabled_inputs),
+            "input_mode": self.input_mode,
         }
 
         if self.debug:
             logger.debug(
                 "Inference: channels=%d pre=%.1fms inf=%.1fms total=%.1fms",
-                len(enabled_channel_ids),
+                len(enabled_inputs),
                 preprocess_ms,
                 inference_ms,
                 total_ms,
@@ -633,7 +824,8 @@ class DetectionEngine:
             self._last_channel_mels = channel_mels
             self._last_mel_timestamp = cycle_timestamp
         results: list[dict] = []
-        for batch_index, channel_index in enumerate(enabled_channel_ids):
+        for batch_index, item in enumerate(enabled_inputs):
+            channel_index = int(item["channel_index"])
             logits = np.asarray(
                 logits_by_channel[batch_index], dtype=np.float32
             ).flatten()
@@ -659,7 +851,7 @@ class DetectionEngine:
                 "timestamp": cycle_timestamp,
                 "alert_id": alert_id,
                 "channel_index": channel_index,
-                "channel_name": f"ch{channel_index}",
+                "channel_name": str(item["channel_name"]),
                 "state": state,
                 "alert_level": alert_level,
                 "yes_confidence": round(channel_state.hysteresis.confidence, 4),
@@ -668,12 +860,22 @@ class DetectionEngine:
                 "threshold_profile": self.threshold_profile,
                 **color_result,
             }
+            if self.input_beamforming_enabled:
+                result.update(
+                    {
+                        "input_mode": "mvdr_beam",
+                        "beam_azimuth_deg": item.get("beam_azimuth_deg"),
+                        "beam_elevation_deg": item.get("beam_elevation_deg"),
+                        "beam_mic_indices": item.get("beam_mic_indices"),
+                    }
+                )
             channel_state.last_inference = result
             results.append(result)
 
             score_entry = {
                 "ts": cycle_timestamp,
                 "channel_index": channel_index,
+                "channel_name": result["channel_name"],
                 "raw": raw_score,
                 "state": state,
                 "red": color_result.get("red_confidence"),
@@ -691,6 +893,7 @@ class DetectionEngine:
                 "ts": result["timestamp"],
                 "alert_id": alert_id,
                 "channel_index": channel_index,
+                "channel_name": result["channel_name"],
                 "state": state,
                 "alert_level": alert_level,
                 "raw_score": result["raw_score"],
@@ -730,17 +933,24 @@ class DetectionEngine:
                 p99,
             )
 
+        self._maybe_refresh_mvdr_covariance(
+            audio_by_channel,
+            results,
+            cycle_timestamp,
+        )
         self._last_channel_results = results
         results_by_channel = {r.get("channel_index"): r for r in results}
         all_channel_results = []
         for idx, state in enumerate(self._channel_states):
+            meta = detector_metadata.get(idx, {})
+            channel_name = meta.get("channel_name", f"ch{idx}")
             r = results_by_channel.get(idx)
             if r is None:
                 last_for_channel = state.last_inference or {}
                 all_channel_results.append(
                     {
                         "channel_index": idx,
-                        "channel_name": f"ch{idx}",
+                        "channel_name": channel_name,
                         "detector_enabled": idx in self.enabled_channel_indices,
                         "state": "NO",
                         "alert_level": "NO",
@@ -751,6 +961,11 @@ class DetectionEngine:
                         ),
                         "red_confidence": None,
                         "blue_confidence": None,
+                        **{
+                            key: meta[key]
+                            for key in ("beam_azimuth_deg", "beam_elevation_deg")
+                            if key in meta
+                        },
                     }
                 )
                 continue
@@ -766,6 +981,11 @@ class DetectionEngine:
                     "drone_color": r.get("drone_color"),
                     "red_confidence": r.get("red_confidence"),
                     "blue_confidence": r.get("blue_confidence"),
+                    **{
+                        key: r[key]
+                        for key in ("beam_azimuth_deg", "beam_elevation_deg")
+                        if key in r
+                    },
                 }
             )
         doa_result = None
@@ -918,6 +1138,25 @@ class DetectionEngine:
             "model_type": self.model_type,
             "labels": self.labels,
             "input_channels": self.input_channels,
+            "input_mode": self.input_mode,
+            "detector_input_count": self._detector_input_count,
+            "input_beamforming": {
+                "enabled": self.input_beamforming_enabled,
+                "beams": self._beam_metadata,
+                "covariance_update_interval_seconds": (
+                    self._mvdr_covariance_update_interval_s
+                ),
+                "covariance_no_drone_threshold": (
+                    self._mvdr_covariance_no_drone_threshold
+                ),
+                "last_covariance_update_time": (
+                    self._last_mvdr_covariance_update_time
+                ),
+                "last_covariance_update_reason": (
+                    self._last_mvdr_covariance_update_reason
+                ),
+                "last_covariance_error": self._last_mvdr_covariance_error,
+            },
             "enabled_channels": sorted(self.enabled_channel_indices),
             "threshold_yes": self.threshold_yes,
             "inference_interval": self.inference_interval,

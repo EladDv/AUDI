@@ -19,9 +19,9 @@ from scipy.ndimage import median_filter
 from scipy.signal import istft, resample_poly, stft
 from torch.utils.data import Dataset
 
-from audi.augment import _fit_length, _rms, highpass, peak_limit
+from audi.augment import _fit_length, _rms, highpass
 from audi.config import SNRBin
-from audi.training.dataset import BatchItem, _finite_audio, _rms_normalize
+from audi.training.dataset import BatchItem, _finite_audio, _rms_normalize, app_window_normalize
 
 UMA16_MIC_POSITIONS_M = np.array(
     [
@@ -1073,10 +1073,7 @@ class PyRoomDataset(Dataset[tuple[torch.Tensor, ...]]):
             if self.return_components:
                 beam_noise = output_noise_channels[mic_idx]
                 beam_drone = drone_channels[mic_idx]
-        mix_tensor = torch.as_tensor(
-            peak_limit(_rms_normalize(beam_mix)),
-            dtype=torch.float32,
-        )
+        mix_tensor = torch.as_tensor(app_window_normalize(beam_mix), dtype=torch.float32)
         snr_tensor = torch.tensor(snr_db, dtype=torch.float32)
         if self.return_components:
             item = BatchItem(

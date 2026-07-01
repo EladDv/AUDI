@@ -117,6 +117,22 @@ def _rms_normalize(audio: np.ndarray) -> np.ndarray:
     return _finite_audio(audio / rms)
 
 
+def app_window_normalize(audio: np.ndarray) -> np.ndarray:
+    """Match the app's per-window waveform normalization before mel inference."""
+    audio = _finite_audio(audio)
+    if audio.size == 0:
+        return audio
+    audio64 = audio.astype(np.float64, copy=False)
+    rms = float(np.sqrt(np.mean(audio64 * audio64)))
+    if not np.isfinite(rms) or rms <= 1e-8:
+        return np.zeros_like(audio, dtype=np.float32)
+    scale = 1.0 / rms
+    raw_peak = float(np.max(np.abs(audio)))
+    if raw_peak > 0.0 and raw_peak * scale > 0.98:
+        scale = 0.98 / raw_peak
+    return _finite_audio(audio * np.float32(scale))
+
+
 def _path_str(path: Path | None) -> str | None:
     if path is None:
         return None
@@ -431,7 +447,7 @@ class HFDetectionDataset(Dataset[tuple[torch.Tensor, ...]]):
         wav = _resample_if_needed(wav, source_sr, self.sample_rate)
         wav = _fit_length(wav, self.target_length_samples)
         wav = np.resize(wav, self.target_length_samples).astype(np.float32)
-        wav_tensor = torch.as_tensor(_finite_audio(wav), dtype=torch.float32)
+        wav_tensor = torch.as_tensor(app_window_normalize(wav), dtype=torch.float32)
         label = torch.tensor(float(row["label"]), dtype=torch.float32)
         bin_idx = torch.tensor(int(row.get("bin_idx", -1)), dtype=torch.long)
         snr_db = torch.tensor(float(row.get("snr_db", -99.9)), dtype=torch.float32)

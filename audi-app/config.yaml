@@ -38,6 +38,24 @@ detection:
   window_samples: 81920          # 16000 Hz × 5.12s → 512 frames (librosa center=True)
   stride: 0.0625                 # Sliding window stride (0.0625 = 6.25% step size)
   enabled_channels: 0         # null = infer on every captured channel; disabled channels are still recorded
+  input_beamforming:
+    enabled: false              # true = run detector on MVDR beams instead of raw channels
+    beam_count: 36              # total look directions across azimuth/elevation grid
+    elevation_count: 3          # horizon-ish, mid, upper look rows
+    min_elevation_deg: 5.0      # array lies face-up; 0 is horizon, 90 is overhead
+    max_elevation_deg: 70.0
+    n_fft: 512
+    hop_length: 160
+    diagonal_loading: 0.01
+    covariance_update_interval_seconds: 300.0  # refresh only after clean all-beam model pass
+    covariance_no_drone_threshold: 0.25        # max raw beam score allowed for refresh
+    deglitch_enabled: true       # smooth bad-channel jumps before MVDR covariance
+    deglitch_threshold: 0.001
+    deglitch_loudness_ratio: 8.0
+    deglitch_diff_ratio: 12.0
+    deglitch_window_samples: 64
+    mic_indices: null           # null = use all known captured UMA16 channels
+    enabled_beams: null         # null/all = infer on every generated beam
 
   # Debug mode — logs per-window timing at DEBUG level
   debug: true

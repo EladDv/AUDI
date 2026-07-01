@@ -3,6 +3,7 @@
 import importlib
 import subprocess
 import sys
+import time
 import types
 import wave
 from pathlib import Path
@@ -587,6 +588,255 @@ class TestAudiApp:
         assert engine.status["channels"][2]["detector_enabled"] is False
         assert result["all_channel_results"][2]["detector_enabled"] is False
         np.testing.assert_allclose(ring.get_recent(1, channel=None)[0], [0, 1, 2, 3])
+
+    def test_detector_loop_overrun_uses_start_to_start_interval(self, monkeypatch):
+        detector = _import_from_audi_app("detector")
+
+        class FakeClock:
+            def __init__(self):
+                self.now = 100.0
+
+            def time(self):
+                return self.now
+
+        class FakeStopEvent:
+            def __init__(self):
+                self.stopped = False
+                self.waits = []
+
+            def is_set(self):
+                return self.stopped
+
+            def wait(self, seconds):
+                self.waits.append(seconds)
+                clock.now += seconds
+                if len(pass_starts) >= 2:
+                    self.stopped = True
+
+        clock = FakeClock()
+        stop_event = FakeStopEvent()
+        pass_starts = []
+
+        def slow_inference_cycle():
+            pass_starts.append(clock.now)
+            clock.now += 1.0
+
+        engine = types.SimpleNamespace(
+            _stop_event=stop_event,
+            _last_inference_time=0.0,
+            inference_interval=0.32,
+            _inference_cycle=slow_inference_cycle,
+        )
+
+        monkeypatch.setattr(detector.time, "time", clock.time)
+
+        detector.DetectionEngine._run(engine)
+
+        assert pass_starts == [100.0, 101.01]
+        assert stop_event.waits == [0.01, 0.01]
+
+    def test_detector_mvdr_beam_mode_runs_inference_on_beams(
+        self, tmp_path, monkeypatch
+    ):
+        detector = _import_from_audi_app("detector")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=24, channels=16)
+        ring.append(np.ones((6, 16), dtype=np.float32))
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "model_sample_rate": 4,
+                    "window_samples": 4,
+                    "confidence_threshold_high": 0.5,
+                    "hysteresis_window": 1,
+                    "hysteresis_ratio": 1.0,
+                    "hysteresis_margin": 0.0,
+                    "red_color_threshold": 0.5,
+                    "alarm_cooldown_s": 0,
+                    "input_beamforming": {
+                        "enabled": True,
+                        "beam_count": 2,
+                        "elevation_count": 1,
+                    },
+                },
+                "audio": {"sample_rate": 4, "channels": 16},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=ring,
+        )
+
+        class FakeBeamformer:
+            def __init__(self):
+                self.has_covariance = False
+                self.covariance_updates = []
+
+            def update_covariance(self, audio, sample_rate):
+                self.covariance_updates.append(np.array(audio, copy=True))
+                self.has_covariance = True
+                return True
+
+            def beamform(self, audio, sample_rate, noise_audio=None):
+                assert audio.shape == (4, 16)
+                assert sample_rate == 4
+                return [
+                    {
+                        "index": 0,
+                        "name": "beam0_az000_el05",
+                        "audio": np.zeros(4, dtype=np.float32),
+                        "azimuth_deg": 0.0,
+                        "elevation_deg": 5.0,
+                        "mic_indices": list(range(16)),
+                    },
+                    {
+                        "index": 1,
+                        "name": "beam1_az180_el05",
+                        "audio": np.ones(4, dtype=np.float32),
+                        "azimuth_deg": 180.0,
+                        "elevation_deg": 5.0,
+                        "mic_indices": list(range(16)),
+                    },
+                ]
+
+        fake_beamformer = FakeBeamformer()
+        engine._beamformer = fake_beamformer
+        alarms = []
+        engine.on_alarm = alarms.append
+
+        def preprocess(audio, capture_sr):
+            engine.classifier.last_mel_db = np.full((4, 3), audio[0], dtype=np.float32)
+            return np.array([audio[0]], dtype=np.float32)
+
+        def predict_logits(spec):
+            return (
+                np.array([2.0, 0.0, 4.0], dtype=np.float32)
+                if int(spec[0]) == 1
+                else np.array([-2.0, 4.0, 0.0], dtype=np.float32)
+            )
+
+        monkeypatch.setattr(engine.classifier, "preprocess", preprocess)
+        monkeypatch.setattr(engine.classifier, "predict_logits", predict_logits)
+
+        result = engine.force_inference()
+
+        assert result["input_mode"] == "mvdr_beam"
+        assert result["firing_channel_index"] == 1
+        assert result["channel_name"] == "beam1_az180_el05"
+        assert result["beam_azimuth_deg"] == 180.0
+        assert result["alert_level"] == "RED_ALERT"
+        assert engine.status["input_mode"] == "mvdr_beam"
+        assert engine.status["detector_input_count"] == 2
+        assert len(fake_beamformer.covariance_updates) == 1
+        assert engine.status["input_beamforming"]["last_covariance_update_reason"] == "startup"
+        assert len(result["all_channel_results"]) == 2
+        assert alarms and alarms[0]["beam_elevation_deg"] == 5.0
+
+    def test_detector_refreshes_mvdr_covariance_after_clean_beam_pass(
+        self, tmp_path, monkeypatch
+    ):
+        detector = _import_from_audi_app("detector")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=24, channels=16)
+        ring.append(np.ones((6, 16), dtype=np.float32))
+        engine = detector.DetectionEngine(
+            {
+                "detection": {
+                    "model_path": str(tmp_path / "missing.tflite"),
+                    "alert_history_file": str(tmp_path / "alerts.jsonl"),
+                    "model_sample_rate": 4,
+                    "window_samples": 4,
+                    "confidence_threshold_high": 0.5,
+                    "hysteresis_window": 1,
+                    "hysteresis_ratio": 1.0,
+                    "hysteresis_margin": 0.0,
+                    "input_beamforming": {
+                        "enabled": True,
+                        "beam_count": 2,
+                        "elevation_count": 1,
+                        "covariance_update_interval_seconds": 1.0,
+                        "covariance_no_drone_threshold": 0.25,
+                    },
+                },
+                "audio": {"sample_rate": 4, "channels": 16},
+                "storage": {"alerts_dir": str(tmp_path / "alerts")},
+            },
+            ring_buffer=ring,
+        )
+
+        class FakeBeamformer:
+            has_covariance = True
+
+            def __init__(self):
+                self.covariance_updates = []
+
+            def update_covariance(self, audio, sample_rate):
+                self.covariance_updates.append(np.array(audio, copy=True))
+                return True
+
+            def beamform(self, audio, sample_rate, noise_audio=None):
+                return [
+                    {
+                        "index": 0,
+                        "name": "beam0_az000_el05",
+                        "audio": np.zeros(4, dtype=np.float32),
+                        "azimuth_deg": 0.0,
+                        "elevation_deg": 5.0,
+                        "mic_indices": list(range(16)),
+                    },
+                    {
+                        "index": 1,
+                        "name": "beam1_az180_el05",
+                        "audio": np.zeros(4, dtype=np.float32),
+                        "azimuth_deg": 180.0,
+                        "elevation_deg": 5.0,
+                        "mic_indices": list(range(16)),
+                    },
+                ]
+
+        fake_beamformer = FakeBeamformer()
+        engine._beamformer = fake_beamformer
+        engine._last_mvdr_covariance_update_time = time.time() - 2.0
+
+        def preprocess(audio, capture_sr):
+            engine.classifier.last_mel_db = np.zeros((4, 3), dtype=np.float32)
+            return np.array([0.0], dtype=np.float32)
+
+        monkeypatch.setattr(engine.classifier, "preprocess", preprocess)
+        monkeypatch.setattr(
+            engine.classifier,
+            "predict_logits",
+            lambda spec: np.array([-4.0, 0.0, 0.0], dtype=np.float32),
+        )
+
+        result = engine.force_inference()
+
+        assert result["alert_level"] == "NO"
+        assert len(fake_beamformer.covariance_updates) == 1
+        assert engine.status["input_beamforming"]["last_covariance_update_reason"] == (
+            "periodic_no_drone"
+        )
+
+    def test_mvdr_deglitch_smooths_bad_channel_jump(self):
+        mvdr = _import_from_audi_app("mvdr_beamformer")
+
+        channels = np.zeros((2, 32), dtype=np.float32)
+        channels[0, :] = 0.01
+        channels[0, 15:] += 1.0
+        channels[1, :] = 0.01
+
+        repaired = mvdr.deglitch_multichannel(
+            channels,
+            threshold=0.001,
+            loudness_ratio=8.0,
+            diff_ratio=12.0,
+            window_samples=3,
+        )
+
+        assert np.max(np.abs(np.diff(repaired[0]))) < 0.5
+        np.testing.assert_allclose(repaired[1], channels[1])
 
     def test_detector_runs_doa_only_after_positive_model_detection(
         self, tmp_path, monkeypatch

@@ -27,6 +27,7 @@ EVAL_SUBCOMMANDS: dict[str, CommandSpec] = {
     "postprocess": ("scripts.cli.eval.postprocess", "run"),
     "calibrate": ("scripts.cli.eval.calibrate", "run"),
     "doa-compare": ("scripts.cli.eval.doa_compare", "run"),
+    "pyroom-attack-sim": ("scripts.cli.eval.pyroom_attack_sim", "run"),
 }
 
 

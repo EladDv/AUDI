@@ -391,6 +391,31 @@ def test_detector_uses_identity_input_norm_for_stft_frontend():
         assert detector._multi_frontend.frontends[0].win_length == 256
 
 
+def test_detector_mel_frontend_applies_configured_mean_std():
+    detector = DroneDetector.__new__(DroneDetector)
+    LightningModule.__init__(detector)
+    detector._multi_frontend = None
+    detector._use_pcen = False
+    detector._mel_transform = lambda wav: torch.full(
+        (wav.shape[0], 2, 3),
+        6.0,
+        dtype=torch.float32,
+        device=wav.device,
+    )
+    detector._to_db = torch.nn.Identity()
+    detector._mel_mean = torch.tensor(2.0)
+    detector._mel_std = torch.tensor(4.0)
+    detector._freq_mask = None
+    detector._time_mask = None
+    detector.spec_augment_prob = 0.0
+    detector.eval()
+
+    spec = detector._to_mel(torch.zeros(1, 16))
+
+    assert spec.shape == (1, 3, 2, 3)
+    torch.testing.assert_close(spec, torch.ones_like(spec))
+
+
 def test_freeze_backbone_keeps_classifier_trainable():
     detector = DroneDetector.__new__(DroneDetector)
     LightningModule.__init__(detector)

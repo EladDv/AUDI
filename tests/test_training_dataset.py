@@ -3,7 +3,7 @@ import random
 import numpy as np
 
 from audi.config import SNRBin
-from audi.training.dataset import MixedDataset
+from audi.training.dataset import HFDetectionDataset, MixedDataset, app_window_normalize
 from audi.training.hearability import scale_to_db
 
 
@@ -86,6 +86,39 @@ def test_load_raw_segment_resamples_to_target_sample_rate():
     segment = ds._load_raw_segment(ds.noise_ds, 16)
 
     assert segment.shape == (16,)
+
+
+def test_app_window_normalize_matches_app_rms_peak_limit():
+    audio = np.array([0.5, 0.0, -0.5, 0.0], dtype=np.float32)
+
+    normalized = app_window_normalize(audio)
+
+    np.testing.assert_allclose(normalized, [0.98, 0.0, -0.98, 0.0], rtol=1e-6)
+
+
+def test_hf_detection_dataset_normalizes_waveform_like_app():
+    ds = HFDetectionDataset.__new__(HFDetectionDataset)
+    ds.ds = [
+        {
+            "audio": {
+                "array": np.full(8, 0.5, dtype=np.float32),
+                "sampling_rate": 16000,
+            },
+            "label": 1.0,
+            "bin_idx": 0,
+            "snr_db": -10.0,
+        }
+    ]
+    ds.target_length_samples = 8
+    ds.sample_rate = 16000
+    ds.return_bin = True
+    ds.return_components = False
+
+    wav, label, bin_idx = ds[0]
+
+    np.testing.assert_allclose(wav.numpy(), np.full(8, 0.98, dtype=np.float32))
+    assert label.item() == 1.0
+    assert bin_idx.item() == 0
 
 
 def test_dataset_sanitizes_non_finite_augmented_waveforms():
