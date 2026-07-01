@@ -26,6 +26,7 @@ from audi.config import (
 from audi.frontend import parse_frequency_bands_hz
 from audi.training.dataset import (
     EpochSliceDataset,
+    HFDetectionDataset,
     PrecomputedDetectionDataset,
     PrecomputedFeatureDataset,
     make_dataset,
@@ -239,6 +240,12 @@ def run(argv: list[str] | None = None) -> int:
     ap.add_argument("--precomputed-feature-train-path", type=Path, default=None)
     ap.add_argument("--precomputed-feature-val-path", type=Path, default=None)
     ap.add_argument(
+        "--hf-dataset-path",
+        type=Path,
+        default=None,
+        help="Already-mixed HF detector DatasetDict with train/validation splits.",
+    )
+    ap.add_argument(
         "--one-pass-samples-per-epoch",
         type=int,
         default=None,
@@ -390,7 +397,15 @@ def run(argv: list[str] | None = None) -> int:
         args.precomputed_feature_train_path is not None
         or args.precomputed_train_path is not None
     )
-    if args.precomputed_feature_train_path is not None:
+    if args.hf_dataset_path is not None:
+        train_ds = HFDetectionDataset(
+            args.hf_dataset_path,
+            split="train",
+            target_length_samples=clip_samples,
+            sample_rate=args.sample_rate,
+            return_bin=True,
+        )
+    elif args.precomputed_feature_train_path is not None:
         validate_precomputed_feature_manifest(
             args.precomputed_feature_train_path, mix_cfg, mel_cfg, split="train"
         )
@@ -421,7 +436,15 @@ def run(argv: list[str] | None = None) -> int:
         sample_rate=args.sample_rate,
         aug=None,  # NEVER augment validation
     )
-    if args.precomputed_feature_val_path is not None:
+    if args.hf_dataset_path is not None:
+        val_ds = HFDetectionDataset(
+            args.hf_dataset_path,
+            split="validation",
+            target_length_samples=clip_samples,
+            sample_rate=args.sample_rate,
+            return_bin=True,
+        )
+    elif args.precomputed_feature_val_path is not None:
         validate_precomputed_feature_manifest(
             args.precomputed_feature_val_path, val_mix_cfg, mel_cfg, split="validation"
         )

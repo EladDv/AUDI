@@ -15,6 +15,8 @@ DATA_SUBCOMMANDS: dict[str, CommandSpec] = {
     "field-bg": ("scripts.cli.build.field_bg", "main"),
     "blue-red-recordings": ("scripts.cli.build.blue_red_recordings", "main"),
     "mine-field-hard-negatives": ("scripts.cli.build.mine_field_hard_negatives", "main"),
+    "pyroom-dataset": ("scripts.cli.build.pyroom_dataset", "run"),
+    "pyroom-mvdr-cache": ("scripts.cli.build.pyroom_dataset", "run_cache"),
     "precompute-waveforms": ("scripts.cli.build.precompute", "run_waveforms"),
     "precompute-features": ("scripts.cli.build.precompute", "run_features"),
 }

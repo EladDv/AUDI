@@ -218,9 +218,12 @@ def validate_precomputed_feature_manifest(
             f"expected_frontend_hash={expected_frontend_hash}\n"
             f"manifest_frontend_hash={got_frontend_hash}\n"
             f"expected_waveform_config={json.dumps(waveform_config_payload(cfg), sort_keys=True)}\n"
-            f"manifest_waveform_config={json.dumps(manifest.get('waveform_config', {}), sort_keys=True)}\n"
-            f"expected_frontend_config={json.dumps(frontend_config_payload(mel_cfg), sort_keys=True)}\n"
-            f"manifest_frontend_config={json.dumps(manifest.get('frontend_config', {}), sort_keys=True)}"
+            "manifest_waveform_config="
+            f"{json.dumps(manifest.get('waveform_config', {}), sort_keys=True)}\n"
+            "expected_frontend_config="
+            f"{json.dumps(frontend_config_payload(mel_cfg), sort_keys=True)}\n"
+            "manifest_frontend_config="
+            f"{json.dumps(manifest.get('frontend_config', {}), sort_keys=True)}"
         )
     got_split = manifest.get("split")
     if got_split != split:
@@ -233,7 +236,12 @@ def validate_precomputed_feature_manifest(
 class EpochSliceDataset(Dataset[tuple[torch.Tensor, ...]]):
     """Expose one disjoint fixed-size slice of a larger dataset per epoch."""
 
-    def __init__(self, dataset: Dataset[tuple[torch.Tensor, ...]], *, samples_per_epoch: int) -> None:
+    def __init__(
+        self,
+        dataset: Dataset[tuple[torch.Tensor, ...]],
+        *,
+        samples_per_epoch: int,
+    ) -> None:
         if samples_per_epoch <= 0:
             raise ValueError("samples_per_epoch must be positive")
         self.dataset = dataset
@@ -389,6 +397,62 @@ class PrecomputedDetectionDataset(Dataset[tuple[torch.Tensor, ...]]):
         ).to_tuple(
             return_bin=self.return_bin, return_components=self.return_components
         )
+
+
+class HFDetectionDataset(Dataset[tuple[torch.Tensor, ...]]):
+    """Dataset backed by an already-mixed HF detector DatasetDict split."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        split: str,
+        target_length_samples: int,
+        sample_rate: int,
+        return_bin: bool = False,
+        return_components: bool = False,
+    ) -> None:
+        self.ds = _load_split(Path(path), split)
+        if len(self.ds) <= 0:
+            raise SystemExit(f"Split {split!r} in {path} is empty")
+        self.target_length_samples = int(target_length_samples)
+        self.sample_rate = int(sample_rate)
+        self.return_bin = return_bin or return_components
+        self.return_components = return_components
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+        row = self.ds[idx]
+        audio = row["audio"]
+        wav = np.asarray(audio["array"], dtype=np.float32).reshape(-1)
+        source_sr = self._audio_sample_rate(audio)
+        wav = _resample_if_needed(wav, source_sr, self.sample_rate)
+        wav = _fit_length(wav, self.target_length_samples)
+        wav = np.resize(wav, self.target_length_samples).astype(np.float32)
+        wav_tensor = torch.as_tensor(_finite_audio(wav), dtype=torch.float32)
+        label = torch.tensor(float(row["label"]), dtype=torch.float32)
+        bin_idx = torch.tensor(int(row.get("bin_idx", -1)), dtype=torch.long)
+        snr_db = torch.tensor(float(row.get("snr_db", -99.9)), dtype=torch.float32)
+
+        return BatchItem(
+            mix=wav_tensor,
+            label=label,
+            bin_idx=bin_idx,
+            drone=torch.zeros_like(wav_tensor),
+            noise=wav_tensor,
+            snr_db=snr_db,
+        ).to_tuple(
+            return_bin=self.return_bin,
+            return_components=self.return_components,
+        )
+
+    @staticmethod
+    def _audio_sample_rate(audio: Any) -> int:
+        if isinstance(audio, dict) and audio.get("sampling_rate") is not None:
+            return int(audio["sampling_rate"])
+        return 16000
 
 
 class MixedDataset(Dataset[tuple[torch.Tensor, ...]]):

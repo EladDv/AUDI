@@ -394,6 +394,47 @@ uv run audi-data precompute-features \
     --output-dir data/precomputed/features/train
 ```
 
+#### `pyroom-dataset`
+
+Build an HF `DatasetDict` of mono detector waveforms by combining real 16-channel UMA16 false-hunt background with drone audio rendered through `pyroomacoustics.AnechoicRoom` free-space simulation. The command uses air absorption by default and the deployed UMA16 channel geometry from the app. The default collapse mode is MVDR; `--beamformer mean` outputs the mean of all 16 channels, and `--beamformer random-channel` outputs one randomly selected channel.
+
+By default, `pyroom-dataset` also samples clips from `data/HF_dataset_v2_background`, renders each as an independent random free-space source into the UMA16 array, and adds those spatialized BG layers into the 16-channel background before the drone mix. `snr_db` is measured from the generated tensors as `mix_channels - bg_channels` versus `bg_channels`; SNR bins are used to bucket the measured SNR, not to force the drone gain.
+
+Drone recordings are treated as microphone-level examples captured around `--drone-reference-distance-m` meters, default `10`. Pyroom free-space propagation is therefore applied relative to that reference distance instead of treating the clip as an arbitrary unit source at the drone.
+
+```bash
+uv run audi-data pyroom-mvdr-cache \
+    --noise-path data/20260603_uma16channel_lebanon_false_hunt \
+    --cache-dir data/pyroom_mvdr_cache
+
+uv run audi-data pyroom-dataset \
+    --split train --num-examples 50000 \
+    --mvdr-cache-dir data/pyroom_mvdr_cache \
+    --num-workers 8 \
+    --output-dir data/HF_dataset_mvdr_uma16
+
+uv run audi-data pyroom-dataset \
+    --split validation --num-examples 5000 \
+    --mvdr-cache-dir data/pyroom_mvdr_cache \
+    --num-workers 8 \
+    --output-dir data/HF_dataset_mvdr_uma16
+```
+
+Defaults use `data/20260603_uma16channel_lebanon_false_hunt` for 16-channel background and `data/HF_dataset_v2_drone` for drone clips. `pyroom-mvdr-cache` stores per-background inverse covariance files, then `pyroom-dataset --mvdr-cache-dir` projects those cached files into the requested beam direction for each row. `--num-workers` writes one temporary HF shard per process and merges them into the target `DatasetDict`. Spatial BG layering can be tuned with `--bg-noise-probability`, `--bg-noise-count`, `--bg-noise-multi-probability`, and `--bg-noise-max-attenuation-db`; drone distance calibration can be tuned with `--drone-reference-distance-m`. Rows include `audio`, float `label`, `bin_idx`, `snr_db`, and beam/drone direction metadata.
+
+For beam-selection calibration, generate off-target beams and soft labels:
+
+```bash
+uv run audi-data pyroom-dataset \
+    --split train --num-examples 50000 \
+    --steering-error-deg 20 \
+    --random-beam-probability 0.25 \
+    --soft-target-by-beam-alignment \
+    --output-dir data/HF_dataset_mvdr_uma16_soft
+```
+
+With soft targets enabled, positive labels are scaled by `max(cosine(drone_direction, beam_direction), 0.5)`, so dead-on beams remain `1.0` while off-target beams still teach detection with lower confidence.
+
 #### Current Field Utilities
 
 ```bash
