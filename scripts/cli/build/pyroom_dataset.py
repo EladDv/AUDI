@@ -36,7 +36,7 @@ from audi.training.pyroom_dataset import (
 
 DEFAULT_NOISE_PATH = Path("data/20260603_uma16channel_lebanon_false_hunt")
 DEFAULT_DRONE_PATH = Path("data/HF_dataset_v2_drone")
-DEFAULT_BG_NOISE_PATH = Path("data/HF_dataset_v2_background")
+DEFAULT_BG_NOISE_PATH = Path("data/HF_dataset_v7_background")
 DEFAULT_MVDR_CACHE_PATH = Path("data/pyroom_mvdr_cache")
 
 
@@ -60,13 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--snr-bin",
         action="append",
         default=[
-            "easy:-5:0:0.25",
-            "medium:-10:-5:0.30",
-            "hard:-15:-10:0.30",
-            "extreme:-20:-20:0.15",
+            "easy:0:5:0.20",
+            "medium:-5:0:0.25",
+            "hard:-10:-5:0.25",
+            "very_hard:-15:-10:0.20",
+            "extreme:-20:-15:0.10",
         ],
     )
-    ap.add_argument("--clip-seconds", type=float, default=1.28)
+    ap.add_argument("--clip-seconds", type=float, default=5.12)
     ap.add_argument("--sample-rate", type=int, default=16000)
     ap.add_argument("--highpass-hz", type=float, default=125.0)
     ap.add_argument("--positive-probability", type=float, default=0.5)
@@ -81,10 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel worker processes used to generate this split.",
     )
     ap.add_argument("--validation-fraction", type=float, default=0.15)
-    ap.add_argument("--min-azimuth-deg", type=float, default=-75.0)
-    ap.add_argument("--max-azimuth-deg", type=float, default=75.0)
+    ap.add_argument("--min-azimuth-deg", type=float, default=-180.0)
+    ap.add_argument("--max-azimuth-deg", type=float, default=180.0)
     ap.add_argument("--min-elevation-deg", type=float, default=5.0)
-    ap.add_argument("--max-elevation-deg", type=float, default=85.0)
+    ap.add_argument("--max-elevation-deg", type=float, default=70.0)
     ap.add_argument("--min-distance-m", type=float, default=20.0)
     ap.add_argument("--max-distance-m", type=float, default=450.0)
     ap.add_argument(
@@ -94,9 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Approximate distance where drone source recordings were captured.",
     )
     ap.add_argument("--steering-error-deg", type=float, default=0.0)
-    ap.add_argument("--stft-n-fft", type=int, default=512)
-    ap.add_argument("--hop-length", type=int, default=160)
-    ap.add_argument("--diagonal-loading", type=float, default=1e-2)
+    ap.add_argument("--stft-n-fft", type=int, default=2048)
+    ap.add_argument("--hop-length", type=int, default=512)
+    ap.add_argument("--diagonal-loading", type=float, default=1e-4)
     ap.add_argument(
         "--mvdr-cache-dir",
         type=Path,
@@ -111,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--beamformer",
-        choices=["mvdr", "mean", "random-channel"],
+        choices=["mvdr", "mean", "channel0", "random-channel"],
         default="mvdr",
         help="How to collapse 16 channels into detector mono audio.",
     )
@@ -161,9 +162,9 @@ def build_cache_parser() -> argparse.ArgumentParser:
     ap.add_argument("--validation-fraction", type=float, default=0.15)
     ap.add_argument("--split", choices=["all", "train", "validation"], default="all")
     ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("--stft-n-fft", type=int, default=512)
-    ap.add_argument("--hop-length", type=int, default=160)
-    ap.add_argument("--diagonal-loading", type=float, default=1e-2)
+    ap.add_argument("--stft-n-fft", type=int, default=2048)
+    ap.add_argument("--hop-length", type=int, default=512)
+    ap.add_argument("--diagonal-loading", type=float, default=1e-4)
     ap.add_argument("--mvdr-cache-seconds", type=float, default=30.0)
     ap.add_argument("--no-deglitch-audio", action="store_true")
     ap.add_argument("--deglitch-threshold", type=float, default=0.001)

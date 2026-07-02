@@ -39,16 +39,17 @@ detection:
   stride: 0.0625                 # Sliding window stride (0.0625 = 6.25% step size)
   enabled_channels: 0         # null = infer on every captured channel; disabled channels are still recorded
   input_beamforming:
-    enabled: false              # true = run detector on MVDR beams instead of raw channels
-    beam_count: 36              # total look directions across azimuth/elevation grid
-    elevation_count: 3          # horizon-ish, mid, upper look rows
+    enabled: true               # true = run detector on MVDR beams instead of raw channels
+    beam_count: 12              # total look directions around the horizon row
+    elevation_count: 1          # single horizon-ish look row
     min_elevation_deg: 5.0      # array lies face-up; 0 is horizon, 90 is overhead
-    max_elevation_deg: 70.0
-    n_fft: 512
-    hop_length: 160
-    diagonal_loading: 0.01
+    max_elevation_deg: 5.0
+    n_fft: 2048
+    hop_length: 512
+    diagonal_loading: 0.0001
     covariance_update_interval_seconds: 300.0  # refresh only after clean all-beam model pass
     covariance_no_drone_threshold: 0.25        # max raw beam score allowed for refresh
+    incremental_step_samples: null # null = detection window_samples * stride
     deglitch_enabled: true       # smooth bad-channel jumps before MVDR covariance
     deglitch_threshold: 0.001
     deglitch_loudness_ratio: 8.0

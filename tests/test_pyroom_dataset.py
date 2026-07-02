@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,15 @@ def _load_app_uma16_positions() -> np.ndarray:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.UMA16_MIC_POSITIONS_M
+
+
+def _load_app_mvdr_module():
+    app_src = Path("audi-app/src")
+    if str(app_src) not in sys.path:
+        sys.path.insert(0, str(app_src))
+    import mvdr_beamformer
+
+    return mvdr_beamformer
 
 
 def test_mvdr_uses_deployed_uma16_geometry_order():
@@ -227,6 +237,41 @@ def test_mean_beamformer_uses_only_output_section(monkeypatch):
     assert item[0].shape == (8,)
 
 
+def test_channel0_beamformer_uses_only_output_channel_zero(monkeypatch):
+    ds = PyRoomDataset.__new__(PyRoomDataset)
+    ds.target_length_samples = 8
+    ds.positive_probability = 0.0
+    ds.sample_rate = 16000
+    ds.cfg = PyRoomSimulationConfig(
+        stft_n_fft=8,
+        hop_length=4,
+        beamformer="channel0",
+        sensor_noise_db=None,
+    )
+    ds.positions_m = planar_array_positions()
+    ds.return_components = True
+
+    output_noise = np.arange(16 * 8, dtype=np.float32).reshape(16, 8) + 1.0
+    info = pyroom_mod.WavpackInfo(Path("noise.wv"), 16000, 16, 10.0)
+    calls = []
+
+    def load_noise_section():
+        calls.append(True)
+        return NoiseSection(info=info, channels=output_noise, start_seconds=0.0)
+
+    def fail_estimate(*args, **kwargs):
+        raise AssertionError("channel0 beamformer must not estimate MVDR weights")
+
+    monkeypatch.setattr(ds, "_load_noise_section", load_noise_section)
+    monkeypatch.setattr(pyroom_mod, "estimate_mvdr_weights", fail_estimate)
+
+    item = ds[0]
+
+    assert len(calls) == 1
+    np.testing.assert_allclose(item[4].numpy(), output_noise[0])
+    assert item[0].shape == (8,)
+
+
 def test_spatial_bg_is_rendered_before_measured_snr(monkeypatch):
     ds = PyRoomDataset.__new__(PyRoomDataset)
     ds.target_length_samples = 8
@@ -303,13 +348,12 @@ def test_non_mvdr_rejects_beam_calibration_options():
 
 def test_deglitch_multichannel_interpolates_large_channel_jump():
     channels = np.zeros((16, 64), dtype=np.float32)
-    channels[7, 30] = 0.0016
-    channels[7, 31] = -0.0081
-    channels[7, 32] = -0.0039
+    channels[7, :] = 0.01
+    channels[7, 30:] += 0.8
 
     repaired = deglitch_multichannel(channels, threshold=0.001, window_samples=4)
 
-    assert np.max(np.abs(np.diff(repaired[7, 26:36]))) < 0.004
+    assert np.max(np.abs(np.diff(repaired[7, 26:36]))) < 0.2
     assert np.allclose(repaired[6], channels[6])
 
 
@@ -322,3 +366,27 @@ def test_deglitch_respects_local_loudness():
     repaired = deglitch_multichannel(channels, threshold=0.001, window_samples=4)
 
     assert np.allclose(repaired[7], channels[7])
+
+
+def test_pyroom_deglitch_matches_deployed_app_smoother():
+    app_mvdr = _load_app_mvdr_module()
+    rng = np.random.default_rng(123)
+    channels = rng.normal(0.0, 0.02, size=(16, 256)).astype(np.float32)
+    channels[8, 100:] += 0.8
+
+    training_repaired = deglitch_multichannel(
+        channels,
+        threshold=0.001,
+        loudness_ratio=8.0,
+        diff_ratio=12.0,
+        window_samples=64,
+    )
+    app_repaired = app_mvdr.deglitch_multichannel(
+        channels,
+        threshold=0.001,
+        loudness_ratio=8.0,
+        diff_ratio=12.0,
+        window_samples=64,
+    )
+
+    np.testing.assert_allclose(training_repaired, app_repaired)

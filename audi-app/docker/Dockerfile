@@ -65,7 +65,6 @@ RUN mkdir -p /data/recordings /var/log
 
 # Copy application
 COPY src/ /app/src/
-COPY scripts/ /app/scripts/
 COPY models/ /app/models/
 COPY secure/ /app/secure/
 COPY webui/ /app/webui/

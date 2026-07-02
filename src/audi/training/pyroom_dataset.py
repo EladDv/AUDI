@@ -15,7 +15,6 @@ from typing import Any
 import numpy as np
 import torch
 from datasets import load_from_disk
-from scipy.ndimage import median_filter
 from scipy.signal import istft, resample_poly, stft
 from torch.utils.data import Dataset
 
@@ -62,9 +61,9 @@ class PyRoomSimulationConfig:
     max_distance_m: float = 450.0
     drone_reference_distance_m: float = 10.0
     steering_error_deg: float = 0.0
-    stft_n_fft: int = 512
-    hop_length: int = 160
-    diagonal_loading: float = 1e-2
+    stft_n_fft: int = 2048
+    hop_length: int = 512
+    diagonal_loading: float = 1e-4
     sensor_noise_db: float | None = -45.0
     temperature_c: float = 20.0
     humidity_percent: float = 50.0
@@ -102,8 +101,10 @@ class PyRoomSimulationConfig:
             raise ValueError("random_beam_probability must be in [0, 1]")
         if not 0.0 <= self.target_alignment_floor <= 1.0:
             raise ValueError("target_alignment_floor must be in [0, 1]")
-        if self.beamformer not in {"mvdr", "mean", "random-channel"}:
-            raise ValueError("beamformer must be one of: mvdr, mean, random-channel")
+        if self.beamformer not in {"mvdr", "mean", "channel0", "random-channel"}:
+            raise ValueError(
+                "beamformer must be one of: mvdr, mean, channel0, random-channel"
+            )
         if self.beamformer != "mvdr" and (
             self.soft_target_by_beam_alignment
             or self.random_beam_probability > 0.0
@@ -153,6 +154,7 @@ def pyroom_config_payload(cfg: PyRoomSimulationConfig) -> dict[str, Any]:
     payload["output"] = "full_band_mono_detector_waveform"
     payload["simulator"] = "pyroomacoustics.AnechoicRoom"
     payload["array_geometry"] = "uma16_app_channel_order"
+    payload["deglitch_algorithm"] = "app_side_window_prefix_v1"
     payload["mic_positions_m"] = UMA16_MIC_POSITIONS_M.tolist()
     payload["background_source"] = "real_16_channel_wavpack"
     return payload
@@ -396,18 +398,33 @@ def deglitch_multichannel(
         y = repaired[ch_idx]
         diff = np.abs(np.diff(y))
         if window_samples > 0:
-            loudness_size = 2 * window_samples + 3
-            diff_size = 2 * window_samples + 1
-            local_loudness = median_filter(
-                np.abs(y),
-                size=loudness_size,
-                mode="nearest",
-            )[1:] + 1e-8
-            local_diff_scale = median_filter(
-                diff,
-                size=diff_size,
-                mode="nearest",
-            ) + 1e-8
+            abs_y = np.abs(y)
+            abs_prefix = _prefix_sum(abs_y)
+            diff_prefix = _prefix_sum(diff)
+            loud_left = _trailing_mean_inclusive(
+                abs_prefix,
+                radius=window_samples,
+                output_count=diff.size,
+            )
+            loud_right = _following_mean(
+                abs_prefix,
+                radius=window_samples,
+                output_count=diff.size,
+                offset=1,
+            )
+            diff_left = _preceding_mean(
+                diff_prefix,
+                radius=window_samples,
+                output_count=diff.size,
+            )
+            diff_right = _following_mean(
+                diff_prefix,
+                radius=window_samples,
+                output_count=diff.size,
+                offset=1,
+            )
+            local_loudness = np.minimum(loud_left, loud_right) + 1e-8
+            local_diff_scale = np.maximum(diff_left, diff_right) + 1e-8
         else:
             local_loudness = np.maximum(np.abs(y[1:]), 1e-8)
             local_diff_scale = diff + 1e-8
@@ -430,8 +447,98 @@ def deglitch_multichannel(
         for start, end in spans:
             left = y[start - 1] if start > 0 else y[end] if end < y.size else 0.0
             right = y[end] if end < y.size else left
-            y[start:end] = np.linspace(left, right, end - start, endpoint=False, dtype=np.float32)
+            y[start:end] = np.linspace(
+                left,
+                right,
+                end - start,
+                endpoint=False,
+                dtype=np.float32,
+            )
     return repaired
+
+
+def _prefix_sum(values: np.ndarray) -> np.ndarray:
+    prefix = np.empty(values.size + 1, dtype=np.float32)
+    prefix[0] = 0.0
+    np.cumsum(values, dtype=np.float32, out=prefix[1:])
+    return prefix
+
+
+def _trailing_mean_inclusive(
+    prefix: np.ndarray,
+    *,
+    radius: int,
+    output_count: int,
+) -> np.ndarray:
+    values_size = prefix.size - 1
+    output_count = max(0, min(int(output_count), values_size))
+    out = np.empty(output_count, dtype=np.float32)
+    if output_count == 0:
+        return out
+    radius = max(1, int(radius))
+    partial = min(radius - 1, output_count)
+    if partial > 0:
+        counts = np.arange(1, partial + 1, dtype=np.float32)
+        out[:partial] = prefix[1 : partial + 1] / counts
+    if output_count >= radius:
+        out[radius - 1 :] = (
+            prefix[radius : output_count + 1]
+            - prefix[: output_count + 1 - radius]
+        ) / float(radius)
+    return out
+
+
+def _preceding_mean(
+    prefix: np.ndarray,
+    *,
+    radius: int,
+    output_count: int,
+) -> np.ndarray:
+    values_size = prefix.size - 1
+    output_count = max(0, min(int(output_count), values_size))
+    out = np.empty(output_count, dtype=np.float32)
+    if output_count == 0:
+        return out
+    radius = max(1, int(radius))
+    out[0] = 0.0
+    partial = min(radius, output_count - 1)
+    if partial > 0:
+        counts = np.arange(1, partial + 1, dtype=np.float32)
+        out[1 : partial + 1] = prefix[1 : partial + 1] / counts
+    if output_count > radius:
+        out[radius:] = (
+            prefix[radius:output_count]
+            - prefix[: output_count - radius]
+        ) / float(radius)
+    return out
+
+
+def _following_mean(
+    prefix: np.ndarray,
+    *,
+    radius: int,
+    output_count: int,
+    offset: int,
+) -> np.ndarray:
+    values_size = prefix.size - 1
+    output_count = max(0, int(output_count))
+    out = np.empty(output_count, dtype=np.float32)
+    if output_count == 0:
+        return out
+    radius = max(1, int(radius))
+    offset = max(0, int(offset))
+    full_count = max(0, min(output_count, values_size - offset - radius + 1))
+    if full_count > 0:
+        out[:full_count] = (
+            prefix[offset + radius : offset + radius + full_count]
+            - prefix[offset : offset + full_count]
+        ) / float(radius)
+    if full_count < output_count:
+        starts = np.arange(full_count + offset, output_count + offset)
+        starts = np.minimum(starts, values_size)
+        counts = np.maximum(values_size - starts, 1).astype(np.float32)
+        out[full_count:] = (prefix[values_size] - prefix[starts]) / counts
+    return out
 
 
 def load_hf_audio_array(audio: Any, *, target_sample_rate: int) -> np.ndarray:
@@ -708,7 +815,7 @@ def mvdr_cache_payload(
     """Return a JSON-stable identity for one per-file MVDR covariance cache."""
     stat = info.path.stat()
     return {
-        "format": "audi_pyroom_mvdr_inverse_covariance_v1",
+        "format": "audi_pyroom_mvdr_inverse_covariance_v2",
         "source_path": str(info.path.resolve()),
         "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,
@@ -725,6 +832,7 @@ def mvdr_cache_payload(
         "deglitch_loudness_ratio": cfg.deglitch_loudness_ratio,
         "deglitch_diff_ratio": cfg.deglitch_diff_ratio,
         "deglitch_window_samples": cfg.deglitch_window_samples,
+        "deglitch_algorithm": "app_side_window_prefix_v1",
         "cache_seconds": float(cache_seconds),
         "cache_start_seconds": float(cache_start_seconds),
     }
@@ -1067,6 +1175,11 @@ class PyRoomDataset(Dataset[tuple[torch.Tensor, ...]]):
             if self.return_components:
                 beam_noise = np.mean(output_noise_channels, axis=0)
                 beam_drone = np.mean(drone_channels, axis=0)
+        elif self.cfg.beamformer == "channel0":
+            beam_mix = mix_channels[0]
+            if self.return_components:
+                beam_noise = output_noise_channels[0]
+                beam_drone = drone_channels[0]
         else:
             mic_idx = random.randrange(output_noise_channels.shape[0])
             beam_mix = mix_channels[mic_idx]

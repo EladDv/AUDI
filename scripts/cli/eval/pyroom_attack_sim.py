@@ -449,8 +449,8 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-duration-seconds", type=float, default=None)
     parser.add_argument("--sample-rate", type=int, default=16000)
-    parser.add_argument("--beam-count", type=int, default=36)
-    parser.add_argument("--elevation-count", type=int, default=3)
+    parser.add_argument("--beam-count", type=int, default=8)
+    parser.add_argument("--elevation-count", type=int, default=2)
     parser.add_argument("--min-elevation-deg", type=float, default=5.0)
     parser.add_argument("--max-elevation-deg", type=float, default=70.0)
     parser.add_argument("--drone-azimuth-deg", type=float, default=0.0)
@@ -459,6 +459,9 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
     parser.add_argument("--approach-speed-mps", type=float, default=10.0)
     parser.add_argument("--min-distance-m", type=float, default=10.0)
     parser.add_argument("--reference-distance-m", type=float, default=10.0)
+    parser.add_argument("--stft-n-fft", type=int, default=2048)
+    parser.add_argument("--hop-length", type=int, default=512)
+    parser.add_argument("--diagonal-loading", type=float, default=1e-4)
     parser.add_argument(
         "--reference-snr-db",
         type=float,
@@ -486,9 +489,9 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
     )
     cfg = PyRoomSimulationConfig(
         drone_reference_distance_m=args.reference_distance_m,
-        stft_n_fft=512,
-        hop_length=160,
-        diagonal_loading=1e-2,
+        stft_n_fft=args.stft_n_fft,
+        hop_length=args.hop_length,
+        diagonal_loading=args.diagonal_loading,
         deglitch_audio=True,
     )
     positions = planar_array_positions()
@@ -518,6 +521,9 @@ def run(noise_path: str | None = None, drone_path: str | None = None) -> None:
         "min_distance_m": args.min_distance_m,
         "reference_distance_m": args.reference_distance_m,
         "reference_snr_db": args.reference_snr_db,
+        "stft_n_fft": args.stft_n_fft,
+        "hop_length": args.hop_length,
+        "diagonal_loading": args.diagonal_loading,
         "stride_seconds": args.stride_seconds,
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

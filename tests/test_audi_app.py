@@ -428,6 +428,76 @@ class TestAudiApp:
         with wave.open(meta["files"]["full_120s_all_channels"]) as wav:
             assert wav.getnchannels() == 4
 
+    def test_alarm_snapshot_saves_mvdr_beam_outputs(self, tmp_path):
+        storage = _import_from_audi_app("storage")
+        recorder = _import_from_audi_app("recorder")
+
+        ring = recorder.AudioRingBuffer(max_samples=8000, channels=4)
+        ring.append(
+            np.tile(
+                np.array([[0.1, 0.2, 0.3, 0.4]], dtype=np.float32),
+                (8000, 1),
+            )
+        )
+        snapshotter = storage.AlarmSnapshotter(str(tmp_path), sample_rate=8000)
+        snapshotter._stop_event.set()
+
+        def beamform_callback(audio_by_channel):
+            assert audio_by_channel.shape == (8000, 4)
+            return [
+                {
+                    "index": 0,
+                    "name": "beam0_az000_el05",
+                    "audio": np.full(8000, 0.05, dtype=np.float32),
+                },
+                {
+                    "index": 1,
+                    "name": "beam1_az180_el05",
+                    "audio": np.full(8000, 0.75, dtype=np.float32),
+                },
+                {
+                    "index": 2,
+                    "name": "beam2_az270_el05",
+                    "audio": np.full(8000, -0.25, dtype=np.float32),
+                },
+            ]
+
+        meta = snapshotter.save_snapshot(
+            ring,
+            {
+                "alert_id": "field-mvdr-1",
+                "state": "YES",
+                "alert_level": "RED_ALERT",
+                "yes_confidence": 0.9,
+                "channel_index": 1,
+                "channel_name": "beam1_az180_el05",
+                "input_mode": "mvdr_beam",
+                "beam_azimuth_deg": 180.0,
+                "beam_elevation_deg": 5.0,
+                "beam_mic_indices": [0, 1, 2, 3],
+            },
+            recorder_ref=None,
+            beamform_callback=beamform_callback,
+        )
+
+        assert meta is not None
+        assert meta["input_mode"] == "mvdr_beam"
+        assert meta["mvdr_beam_count"] == 3
+        assert meta["channel_count"] == 4
+        assert meta["beam_azimuth_deg"] == 180.0
+        assert "full_120s_all_mvdr_beams" in meta["files"]
+
+        with wave.open(meta["files"]["full_120s"], "rb") as wav:
+            assert wav.getnchannels() == 1
+            pcm = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16)
+            selected_mean = float(np.mean(pcm.astype(np.float32) / 32768.0))
+        assert selected_mean == pytest.approx(0.75, abs=1e-3)
+
+        with wave.open(meta["files"]["full_120s_all_channels"], "rb") as wav:
+            assert wav.getnchannels() == 4
+        with wave.open(meta["files"]["full_120s_all_mvdr_beams"], "rb") as wav:
+            assert wav.getnchannels() == 3
+
     def test_storage_compresses_16_channel_wav_as_wavpack(
         self, tmp_path, monkeypatch
     ):
@@ -837,6 +907,157 @@ class TestAudiApp:
 
         assert np.max(np.abs(np.diff(repaired[0]))) < 0.5
         np.testing.assert_allclose(repaired[1], channels[1])
+
+    def test_mvdr_deglitch_sensitivity_scales_with_local_loudness(self):
+        mvdr = _import_from_audi_app("mvdr_beamformer")
+
+        channels = np.zeros((2, 64), dtype=np.float32)
+        channels[0, :] = 0.01
+        channels[0, 32:] += 0.2
+        channels[1, :] = 1.0
+        channels[1, 32:] += 0.2
+
+        repaired = mvdr.deglitch_multichannel(
+            channels,
+            threshold=0.001,
+            loudness_ratio=8.0,
+            diff_ratio=12.0,
+            window_samples=4,
+        )
+
+        assert np.max(np.abs(np.diff(repaired[0]))) < 0.1
+        np.testing.assert_allclose(repaired[1], channels[1])
+
+    def test_mvdr_beamformer_uses_training_azimuth_and_phase_convention(self):
+        mvdr = _import_from_audi_app("mvdr_beamformer")
+
+        sample_rate = 16000
+        seconds = 2.0
+        t = np.arange(int(sample_rate * seconds), dtype=np.float64) / sample_rate
+        source_azimuth = 0.0
+        source_elevation = 10.0
+        source_frequency = 2500.0
+        direction = mvdr.direction_unit_vector(source_azimuth, source_elevation)
+
+        assert direction[1] > 0.98
+        assert abs(direction[0]) < 1e-6
+
+        positions = mvdr.UMA16_MIC_POSITIONS_M
+        signal_by_channel = np.stack(
+            [
+                np.sin(
+                    2.0
+                    * np.pi
+                    * source_frequency
+                    * (t + float(np.dot(position, direction)) / 343.0)
+                )
+                for position in positions
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        rng = np.random.default_rng(123)
+        noise_covariance = rng.normal(
+            0.0,
+            0.05,
+            size=signal_by_channel.shape,
+        ).astype(np.float32)
+        beamformer = mvdr.MVDRBeamformer(
+            mvdr.MVDRBeamformerConfig(
+                beam_count=2,
+                elevation_count=1,
+                min_elevation_deg=source_elevation,
+                max_elevation_deg=source_elevation,
+                diagonal_loading=1e-4,
+                deglitch_enabled=False,
+            )
+        )
+        assert beamformer.update_covariance(noise_covariance, sample_rate)
+
+        outputs = beamformer.beamform(signal_by_channel, sample_rate)
+        matched = next(item for item in outputs if item["azimuth_deg"] == 0.0)
+        opposite = next(item for item in outputs if item["azimuth_deg"] == 180.0)
+        matched_rms = float(np.sqrt(np.mean(matched["audio"] ** 2)))
+        opposite_rms = float(np.sqrt(np.mean(opposite["audio"] ** 2)))
+
+        assert matched_rms > opposite_rms * 1.8
+
+    def test_mvdr_beamformer_default_grid_is_12_horizon_beams(self):
+        mvdr = _import_from_audi_app("mvdr_beamformer")
+
+        beamformer = mvdr.MVDRBeamformer()
+        assert len(beamformer.beams) == 12
+        assert [beam.elevation_deg for beam in beamformer.beams] == [5.0] * 12
+        assert [beam.azimuth_deg for beam in beamformer.beams] == [
+            0.0,
+            30.0,
+            60.0,
+            90.0,
+            120.0,
+            150.0,
+            180.0,
+            210.0,
+            240.0,
+            270.0,
+            300.0,
+            330.0,
+        ]
+
+    def test_mvdr_beamformer_incremental_stft_matches_full_recompute(self):
+        mvdr = _import_from_audi_app("mvdr_beamformer")
+
+        sample_rate = 16000
+        step_samples = 512
+        window_samples = 4096
+        rng = np.random.default_rng(321)
+        audio = rng.normal(
+            0.0,
+            0.02,
+            size=(window_samples + step_samples, 16),
+        ).astype(np.float32)
+        noise = rng.normal(
+            0.0,
+            0.02,
+            size=(window_samples, 16),
+        ).astype(np.float32)
+        cfg = mvdr.MVDRBeamformerConfig(
+            beam_count=4,
+            elevation_count=1,
+            n_fft=512,
+            hop_length=128,
+            diagonal_loading=1e-4,
+            deglitch_enabled=False,
+        )
+        rolling = mvdr.MVDRBeamformer(
+            mvdr.MVDRBeamformerConfig(
+                **{
+                    **cfg.__dict__,
+                    "incremental_step_samples": step_samples,
+                }
+            )
+        )
+        full = mvdr.MVDRBeamformer(cfg)
+
+        assert rolling.update_covariance(noise, sample_rate)
+        assert full.update_covariance(noise, sample_rate)
+
+        rolling.beamform(audio[:window_samples], sample_rate)
+        incremental_outputs = rolling.beamform(audio[step_samples:], sample_rate)
+        full_outputs = full.beamform(audio[step_samples:], sample_rate)
+
+        assert rolling._stft_cache_hits == 1
+        assert rolling._stft_last_reused_frames > 0
+        for incremental, recomputed in zip(
+            incremental_outputs,
+            full_outputs,
+            strict=True,
+        ):
+            np.testing.assert_allclose(
+                incremental["audio"],
+                recomputed["audio"],
+                rtol=2e-4,
+                atol=2e-5,
+            )
 
     def test_detector_runs_doa_only_after_positive_model_detection(
         self, tmp_path, monkeypatch

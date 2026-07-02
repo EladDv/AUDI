@@ -16,6 +16,7 @@ import logging
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -194,7 +195,11 @@ class AlarmSnapshotter:
         self._stop_event = threading.Event()
 
     def save_snapshot(
-        self, ring_buffer, detection: dict, recorder_ref
+        self,
+        ring_buffer,
+        detection: dict,
+        recorder_ref,
+        beamform_callback: Callable[[np.ndarray], list[dict]] | None = None,
     ) -> dict | None:
         ts = int(time.time())
         state = detection.get("state", "YES")
@@ -213,28 +218,54 @@ class AlarmSnapshotter:
             safe_channel_name = "".join(
                 c if c.isalnum() or c in {"-", "_"} else "_" for c in channel_name
             )
-            pre_samples = self._get_channel_samples(
-                ring_buffer, 60, channel=channel
-            )
             pre_all_samples = self._get_all_channel_samples(ring_buffer, 60)
+            pre_mvdr = self._mvdr_samples_from_callback(
+                pre_all_samples,
+                selected_index=channel,
+                beamform_callback=beamform_callback,
+            )
+            pre_samples = (
+                pre_mvdr["selected"]
+                if pre_mvdr is not None
+                else self._select_channel_samples(pre_all_samples, channel=channel)
+            )
             pre_path = event_dir / f"pre_60s_{safe_channel_name}.wav"
             self._samples_to_wav(pre_samples, str(pre_path))
             pre_size = pre_path.stat().st_size
             pre_all_path = event_dir / "pre_60s_all_channels.wav"
             self._samples_to_wav(pre_all_samples, str(pre_all_path))
             pre_all_size = pre_all_path.stat().st_size
+            pre_mvdr_path = None
+            pre_mvdr_size = None
+            if pre_mvdr is not None:
+                pre_mvdr_path = event_dir / "pre_60s_all_mvdr_beams.wav"
+                self._samples_to_wav(pre_mvdr["all"], str(pre_mvdr_path))
+                pre_mvdr_size = pre_mvdr_path.stat().st_size
 
             post_path = event_dir / f"post_60s_{safe_channel_name}.wav"
             self._stop_event.wait(60)
-            post_samples = self._get_channel_samples(
-                ring_buffer, 60, channel=channel
-            )
             post_all_samples = self._get_all_channel_samples(ring_buffer, 60)
+            post_mvdr = self._mvdr_samples_from_callback(
+                post_all_samples,
+                selected_index=channel,
+                beamform_callback=beamform_callback,
+            )
+            post_samples = (
+                post_mvdr["selected"]
+                if post_mvdr is not None
+                else self._select_channel_samples(post_all_samples, channel=channel)
+            )
             self._samples_to_wav(post_samples, str(post_path))
             post_size = post_path.stat().st_size
             post_all_path = event_dir / "post_60s_all_channels.wav"
             self._samples_to_wav(post_all_samples, str(post_all_path))
             post_all_size = post_all_path.stat().st_size
+            post_mvdr_path = None
+            post_mvdr_size = None
+            if post_mvdr is not None:
+                post_mvdr_path = event_dir / "post_60s_all_mvdr_beams.wav"
+                self._samples_to_wav(post_mvdr["all"], str(post_mvdr_path))
+                post_mvdr_size = post_mvdr_path.stat().st_size
             combined = np.concatenate([pre_samples, post_samples])
             combined_path = event_dir / f"full_120s_{safe_channel_name}.wav"
             self._samples_to_wav(combined, str(combined_path))
@@ -243,6 +274,18 @@ class AlarmSnapshotter:
             combined_all_path = event_dir / "full_120s_all_channels.wav"
             self._samples_to_wav(combined_all, str(combined_all_path))
             combined_all_size = combined_all_path.stat().st_size
+            combined_mvdr_path = None
+            combined_mvdr_size = None
+            mvdr_beam_count = None
+            if pre_mvdr is not None and post_mvdr is not None:
+                combined_mvdr = np.concatenate(
+                    [pre_mvdr["all"], post_mvdr["all"]],
+                    axis=0,
+                )
+                combined_mvdr_path = event_dir / "full_120s_all_mvdr_beams.wav"
+                self._samples_to_wav(combined_mvdr, str(combined_mvdr_path))
+                combined_mvdr_size = combined_mvdr_path.stat().st_size
+                mvdr_beam_count = self._channel_count(combined_mvdr)
 
             meta = {
                 "timestamp": ts,
@@ -265,6 +308,11 @@ class AlarmSnapshotter:
                     "firing_channel_name",
                     channel_name,
                 ),
+                "input_mode": detection.get("input_mode", "raw_channel"),
+                "beam_azimuth_deg": detection.get("beam_azimuth_deg"),
+                "beam_elevation_deg": detection.get("beam_elevation_deg"),
+                "beam_mic_indices": detection.get("beam_mic_indices"),
+                "mvdr_beam_count": mvdr_beam_count,
                 "channel_count": self._channel_count(pre_all_samples),
                 "all_channel_results": detection.get("all_channel_results"),
                 "color_trace": detection.get("color_trace"),
@@ -286,6 +334,21 @@ class AlarmSnapshotter:
                 },
                 "sample_rate": self.sample_rate,
             }
+            if pre_mvdr_path and post_mvdr_path and combined_mvdr_path:
+                meta["files"].update(
+                    {
+                        "pre_60s_all_mvdr_beams": str(pre_mvdr_path),
+                        "post_60s_all_mvdr_beams": str(post_mvdr_path),
+                        "full_120s_all_mvdr_beams": str(combined_mvdr_path),
+                    }
+                )
+                meta["sizes_bytes"].update(
+                    {
+                        "pre_60s_all_mvdr_beams": pre_mvdr_size,
+                        "post_60s_all_mvdr_beams": post_mvdr_size,
+                        "full_120s_all_mvdr_beams": combined_mvdr_size,
+                    }
+                )
             meta_path = event_dir / "metadata.json"
             with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=2)
@@ -328,6 +391,60 @@ class AlarmSnapshotter:
             channel = min(max(0, int(channel)), samples.shape[1] - 1)
             samples = samples[:, channel]
         return samples
+
+    @staticmethod
+    def _select_channel_samples(samples: np.ndarray, *, channel: int) -> np.ndarray:
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.ndim == 2:
+            channel = min(max(0, int(channel)), samples.shape[1] - 1)
+            return samples[:, channel]
+        return samples
+
+    def _mvdr_samples_from_callback(
+        self,
+        all_channel_samples: np.ndarray,
+        *,
+        selected_index: int,
+        beamform_callback: Callable[[np.ndarray], list[dict]] | None,
+    ) -> dict | None:
+        if beamform_callback is None:
+            return None
+        all_channel_samples = np.asarray(all_channel_samples, dtype=np.float32)
+        if all_channel_samples.ndim != 2 or all_channel_samples.size == 0:
+            return None
+
+        try:
+            beams = beamform_callback(all_channel_samples)
+        except Exception as exc:
+            logger.warning("MVDR snapshot beamforming failed: %s", exc)
+            return None
+        if not beams:
+            return None
+
+        beam_audio: list[tuple[int, np.ndarray]] = []
+        for beam in beams:
+            try:
+                index = int(beam["index"])
+                audio = np.asarray(beam["audio"], dtype=np.float32).reshape(-1)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if audio.size:
+                beam_audio.append((index, audio))
+        if not beam_audio:
+            return None
+
+        min_len = min(audio.size for _, audio in beam_audio)
+        ordered = sorted(beam_audio, key=lambda item: item[0])
+        all_beams = np.stack([audio[:min_len] for _, audio in ordered], axis=1)
+        selected = next(
+            (
+                audio[:min_len]
+                for index, audio in ordered
+                if index == int(selected_index)
+            ),
+            ordered[0][1][:min_len],
+        )
+        return {"selected": selected, "all": all_beams}
 
     @staticmethod
     def _channel_count(samples: np.ndarray) -> int:

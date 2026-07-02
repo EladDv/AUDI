@@ -188,6 +188,7 @@ class DetectionEngine:
         beamforming_cfg = dict(det_cfg.get("input_beamforming", {}) or {})
         self.input_beamforming_enabled = bool(beamforming_cfg.get("enabled", False))
         self._beamformer: MVDRBeamformer | None = None
+        self._beamformer_lock = threading.Lock()
         self._beam_metadata: list[dict] = []
         self._mvdr_covariance_update_interval_s = float(
             beamforming_cfg.get("covariance_update_interval_seconds", 300.0)
@@ -206,20 +207,23 @@ class DetectionEngine:
                     for part in mic_indices.split(",")
                     if part.strip()
                 ]
+            mvdr_incremental_step = beamforming_cfg.get("incremental_step_samples")
+            if mvdr_incremental_step is None:
+                mvdr_incremental_step = round(float(self.window_samples) * float(self.stride))
             self._beamformer = MVDRBeamformer(
                 MVDRBeamformerConfig(
-                    beam_count=int(beamforming_cfg.get("beam_count", 36)),
-                    elevation_count=int(beamforming_cfg.get("elevation_count", 3)),
+                    beam_count=int(beamforming_cfg.get("beam_count", 12)),
+                    elevation_count=int(beamforming_cfg.get("elevation_count", 1)),
                     min_elevation_deg=float(
                         beamforming_cfg.get("min_elevation_deg", 5.0)
                     ),
                     max_elevation_deg=float(
-                        beamforming_cfg.get("max_elevation_deg", 70.0)
+                        beamforming_cfg.get("max_elevation_deg", 5.0)
                     ),
-                    n_fft=int(beamforming_cfg.get("n_fft", 512)),
-                    hop_length=int(beamforming_cfg.get("hop_length", 160)),
+                    n_fft=int(beamforming_cfg.get("n_fft", 2048)),
+                    hop_length=int(beamforming_cfg.get("hop_length", 512)),
                     diagonal_loading=float(
-                        beamforming_cfg.get("diagonal_loading", 1e-2)
+                        beamforming_cfg.get("diagonal_loading", 1e-4)
                     ),
                     mic_indices=tuple(mic_indices) if mic_indices else None,
                     deglitch_enabled=bool(
@@ -237,6 +241,7 @@ class DetectionEngine:
                     deglitch_window_samples=int(
                         beamforming_cfg.get("deglitch_window_samples", 64)
                     ),
+                    incremental_step_samples=int(mvdr_incremental_step),
                 )
             )
             self._beam_metadata = [
@@ -639,7 +644,7 @@ class DetectionEngine:
             return [], {}
         if not self._beamformer.has_covariance:
             self._refresh_mvdr_covariance(audio_by_channel, reason="startup")
-        beams = self._beamformer.beamform(audio_by_channel, self.capture_sample_rate)
+        beams = self._beamform_audio(audio_by_channel)
         inputs = []
         for beam in beams:
             idx = int(beam["index"])
@@ -669,10 +674,11 @@ class DetectionEngine:
         if not self.input_beamforming_enabled or self._beamformer is None:
             return False
         try:
-            ok = self._beamformer.update_covariance(
-                audio_by_channel,
-                self.capture_sample_rate,
-            )
+            with self._beamformer_lock:
+                ok = self._beamformer.update_covariance(
+                    audio_by_channel,
+                    self.capture_sample_rate,
+                )
         except Exception as exc:
             self._last_mvdr_covariance_error = str(exc)
             logger.warning("MVDR covariance update failed (%s): %s", reason, exc)
@@ -685,6 +691,15 @@ class DetectionEngine:
         self._last_mvdr_covariance_error = None
         logger.info("MVDR covariance updated (%s)", reason)
         return True
+
+    def _beamform_audio(self, audio_by_channel: np.ndarray) -> list[dict]:
+        if not self.input_beamforming_enabled or self._beamformer is None:
+            return []
+        with self._beamformer_lock:
+            return self._beamformer.beamform(
+                audio_by_channel,
+                self.capture_sample_rate,
+            )
 
     def _maybe_refresh_mvdr_covariance(
         self,
@@ -1095,8 +1110,16 @@ class DetectionEngine:
             }
 
     def _save_snapshot_and_alert(self, detection: dict):
+        beamform_callback = (
+            self._beamform_audio
+            if self.input_beamforming_enabled
+            else None
+        )
         self.snapshotter.save_snapshot(
-            self.ring_buffer, detection, self._recorder_ref
+            self.ring_buffer,
+            detection,
+            self._recorder_ref,
+            beamform_callback=beamform_callback,
         )
 
     def force_inference(self) -> dict | None:

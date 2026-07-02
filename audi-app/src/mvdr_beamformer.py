@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy import signal
-from scipy.ndimage import median_filter
 
 SPEED_OF_SOUND_M_S = 343.0
 
@@ -49,13 +48,13 @@ class BeamDirection:
 
 @dataclass(frozen=True)
 class MVDRBeamformerConfig:
-    beam_count: int = 36
-    elevation_count: int = 3
+    beam_count: int = 12
+    elevation_count: int = 1
     min_elevation_deg: float = 5.0
-    max_elevation_deg: float = 70.0
-    n_fft: int = 512
-    hop_length: int = 160
-    diagonal_loading: float = 1e-2
+    max_elevation_deg: float = 5.0
+    n_fft: int = 2048
+    hop_length: int = 512
+    diagonal_loading: float = 1e-4
     speed_of_sound_m_s: float = SPEED_OF_SOUND_M_S
     mic_indices: tuple[int, ...] | None = None
     deglitch_enabled: bool = True
@@ -63,6 +62,7 @@ class MVDRBeamformerConfig:
     deglitch_loudness_ratio: float = 8.0
     deglitch_diff_ratio: float = 12.0
     deglitch_window_samples: int = 64
+    incremental_step_samples: int | None = None
 
 
 def deglitch_multichannel(
@@ -87,25 +87,33 @@ def deglitch_multichannel(
         y = repaired[ch_idx]
         diff = np.abs(np.diff(y))
         if window_samples > 0:
-            loudness_size = 2 * window_samples + 3
-            diff_size = 2 * window_samples + 1
-            loudness = median_filter(
-                np.abs(y),
-                size=loudness_size,
-                mode="nearest",
+            abs_y = np.abs(y)
+            abs_prefix = _prefix_sum(abs_y)
+            diff_prefix = _prefix_sum(diff)
+            loud_left = _trailing_mean_inclusive(
+                abs_prefix,
+                radius=window_samples,
+                output_count=diff.size,
             )
-            local_loudness = (
-                np.minimum(loudness[:-1], loudness[1:])
-                + 1e-8
+            loud_right = _following_mean(
+                abs_prefix,
+                radius=window_samples,
+                output_count=diff.size,
+                offset=1,
             )
-            local_diff_scale = (
-                median_filter(
-                    diff,
-                    size=diff_size,
-                    mode="nearest",
-                )
-                + 1e-8
+            diff_left = _preceding_mean(
+                diff_prefix,
+                radius=window_samples,
+                output_count=diff.size,
             )
+            diff_right = _following_mean(
+                diff_prefix,
+                radius=window_samples,
+                output_count=diff.size,
+                offset=1,
+            )
+            local_loudness = np.minimum(loud_left, loud_right) + 1e-8
+            local_diff_scale = np.maximum(diff_left, diff_right) + 1e-8
         else:
             local_loudness = np.maximum(np.abs(y[1:]), 1e-8)
             local_diff_scale = diff + 1e-8
@@ -136,6 +144,90 @@ def deglitch_multichannel(
                 dtype=np.float32,
             )
     return repaired
+
+
+def _prefix_sum(values: np.ndarray) -> np.ndarray:
+    prefix = np.empty(values.size + 1, dtype=np.float32)
+    prefix[0] = 0.0
+    np.cumsum(values, dtype=np.float32, out=prefix[1:])
+    return prefix
+
+
+def _trailing_mean_inclusive(
+    prefix: np.ndarray,
+    *,
+    radius: int,
+    output_count: int,
+) -> np.ndarray:
+    values_size = prefix.size - 1
+    output_count = max(0, min(int(output_count), values_size))
+    out = np.empty(output_count, dtype=np.float32)
+    if output_count == 0:
+        return out
+    radius = max(1, int(radius))
+    partial = min(radius - 1, output_count)
+    if partial > 0:
+        counts = np.arange(1, partial + 1, dtype=np.float32)
+        out[:partial] = prefix[1 : partial + 1] / counts
+    if output_count >= radius:
+        out[radius - 1 :] = (
+            prefix[radius : output_count + 1]
+            - prefix[: output_count + 1 - radius]
+        ) / float(radius)
+    return out
+
+
+def _preceding_mean(
+    prefix: np.ndarray,
+    *,
+    radius: int,
+    output_count: int,
+) -> np.ndarray:
+    values_size = prefix.size - 1
+    output_count = max(0, min(int(output_count), values_size))
+    out = np.empty(output_count, dtype=np.float32)
+    if output_count == 0:
+        return out
+    radius = max(1, int(radius))
+    out[0] = 0.0
+    partial = min(radius, output_count - 1)
+    if partial > 0:
+        counts = np.arange(1, partial + 1, dtype=np.float32)
+        out[1 : partial + 1] = prefix[1 : partial + 1] / counts
+    if output_count > radius:
+        out[radius:] = (
+            prefix[radius:output_count]
+            - prefix[: output_count - radius]
+        ) / float(radius)
+    return out
+
+
+def _following_mean(
+    prefix: np.ndarray,
+    *,
+    radius: int,
+    output_count: int,
+    offset: int,
+) -> np.ndarray:
+    values_size = prefix.size - 1
+    output_count = max(0, int(output_count))
+    out = np.empty(output_count, dtype=np.float32)
+    if output_count == 0:
+        return out
+    radius = max(1, int(radius))
+    offset = max(0, int(offset))
+    full_count = max(0, min(output_count, values_size - offset - radius + 1))
+    if full_count > 0:
+        out[:full_count] = (
+            prefix[offset + radius : offset + radius + full_count]
+            - prefix[offset : offset + full_count]
+        ) / float(radius)
+    if full_count < output_count:
+        starts = np.arange(full_count + offset, output_count + offset)
+        starts = np.minimum(starts, values_size)
+        counts = np.maximum(values_size - starts, 1).astype(np.float32)
+        out[full_count:] = (prefix[values_size] - prefix[starts]) / counts
+    return out
 
 
 def build_beam_grid(cfg: MVDRBeamformerConfig) -> tuple[BeamDirection, ...]:
@@ -170,9 +262,9 @@ def build_beam_grid(cfg: MVDRBeamformerConfig) -> tuple[BeamDirection, ...]:
 
 
 def direction_unit_vector(azimuth_deg: float, elevation_deg: float) -> np.ndarray:
-    az = np.deg2rad(float(azimuth_deg))
+    az = np.deg2rad(90.0 - float(azimuth_deg))
     el = np.deg2rad(float(elevation_deg))
-    return np.array(
+    vector = np.array(
         [
             np.cos(el) * np.cos(az),
             np.cos(el) * np.sin(az),
@@ -180,6 +272,10 @@ def direction_unit_vector(azimuth_deg: float, elevation_deg: float) -> np.ndarra
         ],
         dtype=np.float64,
     )
+    norm = float(np.linalg.norm(vector))
+    if norm == 0.0:
+        raise ValueError("direction vector has zero norm")
+    return vector / norm
 
 
 class MVDRBeamformer:
@@ -195,6 +291,13 @@ class MVDRBeamformer:
         self._cov_n_fft: int | None = None
         self._cov_hop: int | None = None
         self._cov_sample_rate: int | None = None
+        self._beam_weights: np.ndarray | None = None
+        self._stft_cache_channels: np.ndarray | None = None
+        self._stft_cache_spec: np.ndarray | None = None
+        self._stft_cache_key: tuple[int, tuple[int, ...], int, int] | None = None
+        self._stft_cache_hits = 0
+        self._stft_cache_misses = 0
+        self._stft_last_reused_frames = 0
 
     @property
     def has_covariance(self) -> bool:
@@ -214,7 +317,7 @@ class MVDRBeamformer:
 
         n_fft = self._n_fft_for_length(channels.shape[-1])
         hop = self._hop_for_n_fft(n_fft)
-        _, freqs, stft = signal.stft(
+        freqs, _, stft = signal.stft(
             channels,
             fs=int(sample_rate),
             window="hann",
@@ -224,13 +327,17 @@ class MVDRBeamformer:
             padded=True,
             axis=-1,
         )
-        self._cov_inv = self._inverse_covariances(stft)
+        cov_inv = self._inverse_covariances(stft)
+        beam_weights = self._weights_for_beams(cov_inv, freqs, positions)
+        self._cov_inv = cov_inv
         self._cov_freqs = freqs
         self._cov_positions = positions
         self._cov_mic_indices = mic_indices
         self._cov_n_fft = n_fft
         self._cov_hop = hop
         self._cov_sample_rate = int(sample_rate)
+        self._beam_weights = beam_weights
+        self._reset_stft_cache()
         return True
 
     def beamform(
@@ -261,6 +368,7 @@ class MVDRBeamformer:
             or self._cov_mic_indices is None
             or self._cov_n_fft is None
             or self._cov_hop is None
+            or self._beam_weights is None
         ):
             return []
         if self._cov_sample_rate != int(sample_rate) or self._cov_mic_indices != mic_indices:
@@ -272,21 +380,21 @@ class MVDRBeamformer:
             or self._cov_mic_indices is None
             or self._cov_n_fft is None
             or self._cov_hop is None
+            or self._beam_weights is None
         ):
             return []
 
-        channels = self._prepare_channels(audio, self._cov_mic_indices)
+        raw_channels = self._select_channels(audio, self._cov_mic_indices)
+        channels = self._repair_channels(raw_channels)
         n_fft = self._cov_n_fft
         hop = self._cov_hop
-        _, freqs, stft = signal.stft(
+        freqs, stft = self._stft_channels_cached(
             channels,
-            fs=int(sample_rate),
-            window="hann",
-            nperseg=n_fft,
-            noverlap=n_fft - hop,
-            boundary="zeros",
-            padded=True,
-            axis=-1,
+            cache_channels=channels,
+            sample_rate=int(sample_rate),
+            mic_indices=self._cov_mic_indices,
+            n_fft=n_fft,
+            hop=hop,
         )
         if len(freqs) != len(self._cov_freqs):
             self.update_covariance(audio, sample_rate)
@@ -295,44 +403,49 @@ class MVDRBeamformer:
                 or self._cov_freqs is None
                 or self._cov_n_fft is None
                 or self._cov_hop is None
+                or self._beam_weights is None
             ):
                 return []
             n_fft = self._cov_n_fft
             hop = self._cov_hop
-            _, freqs, stft = signal.stft(
+            freqs, stft = self._stft_channels_cached(
                 channels,
-                fs=int(sample_rate),
-                window="hann",
-                nperseg=n_fft,
-                noverlap=n_fft - hop,
-                boundary="zeros",
-                padded=True,
-                axis=-1,
+                cache_channels=channels,
+                sample_rate=int(sample_rate),
+                mic_indices=self._cov_mic_indices,
+                n_fft=n_fft,
+                hop=hop,
             )
             if len(freqs) != len(self._cov_freqs):
                 return []
 
+        beam_stft = np.einsum(
+            "bfm,mft->bft",
+            np.conj(self._beam_weights),
+            stft,
+            optimize=True,
+        )
+        _, beam_audio_by_beam = signal.istft(
+            beam_stft,
+            fs=int(sample_rate),
+            window="hann",
+            nperseg=n_fft,
+            noverlap=n_fft - hop,
+            input_onesided=True,
+        )
+        beam_audio_by_beam = np.asarray(
+            beam_audio_by_beam[:, : audio.shape[0]],
+            dtype=np.float32,
+        )
+        if beam_audio_by_beam.shape[-1] < audio.shape[0]:
+            pad_width = (
+                (0, 0),
+                (0, audio.shape[0] - beam_audio_by_beam.shape[-1]),
+            )
+            beam_audio_by_beam = np.pad(beam_audio_by_beam, pad_width)
+
         outputs: list[dict] = []
-        for beam in self.beams:
-            weights = self._weights_for_beam(
-                self._cov_inv,
-                self._cov_freqs,
-                self._cov_positions,
-                direction_unit_vector(beam.azimuth_deg, beam.elevation_deg),
-            )
-            beam_stft = np.einsum("fm,mft->ft", np.conj(weights), stft)
-            _, beam_audio = signal.istft(
-                beam_stft,
-                fs=int(sample_rate),
-                window="hann",
-                nperseg=n_fft,
-                noverlap=n_fft - hop,
-                input_onesided=True,
-            )
-            beam_audio = np.asarray(beam_audio[: audio.shape[0]], dtype=np.float32)
-            if beam_audio.shape[0] < audio.shape[0]:
-                pad_width = (0, audio.shape[0] - beam_audio.shape[0])
-                beam_audio = np.pad(beam_audio, pad_width)
+        for beam, beam_audio in zip(self.beams, beam_audio_by_beam, strict=True):
             outputs.append(
                 {
                     "index": beam.index,
@@ -350,8 +463,20 @@ class MVDRBeamformer:
         audio: np.ndarray,
         mic_indices: tuple[int, ...],
     ) -> np.ndarray:
+        return self._repair_channels(self._select_channels(audio, mic_indices))
+
+    def _select_channels(
+        self,
+        audio: np.ndarray,
+        mic_indices: tuple[int, ...],
+    ) -> np.ndarray:
         channels = audio[:, list(mic_indices)].T.astype(np.float64, copy=False)
-        channels = np.nan_to_num(channels, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.nan_to_num(channels, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _repair_channels(
+        self,
+        channels: np.ndarray,
+    ) -> np.ndarray:
         if self.cfg.deglitch_enabled:
             channels = deglitch_multichannel(
                 channels,
@@ -397,9 +522,213 @@ class MVDRBeamformer:
         positions_m: np.ndarray,
         direction: np.ndarray,
     ) -> np.ndarray:
-        delays = positions_m @ direction / float(self.cfg.speed_of_sound_m_s)
+        delays = -(positions_m @ direction) / float(self.cfg.speed_of_sound_m_s)
         steering = np.exp(-2j * np.pi * freqs[:, np.newaxis] * delays[np.newaxis, :])
         numerator = np.einsum("fmn,fn->fm", cov_inv, steering)
         denominator = np.einsum("fm,fm->f", np.conj(steering), numerator)
         denominator = np.where(np.abs(denominator) < 1e-12, 1e-12, denominator)
         return numerator / denominator[:, np.newaxis]
+
+    def _reset_stft_cache(self) -> None:
+        self._stft_cache_channels = None
+        self._stft_cache_spec = None
+        self._stft_cache_key = None
+        self._stft_last_reused_frames = 0
+
+    def _stft_channels_cached(
+        self,
+        channels: np.ndarray,
+        *,
+        cache_channels: np.ndarray,
+        sample_rate: int,
+        mic_indices: tuple[int, ...],
+        n_fft: int,
+        hop: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        key = (int(sample_rate), tuple(mic_indices), int(n_fft), int(hop))
+        step = self._matching_stft_cache_step(cache_channels, key)
+        cached = self._stft_cache_spec
+        if step is not None and cached is not None:
+            freqs, spec = self._stft_channels_incremental(
+                channels,
+                cached,
+                sample_rate=sample_rate,
+                n_fft=n_fft,
+                hop=hop,
+                step=step,
+            )
+            self._store_stft_cache(cache_channels, spec, key)
+            self._stft_cache_hits += 1
+            return freqs, spec
+
+        freqs, _, spec = signal.stft(
+            channels,
+            fs=int(sample_rate),
+            window="hann",
+            nperseg=n_fft,
+            noverlap=n_fft - hop,
+            boundary="zeros",
+            padded=True,
+            axis=-1,
+        )
+        self._store_stft_cache(cache_channels, spec, key)
+        self._stft_cache_misses += 1
+        self._stft_last_reused_frames = 0
+        return freqs, spec
+
+    def _matching_stft_cache_step(
+        self,
+        channels: np.ndarray,
+        key: tuple[int, tuple[int, ...], int, int],
+    ) -> int | None:
+        cached_channels = self._stft_cache_channels
+        cached_spec = self._stft_cache_spec
+        if (
+            cached_channels is None
+            or cached_spec is None
+            or self._stft_cache_key != key
+            or cached_channels.shape != channels.shape
+        ):
+            return None
+
+        expected_steps: list[int] = []
+        if self.cfg.incremental_step_samples is not None:
+            expected_steps.append(int(self.cfg.incremental_step_samples))
+        expected_steps.append(0)
+
+        hop = key[3]
+        frame_count = cached_spec.shape[-1]
+        for step in expected_steps:
+            if step < 0 or step >= channels.shape[-1]:
+                continue
+            if step % hop != 0:
+                continue
+            if step // hop >= frame_count:
+                continue
+            if step == 0:
+                if np.array_equal(cached_channels, channels):
+                    return 0
+                continue
+            if np.array_equal(cached_channels[:, step:], channels[:, :-step]):
+                return step
+        return None
+
+    def _store_stft_cache(
+        self,
+        channels: np.ndarray,
+        spec: np.ndarray,
+        key: tuple[int, tuple[int, ...], int, int],
+    ) -> None:
+        self._stft_cache_channels = np.array(channels, dtype=np.float64, copy=True)
+        self._stft_cache_spec = np.array(spec, dtype=np.complex128, copy=True)
+        self._stft_cache_key = key
+
+    def _stft_channels_incremental(
+        self,
+        channels: np.ndarray,
+        cached: np.ndarray,
+        *,
+        sample_rate: int,
+        n_fft: int,
+        hop: int,
+        step: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        frame_count = cached.shape[-1]
+        if step == 0:
+            self._stft_last_reused_frames = frame_count
+            freqs = np.fft.rfftfreq(n_fft, 1.0 / float(sample_rate))
+            return freqs, np.array(cached, dtype=np.complex128, copy=True)
+
+        frame_shift = step // hop
+        pad = n_fft // 2
+        left_edge_frames = (pad + hop - 1) // hop
+        right_safe_last = (channels.shape[-1] - pad) // hop
+        reuse_start = min(left_edge_frames, frame_count)
+        reuse_stop = min(frame_count, right_safe_last - frame_shift + 1)
+        reused_frames = max(0, reuse_stop - reuse_start)
+
+        spec = np.empty_like(cached)
+        if reuse_start > 0:
+            spec[:, :, :reuse_start] = self._stft_frame_range(
+                channels,
+                sample_rate=sample_rate,
+                n_fft=n_fft,
+                hop=hop,
+                frame_start=0,
+                frame_count=reuse_start,
+            )[1]
+        if reused_frames > 0:
+            spec[:, :, reuse_start:reuse_stop] = cached[
+                :, :, reuse_start + frame_shift : reuse_stop + frame_shift
+            ]
+        if reuse_stop < frame_count:
+            spec[:, :, reuse_stop:] = self._stft_frame_range(
+                channels,
+                sample_rate=sample_rate,
+                n_fft=n_fft,
+                hop=hop,
+                frame_start=reuse_stop,
+                frame_count=frame_count - reuse_stop,
+            )[1]
+
+        self._stft_last_reused_frames = reused_frames
+        freqs = np.fft.rfftfreq(n_fft, 1.0 / float(sample_rate))
+        return freqs, spec
+
+    def _stft_frame_range(
+        self,
+        channels: np.ndarray,
+        *,
+        sample_rate: int,
+        n_fft: int,
+        hop: int,
+        frame_start: int,
+        frame_count: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if frame_count <= 0:
+            freqs = np.fft.rfftfreq(n_fft, 1.0 / float(sample_rate))
+            return freqs, np.empty((channels.shape[0], n_fft // 2 + 1, 0), dtype=np.complex128)
+
+        pad = n_fft // 2
+        padded = np.pad(channels, ((0, 0), (pad, pad)), mode="constant")
+        needed = n_fft + (frame_start + frame_count - 1) * hop
+        if padded.shape[-1] < needed:
+            padded = np.pad(padded, ((0, 0), (0, needed - padded.shape[-1])), mode="constant")
+        offsets = (frame_start + np.arange(frame_count, dtype=np.int64)) * hop
+        sample_idx = offsets[:, np.newaxis] + np.arange(n_fft, dtype=np.int64)
+        frames = padded[:, sample_idx]
+        window = signal.get_window("hann", n_fft, fftbins=True).astype(np.float64)
+        spectrum = np.fft.rfft(
+            frames * window[np.newaxis, np.newaxis, :],
+            n=n_fft,
+            axis=-1,
+        ) / max(float(window.sum()), 1e-12)
+        freqs = np.fft.rfftfreq(n_fft, 1.0 / float(sample_rate))
+        return freqs, np.moveaxis(spectrum, 1, -1).astype(np.complex128, copy=False)
+
+    def _weights_for_beams(
+        self,
+        cov_inv: np.ndarray,
+        freqs: np.ndarray,
+        positions_m: np.ndarray,
+    ) -> np.ndarray:
+        directions = np.stack(
+            [
+                direction_unit_vector(beam.azimuth_deg, beam.elevation_deg)
+                for beam in self.beams
+            ],
+            axis=0,
+        )
+        delays = -(directions @ positions_m.T) / float(self.cfg.speed_of_sound_m_s)
+        steering = np.exp(
+            -2j * np.pi * freqs[np.newaxis, :, np.newaxis] * delays[:, np.newaxis, :]
+        )
+        numerator = np.einsum("fmn,bfn->bfm", cov_inv, steering, optimize=True)
+        denominator = np.einsum(
+            "bfm,bfm->bf",
+            np.conj(steering),
+            numerator,
+            optimize=True,
+        )
+        denominator = np.where(np.abs(denominator) < 1e-12, 1e-12, denominator)
+        return numerator / denominator[:, :, np.newaxis]

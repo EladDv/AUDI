@@ -47,6 +47,8 @@ PI_USER="pi"
 PI_PASSWORD="${AUDI_PI_PASSWORD:-}"
 MODEL_PATH=""
 KEEP_TEMP=false
+REMOTE_STAGING=""
+USER_REQUESTED_NO_REBOOT=false
 PASSTHROUGH=()
 
 while [[ $# -gt 0 ]]; do
@@ -67,12 +69,21 @@ while [[ $# -gt 0 ]]; do
             MODEL_PATH="${2:-}"
             shift 2
             ;;
-        --audio-channels|--channels|--detector-channels|--inference-channels|--staging-dir)
+        --staging-dir)
+            REMOTE_STAGING="${2:-}"
             PASSTHROUGH+=("$1" "${2:-}")
             shift 2
             ;;
-        --keep-radios|--no-verify|--no-reboot)
+        --audio-channels|--channels|--detector-channels|--inference-channels)
+            PASSTHROUGH+=("$1" "${2:-}")
+            shift 2
+            ;;
+        --keep-radios|--no-verify)
             PASSTHROUGH+=("$1")
+            shift
+            ;;
+        --no-reboot)
+            USER_REQUESTED_NO_REBOOT=true
             shift
             ;;
         --keep-temp)
@@ -100,6 +111,10 @@ need_cmd python3
 need_cmd rsync
 need_cmd ssh
 need_cmd sshpass
+
+if [[ -z "$REMOTE_STAGING" ]]; then
+    REMOTE_STAGING="/home/${PI_USER}/audi-app-deploy"
+fi
 
 if [[ -z "$MODEL_PATH" ]]; then
     MODEL_PATH="$(
@@ -187,6 +202,7 @@ mv "$TMP_DIR/secure/${model_name}.enc" "$TMP_DIR/secure/model.tflite.enc"
 mv "$TMP_DIR/secure/${model_name}.enc.json" "$TMP_DIR/secure/model.tflite.enc.json"
 
 find "$TMP_DIR/src" -type f -name '*.py' ! -name 'secure_payload.py' -delete
+find "$TMP_DIR/scripts" -type f -name '*.py' -delete
 rm -rf "$TMP_DIR/webui"
 mkdir -p "$TMP_DIR/webui"
 ok "Plaintext app source and models excluded; encrypted payloads prepared"
@@ -195,4 +211,24 @@ info "Running secure deploy"
 AUDI_PI_PASSWORD="$PI_PASSWORD" "$TMP_DIR/scripts/deploy-pi.sh" \
     --host "$PI_HOST" \
     --user "$PI_USER" \
+    --no-reboot \
     "${PASSTHROUGH[@]}"
+
+info "Removing plaintext deployment helpers from installed SD-card filesystem"
+cleanup_cmd="
+set -euo pipefail
+rm -rf /opt/AUDI/scripts $(printf '%q' "$REMOTE_STAGING")
+find /opt/AUDI/src -type f -name '*.py' ! -name 'secure_payload.py' -delete
+rm -rf /opt/AUDI/webui
+mkdir -p /opt/AUDI/webui
+"
+printf '%s\n' "$PI_PASSWORD" | SSHPASS="$PI_PASSWORD" sshpass -e ssh "${SSH_OPTS[@]}" "${PI_USER}@${PI_HOST}" \
+    "sudo -S -p '' bash -lc $(printf '%q' "$cleanup_cmd")"
+ok "Installed filesystem pruned"
+
+if [[ "$USER_REQUESTED_NO_REBOOT" != "true" ]]; then
+    info "Rebooting Pi to finish deployment..."
+    printf '%s\n' "$PI_PASSWORD" | SSHPASS="$PI_PASSWORD" sshpass -e ssh "${SSH_OPTS[@]}" "${PI_USER}@${PI_HOST}" \
+        "sudo -S -p '' bash -lc 'nohup sh -c '\\''sleep 2; /sbin/reboot'\\'' >/dev/null 2>&1 &'"
+    ok "Reboot requested"
+fi
