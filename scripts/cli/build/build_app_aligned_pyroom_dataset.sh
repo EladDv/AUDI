@@ -11,6 +11,21 @@ output_dir="$2"
 num_workers="${3:-4}"
 
 cache_dir="data/pyroom_mvdr_cache_app_2048_512_deglitch_v2"
+resume="${AUDIO_PYROOM_RESUME:-1}"
+
+cleanup_output_scratch() {
+  local parent name
+  parent="$(dirname "$output_dir")"
+  name="${output_dir##*/}"
+  rm -rf \
+    "$parent/.${name}.tmp" \
+    "$parent/.${name}.train.shards" \
+    "$parent/.${name}.validation.shards" \
+    "$parent/.${name}.test.shards" \
+    "${output_dir}.tmp" \
+    "${output_dir}.cache"
+  find "$parent" -maxdepth 1 -name ".${name}.*.shards*.cache" -exec rm -rf {} +
+}
 common_args=(
   --noise-path data/20260603_uma16channel_lebanon_false_hunt
   --drone-path data/HF_dataset_v2_drone
@@ -56,11 +71,15 @@ case "$beamformer" in
     ;;
 esac
 
-rm -rf "$output_dir" "${output_dir}".tmp "${output_dir}".cache
-rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.tmp"
-rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.train.shards"
-rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.validation.shards"
-rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.test.shards"
+if [[ "$resume" == "0" ]]; then
+  rm -rf "$output_dir" "${output_dir}".tmp "${output_dir}".cache
+  rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.tmp"
+  rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.train.shards"
+  rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.validation.shards"
+  rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.test.shards"
+else
+  rm -rf "$(dirname "$output_dir")/.${output_dir##*/}.tmp"
+fi
 
 if [[ "$beamformer" == "mvdr" ]]; then
   uv run audi-data pyroom-mvdr-cache \
@@ -113,3 +132,5 @@ print("dataset", path)
 for split in dd:
     print(split, len(dd[split]), dd[split].features)
 PY
+
+cleanup_output_scratch

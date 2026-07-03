@@ -324,6 +324,26 @@ def _save_split_dataset(
     manifest_path.write_text(json.dumps(existing_manifest, indent=2, sort_keys=True))
 
 
+def _matching_existing_split(
+    output_dir: Path,
+    *,
+    split: str,
+    manifest: dict,
+) -> bool:
+    manifest_path = output_dir / "pyroom_manifest.json"
+    if not (output_dir / "dataset_dict.json").exists() or not manifest_path.exists():
+        return False
+    try:
+        existing_manifest = json.loads(manifest_path.read_text())
+        split_manifest = existing_manifest.get("splits", {}).get(split)
+        if split_manifest != manifest:
+            return False
+        loaded = load_from_disk(str(output_dir))
+        return split in loaded and len(loaded[split]) == manifest["num_examples"]
+    except Exception:
+        return False
+
+
 def _worker_counts(num_examples: int, num_workers: int) -> list[int]:
     workers = min(max(1, num_workers), num_examples)
     base = num_examples // workers
@@ -333,6 +353,30 @@ def _worker_counts(num_examples: int, num_workers: int) -> list[int]:
 
 def _shard_root(args: argparse.Namespace) -> Path:
     return args.output_dir.with_name(f".{args.output_dir.name}.{args.split}.shards")
+
+
+def _shard_cache_dir(shard_dir: Path) -> Path:
+    return shard_dir.with_suffix(".cache")
+
+
+def _valid_shard_info(shard_dir: Path) -> tuple[str, int] | None:
+    if not shard_dir.exists():
+        return None
+    try:
+        dataset = load_from_disk(str(shard_dir))
+    except Exception:
+        return None
+    row_count = len(dataset)
+    if row_count <= 0:
+        return None
+    return str(shard_dir), row_count
+
+
+def _shard_index(shard_dir: Path) -> int:
+    try:
+        return int(shard_dir.name.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return -1
 
 
 def _make_pyroom_dataset(args: argparse.Namespace, *, length: int) -> PyRoomDataset:
@@ -392,14 +436,21 @@ def _write_dataset_shard(
 
     if shard_dir.exists():
         shutil.rmtree(shard_dir)
+    cache_dir = _shard_cache_dir(shard_dir)
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
     shard_dir.parent.mkdir(parents=True, exist_ok=True)
-    dataset = Dataset.from_generator(
-        record_iter,
-        features=_features(mix_cfg.sample_rate),
-        keep_in_memory=False,
-        cache_dir=str(shard_dir.with_suffix(".cache")),
-    )
-    dataset.save_to_disk(str(shard_dir))
+    try:
+        dataset = Dataset.from_generator(
+            record_iter,
+            features=_features(mix_cfg.sample_rate),
+            keep_in_memory=False,
+            cache_dir=str(cache_dir),
+        )
+        dataset.save_to_disk(str(shard_dir))
+    finally:
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
     return str(shard_dir)
 
 
@@ -429,42 +480,91 @@ def _build_serial_dataset(args: argparse.Namespace) -> Dataset:
 
 
 def _build_parallel_dataset(args: argparse.Namespace) -> Dataset:
-    counts = _worker_counts(args.num_examples, args.num_workers)
     shard_root = _shard_root(args)
-    if shard_root.exists():
-        shutil.rmtree(shard_root)
     shard_root.mkdir(parents=True, exist_ok=True)
 
-    shard_paths: list[str | None] = [None] * len(counts)
+    shard_paths: list[str] = []
+    existing_rows = 0
+    max_existing_idx = -1
+    for shard_dir in sorted(shard_root.glob("shard_*"), key=_shard_index):
+        cache_dir = _shard_cache_dir(shard_dir)
+        info = _valid_shard_info(shard_dir)
+        if info is None:
+            shutil.rmtree(shard_dir)
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            continue
+        path, row_count = info
+        shard_paths.append(path)
+        existing_rows += row_count
+        max_existing_idx = max(max_existing_idx, _shard_index(shard_dir))
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+
+    if existing_rows > args.num_examples:
+        raise SystemExit(
+            f"{shard_root} contains {existing_rows} rows, more than requested "
+            f"{args.num_examples}. Remove the shard directory to rebuild."
+        )
+
+    remaining_rows = args.num_examples - existing_rows
+    counts = _worker_counts(remaining_rows, args.num_workers) if remaining_rows else []
+    missing: list[tuple[int, int, Path]] = []
+    for offset, count in enumerate(counts, start=1):
+        idx = max_existing_idx + offset
+        shard_dir = shard_root / f"shard_{idx:03d}"
+        cache_dir = _shard_cache_dir(shard_dir)
+        if shard_dir.exists():
+            shutil.rmtree(shard_dir)
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+        missing.append((idx, count, shard_dir))
+
+    if missing:
+        print(
+            f"reusing {len(shard_paths)} shards ({existing_rows} rows); "
+            f"building {remaining_rows} rows across {len(missing)} shards in {shard_root}",
+            flush=True,
+        )
+    else:
+        print(
+            f"reusing {len(shard_paths)} complete shards "
+            f"({existing_rows} rows) in {shard_root}",
+            flush=True,
+        )
+
     try:
-        with ProcessPoolExecutor(max_workers=len(counts)) as executor:
+        with ProcessPoolExecutor(max_workers=max(1, len(missing))) as executor:
+            new_shard_paths: dict[int, str] = {}
             futures = {
                 executor.submit(
                     _write_dataset_shard,
                     args,
                     shard_idx=idx,
                     num_rows=count,
-                    shard_dir=shard_root / f"shard_{idx:03d}",
+                    shard_dir=shard_dir,
                 ): idx
-                for idx, count in enumerate(counts)
+                for idx, count, shard_dir in missing
             }
-            try:
-                from tqdm.auto import tqdm
+            if futures:
+                try:
+                    from tqdm.auto import tqdm
 
-                future_iter = tqdm(
-                    as_completed(futures),
-                    total=len(futures),
-                    desc=f"pyroom {args.beamformer} {args.split} shards",
-                    unit="shard",
-                )
-            except Exception:
-                future_iter = as_completed(futures)
+                    future_iter = tqdm(
+                        as_completed(futures),
+                        total=len(futures),
+                        desc=f"pyroom {args.beamformer} {args.split} shards",
+                        unit="shard",
+                    )
+                except Exception:
+                    future_iter = as_completed(futures)
 
-            for future in future_iter:
-                idx = futures[future]
-                shard_paths[idx] = future.result()
+                for future in future_iter:
+                    idx = futures[future]
+                    new_shard_paths[idx] = future.result()
+            shard_paths.extend(path for _, path in sorted(new_shard_paths.items()))
 
-        loaded = [load_from_disk(path) for path in shard_paths if path is not None]
+        loaded = [load_from_disk(path) for path in shard_paths]
         return concatenate_datasets(loaded)
     finally:
         for cache_dir in shard_root.parent.glob(f"{shard_root.name}*.cache"):
@@ -496,6 +596,12 @@ def run() -> int:
         "pyroom_config_hash": pyroom_config_hash(pyroom_cfg),
         "pyroom_config": pyroom_config_payload(pyroom_cfg),
     }
+    if _matching_existing_split(args.output_dir, split=args.split, manifest=manifest):
+        print(
+            f"existing HF dataset split {args.split!r} already matches "
+            f"{args.output_dir} n={args.num_examples}"
+        )
+        return 0
     if args.num_workers == 1:
         dataset = _build_serial_dataset(args)
     else:
